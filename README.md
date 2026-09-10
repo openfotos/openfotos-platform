@@ -1,7 +1,7 @@
 # OpenFotos
 
 OpenFotos is a supervised pilot for private wedding photo delivery and face-based photo
-discovery. A photographer processes and uploads edited JPEGs with a desktop application;
+discovery. A photographer and invited upload contributors process edited JPEGs with desktop apps;
 customers browse a PIN-protected web gallery and can submit an ephemeral selfie to find likely
 photos.
 
@@ -9,7 +9,9 @@ The pilot deliberately targets one photographer, one reception, less than 20 GB 
 and a ten-day delivery window. The complete product and architecture decisions are in the
 [product and technical plan](OpenFotos_Markdown/OpenFotos_Product_and_Technical_Plan.md). The
 [pilot access decision](docs/adr/0002-pilot-accounts-tenancy-and-event-access.md) records the exact
-Session 2 authorization and PIN tradeoffs.
+Session 2 authorization and PIN tradeoffs. The
+[multi-uploader decision](docs/adr/0003-multi-uploader-desktop-ingestion.md) defines how five to ten
+desktop installations safely contribute to the same event.
 
 ## Repository map
 
@@ -37,19 +39,28 @@ scripts/         Repeatable developer checks
 Install [uv](https://docs.astral.sh/uv/), then run:
 
 ```bash
-uv sync --extra server
+uv sync --extra server --extra desktop
 uv run python apps/server/manage.py migrate
 uv run python apps/server/manage.py createsuperuser
 uv run python apps/server/manage.py check
 uv run python apps/server/manage.py runserver
 ```
 
-The health endpoint is `http://127.0.0.1:8000/health/`. Start the desktop shell with the desktop
-extra installed:
+The health endpoint is `http://127.0.0.1:8000/health/`. Session 3's normal desktop mode exposes the
+real lead and uploader-enrollment screens, but intentionally does not fake the Session 4 network
+API. Start the functional local inventory with an explicitly synthetic event:
 
 ```bash
-uv sync --extra desktop
-uv run python -m openfotos_desktop
+uv run python -m openfotos_desktop --demo
+```
+
+The demo accepts recursive folders, one or multiple files, and mixed selections. It validates and
+checkpoints JPEGs locally; it does not transfer anything to the cloud. To collect a redacted timing
+report on representative, consented local data without retaining a benchmark checkpoint:
+
+```bash
+uv run python -m openfotos_desktop.benchmark_inventory /path/to/representative/folder \
+  --output openfotos-inventory-benchmark.json
 ```
 
 For the Session 2 browser flow, open `http://localhost:8000/admin/` and provision records in this

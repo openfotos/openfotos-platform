@@ -23,6 +23,7 @@ server = [
 desktop = [
   "httpx>=0.28,<1",
   "keyring>=25.6,<26",
+  "pillow>=11,<13",
   "pyside6>=6.8,<7",
 ]
 vision = [

@@ -55,27 +55,61 @@ event, and host identifiers are denied.
 
 ## Session 3: Desktop discovery and durable local state
 
+**Status (2026-09-10):** Complete. ADR 0003 makes five-to-ten-device concurrent contribution a
+required event boundary. Each device owns durable event-scoped contribution batches; the server will
+own aggregate quota, intake closure, and final manifest reconciliation in Session 4.
+
 **Goal:** Reliably inventory a client folder before any network transfer.
 
-**Work:** Build login/event-selection scaffolding, recursive JPEG discovery, extension/MIME/decode
-validation, size limits, checksums, the per-event SQLite checkpoint, and folder/validation/progress
-screens. Keep processing and upload services behind interfaces.
+**Work:** Build honest lead/invitation and event-selection scaffolding, recursive folder plus
+single/multiple-file discovery, extension/content/decode validation, size limits, checksums, the
+per-installation event/batch SQLite checkpoint, and folder/validation/progress screens. Keep
+processing and upload services behind interfaces. Use explicit synthetic demo mode until Session 4
+implements network identity.
 
 **Done when:** The app reports exact accepted/rejected counts and bytes, survives a forced exit,
-detects changed files, and resumes without rescanning completed unchanged assets.
+detects changed files, and resumes without decoding or hashing completed unchanged assets. Ten
+independent device checkpoints targeting one event must create distinct batch/asset identities.
+
+**Handoff:**
+
+1. `python -m openfotos_desktop --demo` now opens a functional synthetic event. A user can add
+   recursive folders, one or multiple files, mix selection types, pause/resume background scans,
+   review exact accepted/rejected counts and bytes, approve a frozen contribution, export redacted
+   diagnostics, and explicitly remove local event metadata without deleting source photographs.
+2. The desktop now has a versioned WAL SQLite checkpoint, stable scan/batch states and reason codes,
+   full JPEG decode plus 100 MiB/120 MP limits, SHA-256, changed-file review, verified source-root
+   relocation, per-user data paths, a single-instance lock, explicit network/processing/upload ports,
+   and a redacted representative-data benchmark command. Pillow was added to desktop/dev
+   dependencies and CI now installs the desktop extra.
+3. `./scripts/check.sh` passes with 44 tests, including a real subprocess termination and WAL
+   recovery, ten independent installation stores, duplicate-byte policy, link exclusion, profile and
+   capacity failures, diagnostic privacy, Qt offscreen behavior, all Session 2 tests, and Django's
+   system check. The demo window also remained healthy through a headless launch smoke test.
+4. No authentication, invitation redemption, device token, cloud reservation, processing, or upload
+   occurs in Session 3. Native Windows/macOS smoke/package runs and a real 10,000-photo hardware
+   benchmark remain release gates. A timestamp-preserving content mutation may use the fast local
+   metadata path; Session 4 must checksum bytes while transferring and let the server reject any
+   mismatch. Network shares and cloud placeholder folders remain unsupported.
+5. Session 4's first failing acceptance test should enroll ten simulated device sessions into one
+   event, submit concurrent immutable contribution reservations, prove the transactionally reserved
+   byte total never exceeds the event allowance, deny cross-device batch details, and permit only the
+   lead to close intake and finalize after all batches are terminal or explicitly excluded.
 
 ## Session 4: Direct upload and manifest reconciliation
 
 **Goal:** Move originals and metadata safely from desktop to private R2.
 
-**Work:** Implement API tokens, event-scoped upload sessions, server-owned object keys, asset
-reservation, four-way resumable transfers, credential refresh, retries, idempotency records,
-per-variant completion, and final manifest validation. Use an S3-compatible local test service or
-fakes before real R2.
+**Work:** Implement lead authentication plus timed uploader invitations, per-device event-scoped
+sessions, server-owned object keys, immutable contribution manifests, atomic event quota
+reservation, one-to-four-way resumable transfers per device, credential refresh, retries,
+idempotency records, per-variant completion, intake closure, and lead-owned aggregate manifest
+validation. Use an S3-compatible local test service or fakes before real R2.
 
 **Done when:** An interrupted upload resumes without duplicate assets or transfers, invalid object
 keys are rejected, byte/checksum limits are enforced, and the server reconciles a complete test
-manifest.
+manifest while ten simulated clients race on one event without exceeding quota or finalizing after
+intake closure.
 
 ## Session 5: Image derivatives and private gallery
 
@@ -128,7 +162,7 @@ denied; downloaded originals match uploaded checksums.
 **Goal:** Turn the feature-complete pilot into an operable release.
 
 **Work:** Finish Railway/R2/Supabase configuration, security headers and cookie policy, wildcard
-domain checks, secret scanning, monitoring, database backup/restore, Windows packaging, failure
+domain checks, secret scanning, monitoring, database backup/restore, Windows/macOS packaging, failure
 runbooks, performance fixes, and the end-to-end rehearsal. Resolve the application licence before
 making the repository public.
 

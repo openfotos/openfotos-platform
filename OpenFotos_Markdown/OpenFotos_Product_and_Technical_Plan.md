@@ -4,7 +4,7 @@
 
 | **Item**         | **Current decision**                               |
 |------------------|----------------------------------------------------|
-| Pilot            | One photographer and one Indian marriage reception |
+| Pilot            | One photographer, one reception, and 5-10 uploader devices |
 | Data             | Less than 20 GB of edited JPEG photographs         |
 | Delivery window  | Ten days                                           |
 | Operator         | One Python focused AI engineer using Codex         |
@@ -120,7 +120,7 @@ The photographer uploads edited photographs through a desktop application. OpenF
 
 | **Constraint** | **Value**                          | **Architectural consequence**                                        |
 |----------------|------------------------------------|----------------------------------------------------------------------|
-| Client volume  | One photographer and one reception | Manual provisioning and supervised operations are acceptable.        |
+| Client volume  | One photographer, one reception, 5-10 uploaders | Manual provisioning and supervised operations are acceptable.        |
 | Data size      | Less than 20 GB                    | R2 storage cost is negligible and local processing is practical.     |
 | Media type     | Photographs only                   | Video transcoding and streaming are excluded.                        |
 | Input format   | Edited JPEG only                   | RAW decoding, color pipelines and archive expectations are excluded. |
@@ -146,7 +146,7 @@ The photographer uploads edited photographs through a desktop application. OpenF
 
 ## Committed pilot capabilities
 
-- Desktop upload and ingestion of one event.
+- Concurrent desktop contribution to one event from five to ten Windows or macOS installations.
 
 - Private object storage for original JPEGs, previews and thumbnails.
 
@@ -186,7 +186,8 @@ The photographer uploads edited photographs through a desktop application. OpenF
 
 - On demand generation of a single 20 GB ZIP archive.
 
-- Team roles beyond OpenFotos administrator and photographer.
+- Account-based team roles beyond OpenFotos administrator and photographer. Upload-only event
+  device sessions are scoped capabilities rather than photographer accounts.
 
 - A guarantee that OpenFotos is the sole archival copy.
 
@@ -212,6 +213,7 @@ The pilot needs authentication but does not need public account creation. OpenFo
 |-------------------------|-----------------------------------|----------------------|-------------------------------------------------------------------|
 | OpenFotos administrator | Django administrator login        | Yes                  | Create photographer, event and support records; inspect failures. |
 | Photographer            | Username and password             | Yes manually created | Upload, review, publish, create shares and control downloads.     |
+| Upload contributor       | Timed event invitation            | Device session       | Add and upload own contribution batches; view aggregate totals.   |
 | Couple or organizer     | Event URL and PIN                 | No                   | Browse permitted gallery and download according to event policy.  |
 | Friend or family        | Share URL and optional PIN        | No                   | Browse the complete event or restricted collection.               |
 | Selfie visitor          | Authorized event or share session | No                   | Submit one selfie with consent and see probable matches.          |
@@ -221,6 +223,13 @@ The pilot needs authentication but does not need public account creation. OpenFo
 - Django sessions protect the browser dashboard.
 
 - The desktop app uses a short lived API access token and refresh token after photographer login.
+
+- A lead may create a high-entropy uploader invitation that enrolls several upload-only devices for
+  at most 72 hours. Each redemption mints a named, independently revocable, event-scoped device
+  session. It is never the six-digit visitor PIN.
+
+- Upload-only devices see their own batches and aggregate event totals, but not other contributors'
+  filenames, photographs, gallery content, or event-management controls.
 
 - Store desktop refresh tokens in the operating system credential store when practical.
 
@@ -249,7 +258,7 @@ The pilot needs authentication but does not need public account creation. OpenFo
 
 | **Component**       | **Runs where**                   | **Owns**                                                                                      |
 |---------------------|----------------------------------|-----------------------------------------------------------------------------------------------|
-| Desktop application | Photographer Windows computer    | Local files, ingestion checkpoint, bulk derivatives, bulk face processing and direct uploads. |
+| Desktop application | Contributor Windows or macOS computer | Local files, contribution checkpoints, per-photo derivatives/faces, and direct uploads. |
 | Django application  | Railway Singapore                | Users, events, policies, sessions, shares, signed URLs and selfie requests.                   |
 | PostgreSQL          | Supabase managed region          | Relational metadata, vector embeddings, cluster membership, jobs and audit records.           |
 | Object storage      | Cloudflare R2 APAC hinted bucket | Original JPEGs, previews, thumbnails, manifests and temporary export archives.                |
@@ -258,6 +267,9 @@ The pilot needs authentication but does not need public account creation. OpenFo
 ## Trust boundaries
 
 - The desktop application is authenticated but still treated as an external client. The API validates every event ID, object key, model ID and payload size.
+
+- An uploader device is less privileged than the photographer lead. The server scopes every device,
+  contribution batch, reservation, and object key to exactly one event.
 
 - The browser never receives an R2 parent token, Supabase service key or Django secret.
 
@@ -275,7 +287,7 @@ Django provides one deployable control plane while the desktop application is a 
 
 | **Layer**                | **Selected technology**                     | **Implementation notes**                                                                     |
 |--------------------------|---------------------------------------------|----------------------------------------------------------------------------------------------|
-| Desktop user interface   | PySide6 with Qt Widgets                     | Support one operating system first; build other packages on their native CI runners later.   |
+| Desktop user interface   | PySide6 with Qt Widgets                     | Support Windows and macOS; validate and package on native CI runners before release.          |
 | Desktop packaging        | pyside6 deploy with Nuitka                  | Produce an installer or standalone directory and sign binaries when moving beyond the pilot. |
 | Web framework            | Django                                      | Use Django admin, ORM, migrations, sessions and server rendered templates.                   |
 | Interactive web behavior | HTMX and small Alpine.js modules            | Keep a separate JavaScript application out of the pilot.                                     |
@@ -376,7 +388,7 @@ Django provides one deployable control plane while the desktop application is a 
 |--------------------|----------------------------------------------------------------------------------------------|
 | Every pull request | Formatting, static checks, unit tests, Django checks, migration consistency and secret scan. |
 | Merge to main      | Build Django container, run integration tests and deploy staging.                            |
-| Version tag        | Build the Windows desktop package and publish checksums.                                     |
+| Version tag        | Build native Windows and macOS desktop packages and publish checksums.                       |
 | Production release | Run migrations once, deploy one web replica and execute smoke tests.                         |
 
 # 8 Desktop ingestion application
@@ -385,9 +397,11 @@ Django provides one deployable control plane while the desktop application is a 
 
 1.  Login screen with server URL, username and password.
 
-2.  Event selector showing status and remaining storage allowance.
+2.  Event selector showing status and aggregate remaining storage allowance, or an upload-only
+    invitation that resolves directly to one event.
 
-3.  Folder selector with discovered file count and total bytes.
+3.  Source selector accepting recursive folders, one file, multiple files, or a mixture, with
+    discovered file count and total bytes.
 
 4.  Validation screen listing rejected files before upload.
 
@@ -397,11 +411,16 @@ Django provides one deployable control plane while the desktop application is a 
 
 ## Local state
 
-A local SQLite database is mandatory. A text log alone cannot reliably resume thousands of files. The database belongs to the selected event and records enough information to detect renamed, modified and completed assets.
+A local SQLite database is mandatory. A text log alone cannot reliably resume thousands of files.
+Each installation stores event-scoped immutable contribution batches and records enough information
+to detect relocated roots, modified files and completed assets. The server, not one desktop, owns
+the aggregate event manifest.
 
 | **Field**                    | **Purpose**                                            |
 |------------------------------|--------------------------------------------------------|
 | local path                   | Find the source file on restart.                       |
+| installation and batch UUIDs | Keep independently created contributions unambiguous.  |
+| selection root and relative path | Rebind a moved folder or USB mount after verification. |
 | size and modification time   | Fast change detection before recalculating a checksum. |
 | SHA 256 checksum             | Stable identity and end to end integrity check.        |
 | asset UUID                   | Maps a local file to database and R2 object keys.      |
@@ -414,7 +433,11 @@ A local SQLite database is mandatory. A text log alone cannot reliably resume th
 
 - Accept only files whose extension, MIME type and decoded signature identify a JPEG.
 
-- Reject video, RAW, TIFF, HEIC and oversized files with a visible reason.
+- Accept local or directly attached USB folders, one file, multiple files, and mixed selections.
+  Do not follow symbolic links, aliases, junctions, network shares, or cloud placeholders.
+
+- Reject video, RAW, TIFF, HEIC, files above 100 MiB, images above 120 megapixels, and unsupported
+  entries with a visible stable reason. Incomplete directory traversal blocks batch approval.
 
 - Calculate the event total before starting and enforce a server supplied pilot limit such as 25 GB.
 
@@ -422,11 +445,20 @@ A local SQLite database is mandatory. A text log alone cannot reliably resume th
 
 - Use four concurrent transfers initially, with configurable retry and exponential backoff.
 
+- Allow one through four transfers and pause per device. Up to ten installations may upload to the
+  same event concurrently; the server reserves event bytes atomically.
+
+- Freeze one contribution manifest after validation approval. Later additions use another batch.
+  Distinct source paths with identical checksums remain distinct accepted assets.
+
 - Upload each object using its UUID key rather than its original filename.
 
 - Refresh credentials before expiry and continue without repeating completed objects.
 
 - Post the manifest only after every accepted asset reaches a terminal state.
+
+- Post immutable contribution manifests first. Only the lead may close intake, drain or explicitly
+  exclude remaining failures, and finalize their server-owned event-wide reconciliation.
 
 - Allow the photographer to retry failed assets and export a diagnostic log.
 
@@ -434,7 +466,10 @@ A local SQLite database is mandatory. A text log alone cannot reliably resume th
 
 ## Packaging decision
 
-Support the photographer operating system first. For Windows, produce a signed installer when possible, but a standalone folder is acceptable for the supervised pilot. Build macOS and Linux packages later on native CI runners. Cross platform source does not mean one binary can be copied to every operating system.
+Support Windows and macOS for the photographer pilot and run native filesystem/UI smoke tests on
+both before release. Produce signed packages when possible, but supervised standalone bundles are
+acceptable for the pilot. Linux remains a development platform rather than a promised client
+package. Cross-platform source does not mean one binary can be copied to every operating system.
 
 # 9 Storage and image delivery
 
@@ -580,7 +615,7 @@ OpenFotos may publish its application source and may ask photographers to pay on
 | **State**  | **Entry condition**                       | **Allowed next states**                              |
 |------------|-------------------------------------------|------------------------------------------------------|
 | Draft      | Event created and photographer assigned   | Uploading or cancelled                               |
-| Uploading  | Desktop session issued                    | Processing or failed                                 |
+| Uploading  | First authorized contribution is accepted | Processing or failed                                 |
 | Processing | Asset manifest accepted                   | Review or failed                                     |
 | Review     | Derivatives and initial clusters complete | Published or processing                              |
 | Published  | Photographer approves gallery             | Archived or review                                   |
@@ -599,11 +634,17 @@ The state machine must be idempotent. Repeating a completed API request or proce
 
 - The desktop client owns bulk work during the pilot and reports progress to Django.
 
+- Each contributor desktop owns derivative and face work for its photos. After intake closes, the
+  lead desktop performs one event-wide clustering pass over compatible embeddings.
+
 - Django records jobs and state but does not queue thousands of inference tasks.
 
 - A failed asset can be retried independently.
 
 - Finalization verifies the manifest, required object variants and metadata counts.
+
+- Finalization rejects new batches, requires stable intake, and reconciles every contribution and
+  explicit exclusion. Intake may reopen before publication, but published events remain closed.
 
 - Publishing is a separate deliberate action after face cluster review.
 
@@ -611,7 +652,10 @@ The state machine must be idempotent. Repeating a completed API request or proce
 
 ## Idempotency keys
 
-Every mutating desktop request should include an idempotency key derived from event, operation and asset UUID. The server stores completed keys for an appropriate period. This prevents retries after poor connectivity from generating duplicate face rows or finalization records.
+Every mutating desktop request should include an idempotency key derived from event, device,
+contribution batch, operation and asset UUID. The server stores completed keys for an appropriate
+period. This prevents retries after poor connectivity from generating duplicate face rows or
+finalization records.
 
 # 12 Database design
 
@@ -621,14 +665,17 @@ Every mutating desktop request should include an idempotency key derived from ev
 | user               | Django user fields                                                      | OpenFotos administrator and photographer login.      |
 | photographer user  | photographer id, user id, role                                          | Future ready membership boundary.                    |
 | event              | id, photographer id, token, PIN hash, state, limits, expiry             | Reception and its access policy.                     |
+| uploader invitation | event id, token hash, expiry, enrollment state                         | Time-limited device enrollment.                      |
+| uploader device     | event id, device id, label, status, last activity                       | Revocable upload-only identity.                      |
+| contribution batch  | event id, device id, state, counts, reserved bytes, timestamps          | Immutable per-device ingestion unit.                 |
 | asset              | id, event id, filename, bytes, checksum, dimensions, object keys, state | One uploaded photograph and its derivatives.         |
 | face               | id, event id, asset id, box, quality, model id, embedding               | One accepted face detection.                         |
 | face cluster       | id, event id, status, photo count, rank, featured                       | Anonymous face collection.                           |
 | cluster member     | cluster id, face id, similarity                                         | Cluster membership and evidence.                     |
 | share link         | id, event id, token hash, cluster id, permissions, expiry               | Complete event or restricted sharing.                |
 | processing job     | id, event id, type, state, counts, error, timestamps                    | Observable processing lifecycle.                     |
-| idempotency record | key, user id, response hash, expiry                                     | Safe client retries.                                 |
-| audit event        | actor, event id, action, IP hash, timestamp, result                     | Security and operational trace.                      |
+| idempotency record | key, actor type/id, response hash, expiry                               | Safe lead and device retries.                        |
+| audit event        | user/device actor, event id, action, IP hash, timestamp, result          | Security and operational trace.                      |
 | consent record     | event id, notice version, timestamp, request reference                  | Evidence that selfie processing notice was accepted. |
 
 ## Database rules
@@ -659,12 +706,15 @@ Use a versioned JSON API for desktop operations. Browser pages may use Django fo
 |------------------------------------------|------------|---------------------------------------------------------|
 | POST api v1 auth login                   | Desktop    | Authenticate photographer and issue short lived tokens. |
 | GET api v1 events                        | Desktop    | List events assigned to the photographer.               |
+| POST api v1 uploader invitations redeem  | Desktop    | Exchange a timed invitation for one device session.      |
+| POST api v1 events id batches            | Desktop    | Create or resume an event-scoped contribution batch.     |
 | POST api v1 events id upload session     | Desktop    | Issue temporary prefix scoped R2 credentials.           |
 | POST api v1 events id assets batch       | Desktop    | Reserve asset UUIDs and upload object keys.             |
 | POST api v1 events id assets id complete | Desktop    | Confirm object variants, sizes and checksums.           |
 | POST api v1 events id faces batch        | Desktop    | Upload validated face metadata and embeddings.          |
 | POST api v1 events id clusters batch     | Desktop    | Upload initial cluster membership and metrics.          |
-| POST api v1 events id finalize           | Desktop    | Close ingestion and request validation.                 |
+| POST api v1 events id finalize           | Lead       | Reconcile contributions and request validation.         |
+| POST api v1 events id close intake       | Lead       | Stop new batches while reserved contributions drain.    |
 | GET api v1 jobs id                       | Desktop    | Read validation and event processing status.            |
 | POST event token unlock                  | Browser    | Verify PIN and create an authorized event session.      |
 | POST event token selfie search           | Browser    | Process one selfie and return candidate asset IDs.      |
@@ -941,6 +991,9 @@ Run 500 to 1,000 representative reception images before full implementation is c
 
 - Pipeline disk work, inference and uploads, but limit concurrency so the photographer computer remains responsive.
 
+- Keep one active processing/upload batch per installation while independent devices contribute in
+  parallel. Treat cached remaining capacity as advisory until the server reserves bytes.
+
 - Generate previews once and reuse them.
 
 - Paginate gallery metadata and lazy load thumbnails.
@@ -961,6 +1014,7 @@ Run 500 to 1,000 representative reception images before full implementation is c
 | Authentication | Photographer login, token refresh, PIN attempts, cookie security and authorization failures. |
 | Tenancy        | Cross photographer and cross event access is denied for every resource type.                 |
 | Uploader       | Restart, duplicate scan, changed file, expired credentials, partial failure and retry.       |
+| Concurrency    | Ten device sessions, atomic quota reservation, intake closure, stale work, and lead-only finalization. |
 | Images         | Orientation, corrupt JPEG, extreme dimensions, EXIF removal and watermark output.            |
 | Faces          | No face, one face, many faces, invalid embedding and model mismatch.                         |
 | Gallery        | Pagination, cluster visibility, download policy and expired share.                           |
@@ -972,6 +1026,9 @@ Run 500 to 1,000 representative reception images before full implementation is c
 \[ \] The desktop app discovers the complete client folder and reports the exact total bytes before upload.
 
 \[ \] A forced exit during upload resumes without repeating already completed assets.
+
+\[ \] Ten concurrent uploader devices can contribute to one event without exceeding its byte limit,
+cross-reading another device's filenames, or racing event finalization.
 
 \[ \] Every published photograph has an original, preview, thumbnail and database record.
 
