@@ -1,0 +1,39 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Local configuration and credentials. Keep the redacted example tracked.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Application state and generated media.
+*.sqlite3
+*.db
+media/
+staticfiles/
+uploads/
+exports/
+models/
+*.onnx
+
+# Desktop packaging and logs.
+*.log
+*.spec
+deployment/
+
+# Editors and operating systems.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

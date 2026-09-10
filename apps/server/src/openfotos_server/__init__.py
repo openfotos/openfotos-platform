@@ -1,0 +1,1 @@
+"""OpenFotos Django project."""

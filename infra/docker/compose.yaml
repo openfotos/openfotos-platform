@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: openfotos
+      POSTGRES_USER: openfotos
+      POSTGRES_PASSWORD: openfotos
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openfotos"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - openfotos-postgres:/var/lib/postgresql/data
+
+volumes:
+  openfotos-postgres:
