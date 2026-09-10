@@ -56,7 +56,7 @@ def test_demo_event_opens_functional_local_inventory(tmp_path: Path) -> None:
     window.close()
 
 
-def test_desktop_shell_packages_brand_and_source_actions(tmp_path: Path) -> None:
+def test_desktop_shell_packages_corporate_brand_and_source_actions(tmp_path: Path) -> None:
     app = application()
     window = MainWindow(
         store=CheckpointStore(tmp_path / "branded.sqlite3"),
@@ -66,7 +66,7 @@ def test_desktop_shell_packages_brand_and_source_actions(tmp_path: Path) -> None
 
     assert window.header.logo.renderer().isValid()
     assert not window.windowIcon().isNull()
-    assert app.palette().color(QPalette.ColorRole.Window).name() == "#080b12"
+    assert app.palette().color(QPalette.ColorRole.Window).name() == "#ffffff"
 
     window.events.open_button.click()
     app.processEvents()

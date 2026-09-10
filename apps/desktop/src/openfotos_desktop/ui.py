@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGraphicsColorizeEffect,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -30,7 +29,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStackedWidget,
-    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
@@ -51,7 +49,7 @@ from .ingestion import (
     ScanSummary,
 )
 from .ports import OnlineServicesUnavailable, PhotographerSessionGateway
-from .theme import apply_dark_theme, asset_path
+from .theme import apply_corporate_theme, asset_path
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
@@ -59,18 +57,18 @@ if TYPE_CHECKING:
 SUPPORTED_PROCESSING_PROFILE_ID = "pilot-profile-v1"
 
 
-def _icon(widget: QWidget, standard_icon: QStyle.StandardPixmap) -> QIcon:
-    return widget.style().standardIcon(standard_icon)
+def _asset_icon(name: str) -> QIcon:
+    return QIcon(str(asset_path(name)))
 
 
 def _style_button(
     button: QPushButton,
     *,
-    icon: QStyle.StandardPixmap | None = None,
+    icon: str | None = None,
     kind: str | None = None,
 ) -> QPushButton:
     if icon is not None:
-        button.setIcon(_icon(button, icon))
+        button.setIcon(_asset_icon(icon))
         button.setIconSize(QSize(18, 18))
     if kind is not None:
         button.setProperty("kind", kind)
@@ -123,21 +121,17 @@ class BrandHeader(QFrame):
     def __init__(self, *, demo: bool) -> None:
         super().__init__()
         self.setObjectName("AppHeader")
-        self.setFixedHeight(88)
+        self.setFixedHeight(72)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(32, 14, 32, 14)
-        layout.setSpacing(18)
+        layout.setContentsMargins(28, 12, 28, 12)
+        layout.setSpacing(16)
         self.logo = QSvgWidget(str(asset_path("ofts.svg")))
-        self.logo.setFixedSize(174, 53)
-        logo_effect = QGraphicsColorizeEffect(self.logo)
-        logo_effect.setColor(QColor("#f8fafc"))
-        logo_effect.setStrength(1.0)
-        self.logo.setGraphicsEffect(logo_effect)
+        self.logo.setFixedSize(118, 36)
         layout.addWidget(self.logo)
 
         product = QVBoxLayout()
         product.setSpacing(1)
-        name = QLabel("OPENFOTOS DESKTOP")
+        name = QLabel("Desktop")
         name.setObjectName("HeaderProduct")
         self.context = QLabel("Private event ingestion")
         self.context.setObjectName("HeaderContext")
@@ -145,7 +139,7 @@ class BrandHeader(QFrame):
         product.addWidget(self.context)
         layout.addLayout(product)
         layout.addStretch()
-        mode = QLabel("LOCAL DEMO" if demo else "SECURE WORKSPACE")
+        mode = QLabel("Demo workspace" if demo else "Secure workspace")
         mode.setObjectName("ModeBadge")
         layout.addWidget(mode)
 
@@ -203,10 +197,10 @@ class LoginPage(QWidget):
         layout.setSpacing(22)
         layout.addWidget(
             PageHeading(
-                "Private delivery",
-                "Bring every frame home.",
-                "Connect an event lead or enroll an upload-only workstation.",
-                "SIGN IN",
+                "Workspace access",
+                "Sign in to OpenFotos",
+                "Authenticate as an event lead or enroll an authorized upload workstation.",
+                "Secure access",
             )
         )
 
@@ -218,11 +212,11 @@ class LoginPage(QWidget):
         hero_layout = QVBoxLayout(hero)
         hero_layout.setContentsMargins(30, 30, 30, 30)
         hero_layout.setSpacing(14)
-        hero_title = QLabel("A calm, private path\nfrom camera to cloud.")
+        hero_title = QLabel("Desktop media ingestion")
         hero_title.setObjectName("HeroTitle")
         hero_copy = QLabel(
-            "Build a verified local inventory first. OpenFotos keeps source photos on this "
-            "computer until you explicitly approve the contribution."
+            "Prepare and validate event media before upload. Source files remain on this "
+            "workstation until the contribution is approved."
         )
         hero_copy.setObjectName("HeroCopy")
         hero_copy.setWordWrap(True)
@@ -230,9 +224,9 @@ class LoginPage(QWidget):
         hero_layout.addWidget(hero_copy)
         hero_layout.addStretch()
         for text in (
-            "Multiple photographers per event",
-            "Folders or individual JPEG files",
-            "Durable, resumable local checks",
+            "Event-scoped contribution batches",
+            "Concurrent photographer workstations",
+            "Resumable checksum validation",
         ):
             feature = QLabel(f"✓  {text}")
             feature.setObjectName("FeatureItem")
@@ -263,7 +257,6 @@ class LoginPage(QWidget):
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
         self.lead_button = _style_button(
             QPushButton("Sign in as event lead"),
-            icon=QStyle.StandardPixmap.SP_DialogApplyButton,
             kind="primary",
         )
         self.lead_button.clicked.connect(self._request_lead)
@@ -286,7 +279,6 @@ class LoginPage(QWidget):
         self.device_label.setPlaceholderText("e.g. Reception laptop 2")
         self.uploader_button = _style_button(
             QPushButton("Enroll this workstation"),
-            icon=QStyle.StandardPixmap.SP_ComputerIcon,
             kind="primary",
         )
         self.uploader_button.clicked.connect(self._request_uploader)
@@ -361,7 +353,7 @@ class EventSelectorPage(QWidget):
         copy.addWidget(self.heading)
         copy.addWidget(description)
         heading_layout.addLayout(copy, 1)
-        step = QLabel("STEP 1 OF 3")
+        step = QLabel("1 of 3")
         step.setObjectName("StepBadge")
         heading_layout.addWidget(step, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(heading)
@@ -387,7 +379,6 @@ class EventSelectorPage(QWidget):
         footer.addStretch()
         self.open_button = _style_button(
             QPushButton("Open local inventory"),
-            icon=QStyle.StandardPixmap.SP_DirOpenIcon,
             kind="primary",
         )
         self.open_button.clicked.connect(self._select)
@@ -399,7 +390,7 @@ class EventSelectorPage(QWidget):
         self.heading.setText("Select a synthetic demo event" if demo else "Choose an event")
         for event in events:
             item = QListWidgetItem(
-                _icon(self.events, QStyle.StandardPixmap.SP_DriveHDIcon),
+                _asset_icon("calendar.svg"),
                 f"{event.name}    ·    {format_bytes(event.storage_limit_bytes)} allowance",
             )
             item.setSizeHint(QSize(0, 58))
@@ -431,10 +422,11 @@ class SelectionPage(QWidget):
         layout.setSpacing(18)
         layout.addWidget(
             PageHeading(
-                "Build contribution",
-                "Choose what to deliver.",
-                "Mix folders with one or many photos. Folder contents are discovered recursively.",
-                "STEP 2 OF 3",
+                "Contribution setup",
+                "Add source media",
+                "Select individual photos, complete folders, or both. "
+                "Folders are scanned recursively.",
+                "2 of 3",
             )
         )
 
@@ -461,7 +453,7 @@ class SelectionPage(QWidget):
         self.add_files = QToolButton()
         self.add_files.setText("Add photos")
         self.add_files.setToolTip("Choose one or multiple individual photo files")
-        self.add_files.setIcon(_icon(self.add_files, QStyle.StandardPixmap.SP_FileIcon))
+        self.add_files.setIcon(_asset_icon("file.svg"))
         self.add_files.setIconSize(QSize(30, 30))
         self.add_files.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.add_files.setProperty("actionCard", True)
@@ -471,7 +463,7 @@ class SelectionPage(QWidget):
         self.add_folder = QToolButton()
         self.add_folder.setText("Add a folder")
         self.add_folder.setToolTip("Choose a folder to discover photos recursively")
-        self.add_folder.setIcon(_icon(self.add_folder, QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.add_folder.setIcon(_asset_icon("folder.svg"))
         self.add_folder.setIconSize(QSize(30, 30))
         self.add_folder.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         self.add_folder.setProperty("actionCard", True)
@@ -514,9 +506,7 @@ class SelectionPage(QWidget):
         progress_header = QHBoxLayout()
         progress_title = QLabel("Checking local photos")
         progress_title.setObjectName("SectionTitle")
-        self.pause = _style_button(
-            QPushButton("Pause scan"), icon=QStyle.StandardPixmap.SP_MediaPause
-        )
+        self.pause = _style_button(QPushButton("Pause scan"), icon="pause.svg")
         self.pause.clicked.connect(self.pause_requested)
         progress_header.addWidget(progress_title)
         progress_header.addStretch()
@@ -534,19 +524,18 @@ class SelectionPage(QWidget):
         buttons = QHBoxLayout()
         self.remove_selection = _style_button(
             QPushButton("Remove selected"),
-            icon=QStyle.StandardPixmap.SP_TrashIcon,
+            icon="trash.svg",
             kind="ghost",
         )
         self.remove_selection.clicked.connect(self.remove_selection_requested)
         self.scan = _style_button(
             QPushButton("Scan and validate"),
-            icon=QStyle.StandardPixmap.SP_MediaPlay,
             kind="primary",
         )
         self.scan.clicked.connect(self.scan_requested)
         self.new_batch = _style_button(
             QPushButton("New contribution"),
-            icon=QStyle.StandardPixmap.SP_FileDialogNewFolder,
+            icon="plus.svg",
         )
         self.new_batch.clicked.connect(self.new_batch_requested)
         buttons.addWidget(self.remove_selection)
@@ -560,13 +549,9 @@ class SelectionPage(QWidget):
         self.batch_meta.setText(f"Contribution  {batch_id}")
         self.selections.clear()
         for selection in store.list_selections(batch_id):
-            icon = (
-                QStyle.StandardPixmap.SP_DirIcon
-                if selection.kind.value == "folder"
-                else QStyle.StandardPixmap.SP_FileIcon
-            )
+            icon = "folder.svg" if selection.kind.value == "folder" else "file.svg"
             item = QListWidgetItem(
-                _icon(self.selections, icon),
+                _asset_icon(icon),
                 f"{selection.kind.value.title()}    {selection.source_path}",
             )
             item.setSizeHint(QSize(0, 48))
@@ -628,9 +613,9 @@ class ValidationPage(QWidget):
         layout.addWidget(
             PageHeading(
                 "Local inventory",
-                "Review before approval.",
+                "Review inventory",
                 "Accepted photos are ready. Resolve any blocking rows before freezing the batch.",
-                "STEP 3 OF 3",
+                "3 of 3",
             )
         )
 
@@ -679,17 +664,14 @@ class ValidationPage(QWidget):
         buttons = QHBoxLayout()
         self.approve = _style_button(
             QPushButton("Approve contribution"),
-            icon=QStyle.StandardPixmap.SP_DialogApplyButton,
             kind="primary",
         )
         self.approve.clicked.connect(self.approve_requested)
-        self.rescan = _style_button(
-            QPushButton("Back to sources"), icon=QStyle.StandardPixmap.SP_ArrowBack
-        )
+        self.rescan = _style_button(QPushButton("Back to sources"), icon="arrow-left.svg")
         self.rescan.clicked.connect(self.rescan_requested)
         self.export = _style_button(
             QPushButton("Export redacted diagnostics"),
-            icon=QStyle.StandardPixmap.SP_DialogSaveButton,
+            icon="download.svg",
             kind="ghost",
         )
         self.export.clicked.connect(self.export_requested)
@@ -755,9 +737,9 @@ class ApprovedPage(QWidget):
         layout.addWidget(
             PageHeading(
                 "Local approval",
-                "Contribution ready.",
-                "This batch is frozen and protected from accidental source changes.",
-                "APPROVED",
+                "Contribution approved",
+                "The verified batch is frozen and protected from accidental source changes.",
+                "Complete",
             )
         )
 
@@ -765,10 +747,9 @@ class ApprovedPage(QWidget):
         hero.setObjectName("HeroPanel")
         hero_layout = QHBoxLayout(hero)
         hero_layout.setContentsMargins(28, 24, 28, 24)
-        success_icon = QLabel()
-        success_icon.setPixmap(
-            _icon(success_icon, QStyle.StandardPixmap.SP_DialogApplyButton).pixmap(48, 48)
-        )
+        success_icon = QLabel("✓")
+        success_icon.setObjectName("SuccessMark")
+        success_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         hero_layout.addWidget(success_icon, 0, Qt.AlignmentFlag.AlignTop)
         copy = QVBoxLayout()
         title = QLabel("Local inventory locked")
@@ -811,23 +792,20 @@ class ApprovedPage(QWidget):
         buttons = QHBoxLayout()
         self.new_batch = _style_button(
             QPushButton("Create another contribution"),
-            icon=QStyle.StandardPixmap.SP_FileDialogNewFolder,
             kind="primary",
         )
         self.new_batch.clicked.connect(self.new_batch_requested)
-        self.verify = _style_button(
-            QPushButton("Verify sources again"), icon=QStyle.StandardPixmap.SP_BrowserReload
-        )
+        self.verify = _style_button(QPushButton("Verify sources again"), icon="refresh.svg")
         self.verify.clicked.connect(self.verify_requested)
         self.export = _style_button(
             QPushButton("Export diagnostics"),
-            icon=QStyle.StandardPixmap.SP_DialogSaveButton,
+            icon="download.svg",
             kind="ghost",
         )
         self.export.clicked.connect(self.export_requested)
         self.cleanup = _style_button(
             QPushButton("Remove local checkpoint"),
-            icon=QStyle.StandardPixmap.SP_TrashIcon,
+            icon="trash.svg",
             kind="danger",
         )
         self.cleanup.clicked.connect(self.cleanup_requested)
@@ -857,7 +835,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         application = QApplication.instance()
         if isinstance(application, QApplication):
-            apply_dark_theme(application)
+            apply_corporate_theme(application)
         self.store = store
         self.gateway = gateway
         self.current_event: EventCache | None = None
