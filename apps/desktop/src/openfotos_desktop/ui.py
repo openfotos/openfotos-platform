@@ -7,11 +7,19 @@ from threading import Event
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from PySide6.QtCore import QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal, Slot
+from PySide6.QtGui import QColor, QIcon
+from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
     QFileDialog,
     QFormLayout,
+    QFrame,
+    QGraphicsColorizeEffect,
+    QGridLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -20,10 +28,13 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSizePolicy,
     QStackedWidget,
+    QStyle,
     QTableWidget,
     QTableWidgetItem,
     QTabWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -40,11 +51,106 @@ from .ingestion import (
     ScanSummary,
 )
 from .ports import OnlineServicesUnavailable, PhotographerSessionGateway
+from .theme import apply_dark_theme, asset_path
 
 if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
 
 SUPPORTED_PROCESSING_PROFILE_ID = "pilot-profile-v1"
+
+
+def _icon(widget: QWidget, standard_icon: QStyle.StandardPixmap) -> QIcon:
+    return widget.style().standardIcon(standard_icon)
+
+
+def _style_button(
+    button: QPushButton,
+    *,
+    icon: QStyle.StandardPixmap | None = None,
+    kind: str | None = None,
+) -> QPushButton:
+    if icon is not None:
+        button.setIcon(_icon(button, icon))
+        button.setIconSize(QSize(18, 18))
+    if kind is not None:
+        button.setProperty("kind", kind)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    return button
+
+
+class PageHeading(QFrame):
+    def __init__(self, eyebrow: str, title: str, description: str, step: str) -> None:
+        super().__init__()
+        self.setObjectName("PageHeading")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        copy = QVBoxLayout()
+        copy.setSpacing(5)
+        eyebrow_label = QLabel(eyebrow.upper())
+        eyebrow_label.setObjectName("PageEyebrow")
+        self.title = QLabel(title)
+        self.title.setObjectName("PageTitle")
+        self.description = QLabel(description)
+        self.description.setObjectName("PageDescription")
+        self.description.setWordWrap(True)
+        copy.addWidget(eyebrow_label)
+        copy.addWidget(self.title)
+        copy.addWidget(self.description)
+        layout.addLayout(copy, 1)
+        badge = QLabel(step)
+        badge.setObjectName("StepBadge")
+        badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
+
+
+class StatCard(QFrame):
+    def __init__(self, label: str, *, tone: str = "accent") -> None:
+        super().__init__()
+        self.setObjectName("StatCard")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 13, 16, 13)
+        layout.setSpacing(3)
+        self.value = QLabel("—")
+        self.value.setObjectName("StatValue")
+        self.value.setProperty("tone", tone)
+        caption = QLabel(label.upper())
+        caption.setObjectName("StatLabel")
+        layout.addWidget(self.value)
+        layout.addWidget(caption)
+
+
+class BrandHeader(QFrame):
+    def __init__(self, *, demo: bool) -> None:
+        super().__init__()
+        self.setObjectName("AppHeader")
+        self.setFixedHeight(88)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(32, 14, 32, 14)
+        layout.setSpacing(18)
+        self.logo = QSvgWidget(str(asset_path("ofts.svg")))
+        self.logo.setFixedSize(174, 53)
+        logo_effect = QGraphicsColorizeEffect(self.logo)
+        logo_effect.setColor(QColor("#f8fafc"))
+        logo_effect.setStrength(1.0)
+        self.logo.setGraphicsEffect(logo_effect)
+        layout.addWidget(self.logo)
+
+        product = QVBoxLayout()
+        product.setSpacing(1)
+        name = QLabel("OPENFOTOS DESKTOP")
+        name.setObjectName("HeaderProduct")
+        self.context = QLabel("Private event ingestion")
+        self.context.setObjectName("HeaderContext")
+        product.addWidget(name)
+        product.addWidget(self.context)
+        layout.addLayout(product)
+        layout.addStretch()
+        mode = QLabel("LOCAL DEMO" if demo else "SECURE WORKSPACE")
+        mode.setObjectName("ModeBadge")
+        layout.addWidget(mode)
+
+    def set_context(self, text: str) -> None:
+        self.context.setText(text)
 
 
 def format_bytes(value: int) -> str:
@@ -92,20 +198,74 @@ class LoginPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self._batch_frozen = False
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<h1>OpenFotos</h1>"))
-        layout.addWidget(QLabel("Connect as the event lead or enroll an upload-only device."))
+        layout.setContentsMargins(52, 34, 52, 36)
+        layout.setSpacing(22)
+        layout.addWidget(
+            PageHeading(
+                "Private delivery",
+                "Bring every frame home.",
+                "Connect an event lead or enroll an upload-only workstation.",
+                "SIGN IN",
+            )
+        )
+
+        content = QHBoxLayout()
+        content.setSpacing(22)
+        hero = QFrame()
+        hero.setObjectName("HeroPanel")
+        hero.setMinimumWidth(340)
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(30, 30, 30, 30)
+        hero_layout.setSpacing(14)
+        hero_title = QLabel("A calm, private path\nfrom camera to cloud.")
+        hero_title.setObjectName("HeroTitle")
+        hero_copy = QLabel(
+            "Build a verified local inventory first. OpenFotos keeps source photos on this "
+            "computer until you explicitly approve the contribution."
+        )
+        hero_copy.setObjectName("HeroCopy")
+        hero_copy.setWordWrap(True)
+        hero_layout.addWidget(hero_title)
+        hero_layout.addWidget(hero_copy)
+        hero_layout.addStretch()
+        for text in (
+            "Multiple photographers per event",
+            "Folders or individual JPEG files",
+            "Durable, resumable local checks",
+        ):
+            feature = QLabel(f"✓  {text}")
+            feature.setObjectName("FeatureItem")
+            hero_layout.addWidget(feature)
+        content.addWidget(hero, 4)
+
+        access_panel = QFrame()
+        access_panel.setObjectName("Panel")
+        access_layout = QVBoxLayout(access_panel)
+        access_layout.setContentsMargins(26, 22, 26, 24)
+        access_layout.setSpacing(14)
+        access_title = QLabel("Workspace access")
+        access_title.setObjectName("SectionTitle")
+        access_layout.addWidget(access_title)
         tabs = QTabWidget()
-        layout.addWidget(tabs)
+        access_layout.addWidget(tabs, 1)
 
         lead = QWidget()
         lead_form = QFormLayout(lead)
+        lead_form.setContentsMargins(20, 22, 20, 20)
+        lead_form.setHorizontalSpacing(18)
+        lead_form.setVerticalSpacing(14)
         self.lead_server = QLineEdit("https://openfotos.example")
         self.username = QLineEdit()
+        self.username.setPlaceholderText("photographer@example.com")
         self.password = QLineEdit()
+        self.password.setPlaceholderText("Workspace password")
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.lead_button = QPushButton("Sign in as lead")
+        self.lead_button = _style_button(
+            QPushButton("Sign in as event lead"),
+            icon=QStyle.StandardPixmap.SP_DialogApplyButton,
+            kind="primary",
+        )
         self.lead_button.clicked.connect(self._request_lead)
         lead_form.addRow("Server", self.lead_server)
         lead_form.addRow("Username", self.username)
@@ -115,26 +275,45 @@ class LoginPage(QWidget):
 
         uploader = QWidget()
         uploader_form = QFormLayout(uploader)
+        uploader_form.setContentsMargins(20, 22, 20, 20)
+        uploader_form.setHorizontalSpacing(18)
+        uploader_form.setVerticalSpacing(14)
         self.uploader_server = QLineEdit("https://openfotos.example")
         self.invitation = QLineEdit()
+        self.invitation.setPlaceholderText("Paste a one-time invitation")
         self.invitation.setEchoMode(QLineEdit.EchoMode.Password)
         self.device_label = QLineEdit()
-        uploader_button = QPushButton("Enroll this device")
-        uploader_button.clicked.connect(self._request_uploader)
+        self.device_label.setPlaceholderText("e.g. Reception laptop 2")
+        self.uploader_button = _style_button(
+            QPushButton("Enroll this workstation"),
+            icon=QStyle.StandardPixmap.SP_ComputerIcon,
+            kind="primary",
+        )
+        self.uploader_button.clicked.connect(self._request_uploader)
         uploader_form.addRow("Server", self.uploader_server)
         uploader_form.addRow("Invitation", self.invitation)
         uploader_form.addRow("Device label", self.device_label)
-        uploader_form.addRow(uploader_button)
+        uploader_form.addRow(self.uploader_button)
         tabs.addTab(uploader, "Upload invitation")
 
         self.error = QLabel()
+        self.error.setObjectName("ErrorBanner")
         self.error.setWordWrap(True)
-        layout.addWidget(self.error)
-        layout.addStretch()
+        self.error.hide()
+        access_layout.addWidget(self.error)
+        privacy = QLabel(
+            "Credentials and invitations are never written to the local photo checkpoint."
+        )
+        privacy.setObjectName("InfoBanner")
+        privacy.setWordWrap(True)
+        access_layout.addWidget(privacy)
+        content.addWidget(access_panel, 6)
+        layout.addLayout(content, 1)
 
     @Slot()
     def _request_lead(self) -> None:
         self.error.clear()
+        self.error.hide()
         self.lead_requested.emit(
             self.lead_server.text().strip(),
             self.username.text().strip(),
@@ -144,6 +323,7 @@ class LoginPage(QWidget):
     @Slot()
     def _request_uploader(self) -> None:
         self.error.clear()
+        self.error.hide()
         self.uploader_requested.emit(
             self.uploader_server.text().strip(),
             self.invitation.text(),
@@ -154,6 +334,7 @@ class LoginPage(QWidget):
         self.password.clear()
         self.invitation.clear()
         self.error.setText(message)
+        self.error.show()
 
 
 class EventSelectorPage(QWidget):
@@ -162,23 +343,66 @@ class EventSelectorPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        self.heading = QLabel("<h2>Select an event</h2>")
-        layout.addWidget(self.heading)
+        layout.setContentsMargins(52, 34, 52, 38)
+        layout.setSpacing(22)
+        self.heading = QLabel("Choose an event")
+        self.heading.setObjectName("PageTitle")
+        heading = QFrame()
+        heading_layout = QHBoxLayout(heading)
+        heading_layout.setContentsMargins(0, 0, 0, 0)
+        copy = QVBoxLayout()
+        eyebrow = QLabel("EVENT WORKSPACE")
+        eyebrow.setObjectName("PageEyebrow")
+        description = QLabel(
+            "Each event has its own private contribution batches and storage allowance."
+        )
+        description.setObjectName("PageDescription")
+        copy.addWidget(eyebrow)
+        copy.addWidget(self.heading)
+        copy.addWidget(description)
+        heading_layout.addLayout(copy, 1)
+        step = QLabel("STEP 1 OF 3")
+        step.setObjectName("StepBadge")
+        heading_layout.addWidget(step, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(heading)
+
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(22, 20, 22, 22)
+        panel_layout.setSpacing(14)
+        title = QLabel("Available events")
+        title.setObjectName("SectionTitle")
+        panel_layout.addWidget(title)
         self.events = QListWidget()
-        layout.addWidget(self.events)
-        self.open_button = QPushButton("Open local inventory")
+        self.events.setAlternatingRowColors(True)
+        self.events.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.events.itemDoubleClicked.connect(lambda _item: self._select())
+        panel_layout.addWidget(self.events, 1)
+        layout.addWidget(panel, 1)
+        footer = QHBoxLayout()
+        hint = QLabel("Double-click an event or select it and continue.")
+        hint.setObjectName("BodyMuted")
+        footer.addWidget(hint)
+        footer.addStretch()
+        self.open_button = _style_button(
+            QPushButton("Open local inventory"),
+            icon=QStyle.StandardPixmap.SP_DirOpenIcon,
+            kind="primary",
+        )
         self.open_button.clicked.connect(self._select)
-        layout.addWidget(self.open_button)
+        footer.addWidget(self.open_button)
+        layout.addLayout(footer)
 
     def set_events(self, events: list[EventCache], *, demo: bool) -> None:
         self.events.clear()
-        self.heading.setText(
-            "<h2>Select a synthetic demo event</h2>" if demo else "<h2>Select an event</h2>"
-        )
+        self.heading.setText("Select a synthetic demo event" if demo else "Choose an event")
         for event in events:
             item = QListWidgetItem(
-                f"{event.name} — cached allowance {format_bytes(event.storage_limit_bytes)}"
+                _icon(self.events, QStyle.StandardPixmap.SP_DriveHDIcon),
+                f"{event.name}    ·    {format_bytes(event.storage_limit_bytes)} allowance",
             )
+            item.setSizeHint(QSize(0, 58))
             item.setData(Qt.ItemDataRole.UserRole, event)
             self.events.addItem(item)
         if self.events.count():
@@ -201,68 +425,171 @@ class SelectionPage(QWidget):
 
     def __init__(self) -> None:
         super().__init__()
+        self._batch_frozen = False
         layout = QVBoxLayout(self)
-        self.heading = QLabel()
-        layout.addWidget(self.heading)
+        layout.setContentsMargins(52, 30, 52, 34)
+        layout.setSpacing(18)
         layout.addWidget(
-            QLabel(
-                "Add one or many files and one or many folders. Folders are scanned recursively; "
-                "links are not followed."
+            PageHeading(
+                "Build contribution",
+                "Choose what to deliver.",
+                "Mix folders with one or many photos. Folder contents are discovered recursively.",
+                "STEP 2 OF 3",
             )
         )
-        self.selections = QListWidget()
-        layout.addWidget(self.selections)
-        buttons = QHBoxLayout()
-        self.add_files = QPushButton("Add photos")
+
+        event_panel = QFrame()
+        event_panel.setObjectName("HeroPanel")
+        event_layout = QHBoxLayout(event_panel)
+        event_layout.setContentsMargins(22, 17, 22, 17)
+        event_copy = QVBoxLayout()
+        event_copy.setSpacing(3)
+        self.heading = QLabel()
+        self.heading.setObjectName("SectionTitle")
+        self.batch_meta = QLabel()
+        self.batch_meta.setObjectName("BatchMeta")
+        event_copy.addWidget(self.heading)
+        event_copy.addWidget(self.batch_meta)
+        event_layout.addLayout(event_copy, 1)
+        self.batch_status = QLabel("COLLECTING")
+        self.batch_status.setObjectName("StatusBadge")
+        event_layout.addWidget(self.batch_status)
+        layout.addWidget(event_panel)
+
+        source_actions = QHBoxLayout()
+        source_actions.setSpacing(14)
+        self.add_files = QToolButton()
+        self.add_files.setText("Add photos")
+        self.add_files.setToolTip("Choose one or multiple individual photo files")
+        self.add_files.setIcon(_icon(self.add_files, QStyle.StandardPixmap.SP_FileIcon))
+        self.add_files.setIconSize(QSize(30, 30))
+        self.add_files.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.add_files.setProperty("actionCard", True)
+        self.add_files.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.add_files.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_files.clicked.connect(self.add_files_requested)
-        self.add_folder = QPushButton("Add folder")
+        self.add_folder = QToolButton()
+        self.add_folder.setText("Add a folder")
+        self.add_folder.setToolTip("Choose a folder to discover photos recursively")
+        self.add_folder.setIcon(_icon(self.add_folder, QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.add_folder.setIconSize(QSize(30, 30))
+        self.add_folder.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.add_folder.setProperty("actionCard", True)
+        self.add_folder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.add_folder.setCursor(Qt.CursorShape.PointingHandCursor)
         self.add_folder.clicked.connect(self.add_folder_requested)
-        self.remove_selection = QPushButton("Remove selected")
-        self.remove_selection.clicked.connect(self.remove_selection_requested)
-        self.scan = QPushButton("Scan and validate")
-        self.scan.clicked.connect(self.scan_requested)
-        self.new_batch = QPushButton("New contribution")
-        self.new_batch.clicked.connect(self.new_batch_requested)
-        self.pause = QPushButton("Pause scan")
+        source_actions.addWidget(self.add_files)
+        source_actions.addWidget(self.add_folder)
+        layout.addLayout(source_actions)
+
+        selection_panel = QFrame()
+        selection_panel.setObjectName("Panel")
+        selection_layout = QVBoxLayout(selection_panel)
+        selection_layout.setContentsMargins(18, 15, 18, 16)
+        selection_layout.setSpacing(10)
+        selection_header = QHBoxLayout()
+        selected_title = QLabel("Selected sources")
+        selected_title.setObjectName("SectionTitle")
+        self.selection_count = QLabel("0 SOURCES")
+        self.selection_count.setObjectName("StatusBadge")
+        selection_header.addWidget(selected_title)
+        selection_header.addStretch()
+        selection_header.addWidget(self.selection_count)
+        selection_layout.addLayout(selection_header)
+        self.selections = QListWidget()
+        self.selections.setAlternatingRowColors(True)
+        self.selections.setMinimumHeight(130)
+        selection_layout.addWidget(self.selections, 1)
+        self.empty_hint = QLabel("No sources yet. Add photos, a folder, or both to begin.")
+        self.empty_hint.setObjectName("BodyMuted")
+        self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        selection_layout.addWidget(self.empty_hint)
+        layout.addWidget(selection_panel, 1)
+
+        self.progress_panel = QFrame()
+        self.progress_panel.setObjectName("ProgressPanel")
+        progress_layout = QVBoxLayout(self.progress_panel)
+        progress_layout.setContentsMargins(18, 13, 18, 13)
+        progress_layout.setSpacing(9)
+        progress_header = QHBoxLayout()
+        progress_title = QLabel("Checking local photos")
+        progress_title.setObjectName("SectionTitle")
+        self.pause = _style_button(
+            QPushButton("Pause scan"), icon=QStyle.StandardPixmap.SP_MediaPause
+        )
         self.pause.clicked.connect(self.pause_requested)
-        self.pause.hide()
-        for button in (
-            self.add_files,
-            self.add_folder,
-            self.remove_selection,
-            self.scan,
-            self.pause,
-            self.new_batch,
-        ):
-            buttons.addWidget(button)
-        layout.addLayout(buttons)
+        progress_header.addWidget(progress_title)
+        progress_header.addStretch()
+        progress_header.addWidget(self.pause)
+        progress_layout.addLayout(progress_header)
         self.progress = QProgressBar()
-        self.progress.hide()
-        layout.addWidget(self.progress)
+        progress_layout.addWidget(self.progress)
         self.progress_text = QLabel()
+        self.progress_text.setObjectName("BodyMuted")
         self.progress_text.setWordWrap(True)
-        layout.addWidget(self.progress_text)
+        progress_layout.addWidget(self.progress_text)
+        self.progress_panel.hide()
+        layout.addWidget(self.progress_panel)
+
+        buttons = QHBoxLayout()
+        self.remove_selection = _style_button(
+            QPushButton("Remove selected"),
+            icon=QStyle.StandardPixmap.SP_TrashIcon,
+            kind="ghost",
+        )
+        self.remove_selection.clicked.connect(self.remove_selection_requested)
+        self.scan = _style_button(
+            QPushButton("Scan and validate"),
+            icon=QStyle.StandardPixmap.SP_MediaPlay,
+            kind="primary",
+        )
+        self.scan.clicked.connect(self.scan_requested)
+        self.new_batch = _style_button(
+            QPushButton("New contribution"),
+            icon=QStyle.StandardPixmap.SP_FileDialogNewFolder,
+        )
+        self.new_batch.clicked.connect(self.new_batch_requested)
+        buttons.addWidget(self.remove_selection)
+        buttons.addStretch()
+        buttons.addWidget(self.new_batch)
+        buttons.addWidget(self.scan)
+        layout.addLayout(buttons)
 
     def show_batch(self, event: EventCache, batch_id: UUID, store: CheckpointStore) -> None:
-        self.heading.setText(f"<h2>{event.name}</h2><p>Contribution {batch_id}</p>")
+        self.heading.setText(event.name)
+        self.batch_meta.setText(f"Contribution  {batch_id}")
         self.selections.clear()
         for selection in store.list_selections(batch_id):
-            item = QListWidgetItem(f"{selection.kind.value.title()}: {selection.source_path}")
+            icon = (
+                QStyle.StandardPixmap.SP_DirIcon
+                if selection.kind.value == "folder"
+                else QStyle.StandardPixmap.SP_FileIcon
+            )
+            item = QListWidgetItem(
+                _icon(self.selections, icon),
+                f"{selection.kind.value.title()}    {selection.source_path}",
+            )
+            item.setSizeHint(QSize(0, 48))
             item.setData(Qt.ItemDataRole.UserRole, selection.id)
             self.selections.addItem(item)
         batch = store.get_batch(batch_id)
         self._batch_frozen = batch.frozen
+        self.batch_status.setText("FROZEN" if batch.frozen else "COLLECTING")
+        self.batch_status.setProperty("status", "ready" if batch.frozen else "collecting")
+        self.batch_status.style().unpolish(self.batch_status)
+        self.batch_status.style().polish(self.batch_status)
+        count = self.selections.count()
+        self.selection_count.setText(f"{count} {'SOURCE' if count == 1 else 'SOURCES'}")
+        self.empty_hint.setVisible(count == 0)
         self.add_files.setEnabled(not batch.frozen)
         self.add_folder.setEnabled(not batch.frozen)
         self.remove_selection.setEnabled(not batch.frozen)
-        self.progress.hide()
-        self.pause.hide()
+        self.progress_panel.hide()
         self.progress_text.clear()
 
     def scan_started(self) -> None:
         self.progress.setRange(0, 0)
-        self.progress.show()
-        self.pause.show()
+        self.progress_panel.show()
         for button in (
             self.add_files,
             self.add_folder,
@@ -280,8 +607,7 @@ class SelectionPage(QWidget):
         )
 
     def scan_stopped(self) -> None:
-        self.progress.hide()
-        self.pause.hide()
+        self.progress_panel.hide()
         self.add_files.setEnabled(not self._batch_frozen)
         self.add_folder.setEnabled(not self._batch_frozen)
         self.remove_selection.setEnabled(not self._batch_frozen)
@@ -297,33 +623,94 @@ class ValidationPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<h2>Review inventory</h2>"))
+        layout.setContentsMargins(52, 30, 52, 34)
+        layout.setSpacing(18)
+        layout.addWidget(
+            PageHeading(
+                "Local inventory",
+                "Review before approval.",
+                "Accepted photos are ready. Resolve any blocking rows before freezing the batch.",
+                "STEP 3 OF 3",
+            )
+        )
+
+        stats = QGridLayout()
+        stats.setHorizontalSpacing(12)
+        self.accepted_stat = StatCard("Accepted", tone="success")
+        self.rejected_stat = StatCard("Rejected", tone="danger")
+        self.blocking_stat = StatCard("Blocking", tone="warning")
+        self.reused_stat = StatCard("Checkpoints reused", tone="accent")
+        for column, card in enumerate(
+            (self.accepted_stat, self.rejected_stat, self.blocking_stat, self.reused_stat)
+        ):
+            stats.addWidget(card, 0, column)
+        layout.addLayout(stats)
+
         self.summary = QLabel()
+        self.summary.setObjectName("InfoBanner")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
+
+        review_panel = QFrame()
+        review_panel.setObjectName("Panel")
+        review_layout = QVBoxLayout(review_panel)
+        review_layout.setContentsMargins(18, 15, 18, 16)
+        review_layout.setSpacing(10)
+        review_title = QLabel("Items needing attention")
+        review_title.setObjectName("SectionTitle")
+        review_layout.addWidget(review_title)
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Local file", "Status", "Reason"])
-        self.table.horizontalHeader().setStretchLastSection(True)
-        layout.addWidget(self.table)
+        self.table.setAlternatingRowColors(True)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.verticalHeader().setVisible(False)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        review_layout.addWidget(self.table, 1)
+        self.review_empty = QLabel("Everything passed local validation.")
+        self.review_empty.setObjectName("BodyMuted")
+        self.review_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        review_layout.addWidget(self.review_empty)
+        layout.addWidget(review_panel, 1)
+
         buttons = QHBoxLayout()
-        self.approve = QPushButton("Approve contribution")
+        self.approve = _style_button(
+            QPushButton("Approve contribution"),
+            icon=QStyle.StandardPixmap.SP_DialogApplyButton,
+            kind="primary",
+        )
         self.approve.clicked.connect(self.approve_requested)
-        rescan = QPushButton("Rescan")
-        rescan.clicked.connect(self.rescan_requested)
-        export = QPushButton("Export redacted diagnostics")
-        export.clicked.connect(self.export_requested)
+        self.rescan = _style_button(
+            QPushButton("Back to sources"), icon=QStyle.StandardPixmap.SP_ArrowBack
+        )
+        self.rescan.clicked.connect(self.rescan_requested)
+        self.export = _style_button(
+            QPushButton("Export redacted diagnostics"),
+            icon=QStyle.StandardPixmap.SP_DialogSaveButton,
+            kind="ghost",
+        )
+        self.export.clicked.connect(self.export_requested)
+        buttons.addWidget(self.export)
+        buttons.addStretch()
+        buttons.addWidget(self.rescan)
         buttons.addWidget(self.approve)
-        buttons.addWidget(rescan)
-        buttons.addWidget(export)
         layout.addLayout(buttons)
 
     def show_summary(self, summary: ScanSummary, store: CheckpointStore, *, batch_id: UUID) -> None:
         self.summary.setText(
-            f"Accepted: {summary.accepted_count} ({format_bytes(summary.accepted_bytes)}). "
-            f"Rejected: {summary.rejected_count} ({format_bytes(summary.rejected_bytes)}). "
-            f"Blocking items/issues: {summary.blocking_item_count}/"
-            f"{summary.blocking_issue_count}. Reused checkpoints: {summary.reused_count}."
+            f"{format_bytes(summary.accepted_bytes)} accepted and "
+            f"{format_bytes(summary.rejected_bytes)} rejected. "
+            "Only local metadata and checksums have been created; no photos were transferred."
         )
+        self.accepted_stat.value.setText(str(summary.accepted_count))
+        self.rejected_stat.value.setText(str(summary.rejected_count))
+        self.blocking_stat.value.setText(
+            str(summary.blocking_item_count + summary.blocking_issue_count)
+        )
+        self.reused_stat.value.setText(str(summary.reused_count))
         rows: list[tuple[str, str, str]] = []
         for item in store.list_items(batch_id):
             if item.status is not InventoryStatus.ACCEPTED:
@@ -331,7 +718,7 @@ class ValidationPage(QWidget):
                     (
                         str(item.source_path),
                         item.status.value,
-                        item.reason.value if item.reason else "",
+                        item.reason.value.replace("_", " ").title() if item.reason else "",
                     )
                 )
         for issue in store.list_scan_issues(batch_id):
@@ -339,13 +726,18 @@ class ValidationPage(QWidget):
                 (
                     str(issue.source_path),
                     "blocking" if issue.blocking else "warning",
-                    issue.reason.value,
+                    issue.reason.value.replace("_", " ").title(),
                 )
             )
         self.table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
             for column_index, value in enumerate(row):
-                self.table.setItem(row_index, column_index, QTableWidgetItem(value))
+                item = QTableWidgetItem(value)
+                if column_index == 1:
+                    color = "#ff8294" if value in {"rejected", "blocking"} else "#f7c66d"
+                    item.setForeground(QColor(color))
+                self.table.setItem(row_index, column_index, item)
+        self.review_empty.setVisible(not rows)
         self.approve.setEnabled(summary.can_approve and summary.state is BatchState.NEEDS_REVIEW)
 
 
@@ -358,30 +750,99 @@ class ApprovedPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("<h2>Contribution ready</h2>"))
+        layout.setContentsMargins(52, 34, 52, 38)
+        layout.setSpacing(22)
+        layout.addWidget(
+            PageHeading(
+                "Local approval",
+                "Contribution ready.",
+                "This batch is frozen and protected from accidental source changes.",
+                "APPROVED",
+            )
+        )
+
+        hero = QFrame()
+        hero.setObjectName("HeroPanel")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(28, 24, 28, 24)
+        success_icon = QLabel()
+        success_icon.setPixmap(
+            _icon(success_icon, QStyle.StandardPixmap.SP_DialogApplyButton).pixmap(48, 48)
+        )
+        hero_layout.addWidget(success_icon, 0, Qt.AlignmentFlag.AlignTop)
+        copy = QVBoxLayout()
+        title = QLabel("Local inventory locked")
+        title.setObjectName("HeroTitle")
+        copy.addWidget(title)
         self.message = QLabel()
+        self.message.setObjectName("HeroCopy")
         self.message.setWordWrap(True)
-        layout.addWidget(self.message)
+        copy.addWidget(self.message)
+        hero_layout.addLayout(copy, 1)
+        ready = QLabel("READY")
+        ready.setObjectName("StatusBadge")
+        ready.setProperty("status", "ready")
+        hero_layout.addWidget(ready, 0, Qt.AlignmentFlag.AlignTop)
+        layout.addWidget(hero)
+
+        stages = QHBoxLayout()
+        stages.setSpacing(12)
+        for number, title_text, detail in (
+            ("01", "Inventory", "Photos checked locally"),
+            ("02", "Approval", "Contribution frozen"),
+            ("03", "Cloud upload", "Connects in Session 4"),
+        ):
+            stage = QFrame()
+            stage.setObjectName("StatCard")
+            stage_layout = QVBoxLayout(stage)
+            stage_layout.setContentsMargins(18, 16, 18, 16)
+            stage_number = QLabel(number)
+            stage_number.setObjectName("PageEyebrow")
+            stage_title = QLabel(title_text)
+            stage_title.setObjectName("SectionTitle")
+            stage_detail = QLabel(detail)
+            stage_detail.setObjectName("BodyMuted")
+            stage_layout.addWidget(stage_number)
+            stage_layout.addWidget(stage_title)
+            stage_layout.addWidget(stage_detail)
+            stages.addWidget(stage, 1)
+        layout.addLayout(stages)
+
         buttons = QHBoxLayout()
-        new_batch = QPushButton("Create another contribution")
-        new_batch.clicked.connect(self.new_batch_requested)
-        verify = QPushButton("Verify sources again")
-        verify.clicked.connect(self.verify_requested)
-        export = QPushButton("Export redacted diagnostics")
-        export.clicked.connect(self.export_requested)
-        cleanup = QPushButton("Remove local event checkpoint")
-        cleanup.clicked.connect(self.cleanup_requested)
-        buttons.addWidget(new_batch)
-        buttons.addWidget(verify)
-        buttons.addWidget(export)
-        buttons.addWidget(cleanup)
+        self.new_batch = _style_button(
+            QPushButton("Create another contribution"),
+            icon=QStyle.StandardPixmap.SP_FileDialogNewFolder,
+            kind="primary",
+        )
+        self.new_batch.clicked.connect(self.new_batch_requested)
+        self.verify = _style_button(
+            QPushButton("Verify sources again"), icon=QStyle.StandardPixmap.SP_BrowserReload
+        )
+        self.verify.clicked.connect(self.verify_requested)
+        self.export = _style_button(
+            QPushButton("Export diagnostics"),
+            icon=QStyle.StandardPixmap.SP_DialogSaveButton,
+            kind="ghost",
+        )
+        self.export.clicked.connect(self.export_requested)
+        self.cleanup = _style_button(
+            QPushButton("Remove local checkpoint"),
+            icon=QStyle.StandardPixmap.SP_TrashIcon,
+            kind="danger",
+        )
+        self.cleanup.clicked.connect(self.cleanup_requested)
+        buttons.addWidget(self.export)
+        buttons.addWidget(self.cleanup)
+        buttons.addStretch()
+        buttons.addWidget(self.verify)
+        buttons.addWidget(self.new_batch)
         layout.addLayout(buttons)
         layout.addStretch()
 
     def show_batch(self, batch_id: UUID) -> None:
         self.message.setText(
-            f"Batch {batch_id} is frozen and ready for the Session 4 upload service. "
-            "No network transfer has occurred. New files belong in a new contribution batch."
+            f"Batch {batch_id} is verified and ready for the Session 4 upload service. "
+            "No network transfer has occurred; new photos belong in a new contribution."
         )
 
 
@@ -394,6 +855,9 @@ class MainWindow(QMainWindow):
         demo_event: EventCache | None = None,
     ) -> None:
         super().__init__()
+        application = QApplication.instance()
+        if isinstance(application, QApplication):
+            apply_dark_theme(application)
         self.store = store
         self.gateway = gateway
         self.current_event: EventCache | None = None
@@ -401,7 +865,16 @@ class MainWindow(QMainWindow):
         self.scan_thread: QThread | None = None
         self.scan_stop: Event | None = None
 
+        shell = QWidget()
+        shell.setObjectName("AppShell")
+        shell_layout = QVBoxLayout(shell)
+        shell_layout.setContentsMargins(0, 0, 0, 0)
+        shell_layout.setSpacing(0)
+        self.header = BrandHeader(demo=demo_event is not None)
+        shell_layout.addWidget(self.header)
+
         self.stack = QStackedWidget()
+        self.stack.setObjectName("PageStack")
         self.login = LoginPage()
         self.events = EventSelectorPage()
         self.selection = SelectionPage()
@@ -409,9 +882,12 @@ class MainWindow(QMainWindow):
         self.approved = ApprovedPage()
         for page in (self.login, self.events, self.selection, self.validation, self.approved):
             self.stack.addWidget(page)
-        self.setCentralWidget(self.stack)
-        self.setWindowTitle("OpenFotos")
-        self.resize(920, 620)
+        shell_layout.addWidget(self.stack, 1)
+        self.setCentralWidget(shell)
+        self.setWindowTitle("OpenFotos • Desktop Ingestion")
+        self.setWindowIcon(QIcon(str(asset_path("ofts.svg"))))
+        self.setMinimumSize(900, 650)
+        self.resize(1180, 780)
         self._connect_actions()
 
         if demo_event is None:
@@ -465,6 +941,7 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _open_event(self, event: EventCache) -> None:
         self.current_event = event
+        self.header.set_context(event.name)
         batches = self.store.list_batches(event.id)
         self.current_batch_id = batches[-1].id if batches else self.store.create_batch(event.id)
         batch = self.store.get_batch(self.current_batch_id)
@@ -639,6 +1116,7 @@ class MainWindow(QMainWindow):
         self.store.delete_local_event(self.current_event.id)
         self.current_event = None
         self.current_batch_id = None
+        self.header.set_context("Private event ingestion")
         remaining = self.store.list_events()
         self.events.set_events(remaining, demo=False)
         self.stack.setCurrentWidget(self.events if remaining else self.login)

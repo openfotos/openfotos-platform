@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 782 238" width="782" height="238" role="img">
+  <title>OFTS</title>
+  <style>[data-role="selective-cell"] { fill: #f8fafc; }</style>
+  <g data-mode="droplet">
+    <path data-role="selective-cell" d="M 47 0 L 68 0 L 68 0 L 68 34 L 68 34 L 34 34 L 34 34 L 34 13 Q 34 0 47 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 68 0 L 102 0 L 102 0 L 102 34 L 102 34 L 68 34 L 68 34 L 68 0 L 68 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 102 0 L 123 0 Q 136 0 136 13 L 136 34 L 136 34 L 102 34 L 102 34 L 102 0 L 102 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 217 0 L 238 0 L 238 0 L 238 34 L 238 34 L 204 34 L 204 34 L 204 13 Q 204 0 217 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 238 0 L 272 0 L 272 0 L 272 34 L 272 34 L 238 34 L 238 34 L 238 0 L 238 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 272 0 L 306 0 L 306 0 L 306 34 L 306 34 L 272 34 L 272 34 L 272 0 L 272 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 306 0 L 340 0 L 340 0 L 340 34 L 340 34 L 306 34 L 306 34 L 306 0 L 306 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 340 0 L 361 0 Q 374 0 374 13 L 374 21 Q 374 34 361 34 L 340 34 L 340 34 L 340 0 L 340 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 421 0 L 442 0 L 442 0 L 442 34 L 442 34 L 421 34 Q 408 34 408 21 L 408 13 Q 408 0 421 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 442 0 L 476 0 L 476 0 L 476 34 L 476 34 L 442 34 L 442 34 L 442 0 L 442 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 476 0 L 510 0 L 510 0 L 510 34 L 510 34 L 476 34 L 476 34 L 476 0 L 476 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 510 0 L 544 0 L 544 0 L 544 34 L 544 34 L 510 34 L 510 34 L 510 0 L 510 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 544 0 L 565 0 Q 578 0 578 13 L 578 21 Q 578 34 565 34 L 544 34 L 544 34 L 544 0 L 544 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 659 0 L 680 0 L 680 0 L 680 34 L 680 34 L 646 34 L 646 34 L 646 13 Q 646 0 659 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 680 0 L 714 0 L 714 0 L 714 34 L 714 34 L 680 34 L 680 34 L 680 0 L 680 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 714 0 L 748 0 L 748 0 L 748 34 L 748 34 L 714 34 L 714 34 L 714 0 L 714 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 748 0 L 769 0 Q 782 0 782 13 L 782 21 Q 782 34 769 34 L 748 34 L 748 34 L 748 0 L 748 0 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 13 34 L 34 34 L 34 34 L 34 68 L 34 68 L 0 68 L 0 68 L 0 47 Q 0 34 13 34 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 136 34 L 157 34 Q 170 34 170 47 L 170 68 L 170 68 L 136 68 L 136 68 L 136 34 L 136 34 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 204 34 L 238 34 L 238 34 L 238 68 L 238 68 L 204 68 L 204 68 L 204 34 L 204 34 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 476 34 L 510 34 L 510 34 L 510 68 L 510 68 L 476 68 L 476 68 L 476 34 L 476 34 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 625 34 L 646 34 L 646 34 L 646 68 L 646 68 L 612 68 L 612 68 L 612 47 Q 612 34 625 34 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 0 68 L 34 68 L 34 68 L 34 102 L 34 102 L 0 102 L 0 102 L 0 68 L 0 68 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 136 68 L 170 68 L 170 68 L 170 102 L 170 102 L 136 102 L 136 102 L 136 68 L 136 68 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 204 68 L 238 68 L 238 68 L 238 102 L 238 102 L 204 102 L 204 102 L 204 68 L 204 68 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 476 68 L 510 68 L 510 68 L 510 102 L 510 102 L 476 102 L 476 102 L 476 68 L 476 68 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 612 68 L 646 68 L 646 68 L 646 102 L 646 102 L 625 102 Q 612 102 612 89 L 612 68 L 612 68 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 0 102 L 34 102 L 34 102 L 34 136 L 34 136 L 0 136 L 0 136 L 0 102 L 0 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 136 102 L 170 102 L 170 102 L 170 136 L 170 136 L 136 136 L 136 136 L 136 102 L 136 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 204 102 L 238 102 L 238 102 L 238 136 L 238 136 L 204 136 L 204 136 L 204 102 L 204 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 238 102 L 272 102 L 272 102 L 272 136 L 272 136 L 238 136 L 238 136 L 238 102 L 238 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 272 102 L 306 102 L 306 102 L 306 136 L 306 136 L 272 136 L 272 136 L 272 102 L 272 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 306 102 L 327 102 Q 340 102 340 115 L 340 123 Q 340 136 327 136 L 306 136 L 306 136 L 306 102 L 306 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 476 102 L 510 102 L 510 102 L 510 136 L 510 136 L 476 136 L 476 136 L 476 102 L 476 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 646 102 L 680 102 L 680 102 L 680 136 L 680 136 L 659 136 Q 646 136 646 123 L 646 102 L 646 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 680 102 L 714 102 L 714 102 L 714 136 L 714 136 L 680 136 L 680 136 L 680 102 L 680 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 714 102 L 735 102 Q 748 102 748 115 L 748 136 L 748 136 L 714 136 L 714 136 L 714 102 L 714 102 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 0 136 L 34 136 L 34 136 L 34 170 L 34 170 L 0 170 L 0 170 L 0 136 L 0 136 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 136 136 L 170 136 L 170 136 L 170 170 L 170 170 L 136 170 L 136 170 L 136 136 L 136 136 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 204 136 L 238 136 L 238 136 L 238 170 L 238 170 L 204 170 L 204 170 L 204 136 L 204 136 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 476 136 L 510 136 L 510 136 L 510 170 L 510 170 L 476 170 L 476 170 L 476 136 L 476 136 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 748 136 L 769 136 Q 782 136 782 149 L 782 170 L 782 170 L 748 170 L 748 170 L 748 136 L 748 136 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 0 170 L 34 170 L 34 170 L 34 204 L 34 204 L 13 204 Q 0 204 0 191 L 0 170 L 0 170 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 136 170 L 170 170 L 170 170 L 170 191 Q 170 204 157 204 L 136 204 L 136 204 L 136 170 L 136 170 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 204 170 L 238 170 L 238 170 L 238 204 L 238 204 L 204 204 L 204 204 L 204 170 L 204 170 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 476 170 L 510 170 L 510 170 L 510 204 L 510 204 L 476 204 L 476 204 L 476 170 L 476 170 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 748 170 L 782 170 L 782 170 L 782 191 Q 782 204 769 204 L 748 204 L 748 204 L 748 170 L 748 170 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 34 204 L 68 204 L 68 204 L 68 238 L 68 238 L 47 238 Q 34 238 34 225 L 34 204 L 34 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 68 204 L 102 204 L 102 204 L 102 238 L 102 238 L 68 238 L 68 238 L 68 204 L 68 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 102 204 L 136 204 L 136 204 L 136 225 Q 136 238 123 238 L 102 238 L 102 238 L 102 204 L 102 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 204 204 L 238 204 L 238 204 L 238 225 Q 238 238 225 238 L 217 238 Q 204 238 204 225 L 204 204 L 204 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 476 204 L 510 204 L 510 204 L 510 225 Q 510 238 497 238 L 489 238 Q 476 238 476 225 L 476 204 L 476 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 625 204 L 646 204 L 646 204 L 646 238 L 646 238 L 625 238 Q 612 238 612 225 L 612 217 Q 612 204 625 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 646 204 L 680 204 L 680 204 L 680 238 L 680 238 L 646 238 L 646 238 L 646 204 L 646 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 680 204 L 714 204 L 714 204 L 714 238 L 714 238 L 680 238 L 680 238 L 680 204 L 680 204 Z" fill="#050505" />
+    <path data-role="selective-cell" d="M 714 204 L 748 204 L 748 204 L 748 225 Q 748 238 735 238 L 714 238 L 714 238 L 714 204 L 714 204 Z" fill="#050505" />
+  </g>
+</svg>

@@ -1,7 +1,8 @@
 from pathlib import Path
 from uuid import UUID
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QPalette
+from PySide6.QtWidgets import QApplication, QToolButton
 
 from openfotos_desktop.ingestion import CheckpointStore, EventCache
 from openfotos_desktop.ports import Session3Gateway
@@ -52,4 +53,28 @@ def test_demo_event_opens_functional_local_inventory(tmp_path: Path) -> None:
     assert isinstance(window.stack.currentWidget(), SelectionPage)
     assert window.current_event == DEMO_EVENT
     assert window.current_batch_id is not None
+    window.close()
+
+
+def test_desktop_shell_packages_brand_and_source_actions(tmp_path: Path) -> None:
+    app = application()
+    window = MainWindow(
+        store=CheckpointStore(tmp_path / "branded.sqlite3"),
+        gateway=Session3Gateway(),
+        demo_event=DEMO_EVENT,
+    )
+
+    assert window.header.logo.renderer().isValid()
+    assert not window.windowIcon().isNull()
+    assert app.palette().color(QPalette.ColorRole.Window).name() == "#080b12"
+
+    window.events.open_button.click()
+    app.processEvents()
+
+    assert isinstance(window.selection.add_files, QToolButton)
+    assert isinstance(window.selection.add_folder, QToolButton)
+    assert not window.selection.add_files.icon().isNull()
+    assert not window.selection.add_folder.icon().isNull()
+    assert window.selection.add_files.property("actionCard") is True
+    assert window.selection.add_folder.property("actionCard") is True
     window.close()
