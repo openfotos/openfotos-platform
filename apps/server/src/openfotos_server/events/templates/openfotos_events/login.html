@@ -1,0 +1,21 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}Photographer sign in · OpenFotos{% endblock %}
+
+{% block content %}
+<section class="card narrow">
+  <p class="eyebrow">Photographer access</p>
+  <h1>Sign in to OpenFotos</h1>
+  <form method="post" novalidate>
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="form-error" role="alert">{{ form.non_field_errors }}</div>
+    {% endif %}
+    <label for="{{ form.username.id_for_label }}">Username</label>
+    {{ form.username }}
+    <label for="{{ form.password.id_for_label }}">Password</label>
+    {{ form.password }}
+    <button type="submit">Sign in</button>
+  </form>
+</section>
+{% endblock %}

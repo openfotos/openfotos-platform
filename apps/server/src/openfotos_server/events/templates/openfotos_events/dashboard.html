@@ -1,0 +1,42 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}{{ photographer.display_name }} · OpenFotos{% endblock %}
+
+{% block content %}
+<div class="page-heading">
+  <div>
+    <p class="eyebrow">Photographer dashboard</p>
+    <h1>{{ photographer.display_name }}</h1>
+  </div>
+  <form method="post" action="{% url 'events:logout' %}">
+    {% csrf_token %}
+    <button class="button-secondary" type="submit">Sign out</button>
+  </form>
+</div>
+
+<section class="card">
+  <h2>Events</h2>
+  {% if events %}
+    <div class="event-list">
+      {% for event in events %}
+        <article class="event-row">
+          <div>
+            <h3>{{ event.name }}</h3>
+            <p class="muted">Status: {{ event.get_state_display }}</p>
+            {% if event.expires_at %}
+              <p class="muted">Expires: {{ event.expires_at|date:"j M Y, P T" }}</p>
+            {% endif %}
+          </div>
+          {% if event.state == "published" %}
+            <a href="{% url 'events:event-access' token=event.public_token %}">Open event link</a>
+          {% else %}
+            <span class="muted">Not publicly available</span>
+          {% endif %}
+        </article>
+      {% endfor %}
+    </div>
+  {% else %}
+    <p>No events have been assigned to this photographer yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

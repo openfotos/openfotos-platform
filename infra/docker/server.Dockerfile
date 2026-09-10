@@ -13,6 +13,7 @@ COPY apps ./apps
 COPY packages ./packages
 
 RUN uv sync --frozen --no-dev --extra server
+RUN .venv/bin/python apps/server/manage.py collectstatic --noinput
 
 ENV PATH="/app/.venv/bin:$PATH"
 CMD ["gunicorn", "openfotos_server.wsgi:application", "--bind", "0.0.0.0:8000", "--workers", "1", "--threads", "4"]

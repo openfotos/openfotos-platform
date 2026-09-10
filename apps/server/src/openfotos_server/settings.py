@@ -1,9 +1,11 @@
 """Development-safe settings for the initial OpenFotos server skeleton."""
 
 import os
+import re
 from pathlib import Path
 
 import dj_database_url
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parents[4]
 
@@ -11,7 +13,10 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "unsafe-development-key")
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [
     host.strip()
-    for host in os.environ.get("DJANGO_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",")
+    for host in os.environ.get(
+        "DJANGO_ALLOWED_HOSTS",
+        "localhost,.localhost,127.0.0.1,testserver",
+    ).split(",")
     if host.strip()
 ]
 
@@ -22,6 +27,7 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "openfotos_server.events",
 ]
 
 MIDDLEWARE = [
@@ -31,6 +37,8 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "openfotos_server.events.middleware.RequestIdentityMiddleware",
+    "openfotos_server.events.middleware.PhotographerHostMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -87,8 +95,34 @@ STORAGES = {
 }
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+PUBLIC_BASE_DOMAIN = os.environ.get("PUBLIC_BASE_DOMAIN", "localhost").strip().lower().rstrip(".")
+base_domain_labels = PUBLIC_BASE_DOMAIN.split(".")
+if len(PUBLIC_BASE_DOMAIN) > 253 or any(
+    not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label) for label in base_domain_labels
+):
+    raise ImproperlyConfigured("PUBLIC_BASE_DOMAIN must be a hostname without a scheme or port.")
+
+
+def positive_integer_setting(name: str, default: int) -> int:
+    try:
+        value = int(os.environ.get(name, str(default)))
+    except ValueError as exc:
+        raise ImproperlyConfigured(f"{name} must be a positive integer.") from exc
+    if value <= 0:
+        raise ImproperlyConfigured(f"{name} must be a positive integer.")
+    return value
+
+
+AUTH_FAILURE_LIMIT = positive_integer_setting("AUTH_FAILURE_LIMIT", 5)
+AUTH_FAILURE_WINDOW_SECONDS = positive_integer_setting("AUTH_FAILURE_WINDOW_SECONDS", 900)
+EVENT_SESSION_TTL_SECONDS = positive_integer_setting("EVENT_SESSION_TTL_SECONDS", 86_400)
+
+SESSION_COOKIE_NAME = "openfotos_account_session"
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = not DEBUG
 SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "strict-origin"
 X_FRAME_OPTIONS = "DENY"

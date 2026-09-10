@@ -7,7 +7,9 @@ photos.
 
 The pilot deliberately targets one photographer, one reception, less than 20 GB of photographs,
 and a ten-day delivery window. The complete product and architecture decisions are in the
-[product and technical plan](OpenFotos_Markdown/OpenFotos_Product_and_Technical_Plan.md).
+[product and technical plan](OpenFotos_Markdown/OpenFotos_Product_and_Technical_Plan.md). The
+[pilot access decision](docs/adr/0002-pilot-accounts-tenancy-and-event-access.md) records the exact
+Session 2 authorization and PIN tradeoffs.
 
 ## Repository map
 
@@ -36,6 +38,8 @@ Install [uv](https://docs.astral.sh/uv/), then run:
 
 ```bash
 uv sync --extra server
+uv run python apps/server/manage.py migrate
+uv run python apps/server/manage.py createsuperuser
 uv run python apps/server/manage.py check
 uv run python apps/server/manage.py runserver
 ```
@@ -47,6 +51,12 @@ extra installed:
 uv sync --extra desktop
 uv run python -m openfotos_desktop
 ```
+
+For the Session 2 browser flow, open `http://localhost:8000/admin/` and provision records in this
+order: Django user, photographer, photographer membership, then event. Event PINs are write-only
+six-digit values. Use the event admin actions to move a sample through its legal lifecycle or to
+revoke visitor sessions. A photographer with slug `demo` signs in at
+`http://demo.localhost:8000/login/`; its visitor links use the same tenant host.
 
 For development checks:
 

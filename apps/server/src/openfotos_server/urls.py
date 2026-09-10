@@ -2,7 +2,7 @@
 
 from django.contrib import admin
 from django.http import JsonResponse
-from django.urls import path
+from django.urls import include, path
 
 
 def health(_request):
@@ -12,4 +12,5 @@ def health(_request):
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("health/", health, name="health"),
+    path("", include("openfotos_server.events.urls")),
 ]

@@ -1,0 +1,21 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}{{ event.name }} · OpenFotos{% endblock %}
+
+{% block content %}
+<section class="card">
+  <p class="eyebrow">{{ event.photographer.display_name }}</p>
+  <h1>{{ event.name }}</h1>
+  <p>Your private event access is verified. The gallery is being prepared.</p>
+  <dl class="event-details">
+    <div>
+      <dt>Status</dt>
+      <dd>{{ event.get_state_display }}</dd>
+    </div>
+    <div>
+      <dt>Access available until</dt>
+      <dd>{{ event.expires_at|date:"j M Y, P T" }}</dd>
+    </div>
+  </dl>
+</section>
+{% endblock %}

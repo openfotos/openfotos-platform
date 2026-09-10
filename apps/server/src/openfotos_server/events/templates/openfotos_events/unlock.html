@@ -1,0 +1,23 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}Unlock private event · OpenFotos{% endblock %}
+
+{% block content %}
+<section class="card narrow">
+  <p class="eyebrow">Private event</p>
+  <h1>Enter the event PIN</h1>
+  <p>Use the six-digit PIN shared with you to continue.</p>
+  <form method="post" novalidate>
+    {% csrf_token %}
+    {% if form.non_field_errors %}
+      <div class="form-error" role="alert">{{ form.non_field_errors }}</div>
+    {% endif %}
+    <label for="{{ form.pin.id_for_label }}">Event PIN</label>
+    {{ form.pin }}
+    {% if form.pin.errors %}
+      <div class="field-error" role="alert">Enter the six-digit event PIN.</div>
+    {% endif %}
+    <button type="submit">Unlock event</button>
+  </form>
+</section>
+{% endblock %}

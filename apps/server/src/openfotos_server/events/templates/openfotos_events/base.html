@@ -1,0 +1,18 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}OpenFotos{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'openfotos_events/app.css' %}">
+</head>
+<body>
+  <header class="site-header">
+    <span class="brand">OpenFotos</span>
+  </header>
+  <main class="page-shell">
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

@@ -226,9 +226,16 @@ The pilot needs authentication but does not need public account creation. OpenFo
 
 - Hash passwords and event PINs with Argon2.
 
+- For the single-event pilot, event PINs are exactly six ASCII digits and failed login or PIN
+  checks are limited to five per 15 minutes for each subject and direct-client pair. This usability
+  choice carries a recorded offline-guessing risk and must be revisited before expansion.
+
 - Rate limit photographer login, event PIN and selfie endpoints.
 
 - Use secure, HTTP only, SameSite cookies for web sessions.
+
+- Visitor event access uses a separate event-scoped signed cookie for at most 24 hours. Every
+  request revalidates the tenant host, event, Published state, future expiry and access version.
 
 - A visitor who knows the gallery PIN cannot create share links or change event settings.
 

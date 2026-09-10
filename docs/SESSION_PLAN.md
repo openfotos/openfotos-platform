@@ -19,6 +19,12 @@ is tracked.
 
 ## Session 2: Accounts, tenancy, and event lifecycle
 
+**Status (2026-09-10):** Complete. The Django browser slice now resolves photographer tenants
+from the host, enforces active memberships, provides a tenant-filtered dashboard, protects
+Published events with Argon2 PINs and event-scoped signed cookies, rate limits authentication
+failures in the database, and records immutable security audit events. ADR 0002 records the
+interview decisions and accepted PIN risk.
+
 **Goal:** Establish the authorization boundary before accepting media.
 
 **Work:** Implement photographer membership, events, state transitions, admin provisioning,
@@ -28,6 +34,24 @@ events. Add migrations and cross-tenant denial tests.
 **Done when:** An administrator can create the pilot photographer and event; the photographer sees
 only assigned events; a visitor can unlock only a matching published sample event; altered tenant,
 event, and host identifiers are denied.
+
+**Handoff:**
+
+1. Administrators can provision the user, photographer, membership, and event; drive legal event
+   transitions; rotate the write-only PIN or public token; and revoke visitor sessions. A
+   photographer can sign in on its own subdomain and see only that tenant's events. A visitor sees
+   event metadata only after unlocking a matching, unexpired Published event.
+2. Migration `events/0001_initial.py`, server-rendered templates, one static stylesheet, host and
+   request middleware, admin controls, `AUTH_FAILURE_LIMIT`, and
+   `AUTH_FAILURE_WINDOW_SECONDS` were added. The container now collects static files.
+3. `./scripts/check.sh` passes with 23 tests, and a fresh in-memory database applies all Django and
+   events migrations. Static-file discovery succeeds in dry-run mode.
+4. Six-digit PINs retain the accepted database-only offline-guessing risk. Trusted proxy client-IP
+   handling waits for Session 9. Sessions 4 and 5 must add manifest and derivative readiness to the
+   publication gate. Desktop access and refresh tokens remain Session 4 scope.
+5. Session 3's first failing acceptance test should scan a synthetic nested directory and report
+   exact accepted/rejected JPEG counts and bytes while persisting enough SQLite state to resume the
+   same scan after restart.
 
 ## Session 3: Desktop discovery and durable local state
 
