@@ -126,6 +126,7 @@ class InventoryScanner:
                                 reason=RejectionReason.FILE_CHANGED_DURING_SCAN,
                                 content_type=None,
                                 sha256=None,
+                                content_md5=None,
                                 width=None,
                                 height=None,
                             )
@@ -324,6 +325,7 @@ class InventoryScanner:
                 reason=RejectionReason.SOURCE_UNREADABLE,
                 content_type=None,
                 sha256=None,
+                content_md5=None,
                 width=None,
                 height=None,
             )
@@ -335,6 +337,7 @@ class InventoryScanner:
             reason=reason,
             content_type=None,
             sha256=None,
+            content_md5=None,
             width=None,
             height=None,
         )

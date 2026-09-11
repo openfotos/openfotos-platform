@@ -9,11 +9,12 @@ from django.db import IntegrityError, transaction
 from django.test import RequestFactory
 from django.utils import timezone
 
-from openfotos_contracts import EventState
+from openfotos_contracts import EventState, IngestionManifestState
 from openfotos_server.events.admin import EventAdmin, EventAdminForm
 from openfotos_server.events.models import (
     AuditAction,
     Event,
+    IngestionManifest,
     Photographer,
     PhotographerMembership,
 )
@@ -70,13 +71,29 @@ def test_event_transitions_are_legal_idempotent_and_audited() -> None:
     actor = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     event = make_event(photographer)
 
-    for target in (
-        EventState.UPLOADING,
-        EventState.PROCESSING,
-        EventState.REVIEW,
-        EventState.PUBLISHED,
-    ):
+    for target in (EventState.UPLOADING, EventState.PROCESSING, EventState.REVIEW):
         event = transition_event(event_id=event.id, target=target, actor=actor)
+
+    with pytest.raises(ValidationError, match="ingestion manifest"):
+        transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
+    manifest = IngestionManifest.objects.create(
+        event=event,
+        generation=event.intake_generation,
+        state=IngestionManifestState.COMMITTED.value,
+        object_key=f"events/{event.id}/manifests/generation-000001.json",
+        content_sha256="a" * 64,
+        document={},
+        asset_count=1,
+        original_bytes=1,
+    )
+    event.current_ingestion_manifest = manifest
+    event.save(update_fields=("current_ingestion_manifest",))
+    with pytest.raises(ValidationError, match="derivatives"):
+        transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
+    event.derivatives_ready_generation = event.intake_generation
+    event.save(update_fields=("derivatives_ready_generation",))
+
+    event = transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
 
     assert event.state == EventState.PUBLISHED
     assert event.audit_events.filter(action=AuditAction.EVENT_STATE_CHANGED).count() == 4
@@ -134,6 +151,8 @@ def test_admin_can_provision_a_draft_event_with_a_write_only_pin() -> None:
             "photographer": photographer.id,
             "name": "Pilot Reception",
             "storage_limit_bytes": 25_000_000_000,
+            "max_contribution_devices": 10,
+            "processing_profile_id": "pilot-profile-v1",
             "expires_at": (timezone.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
             "pin": "123456",
         }

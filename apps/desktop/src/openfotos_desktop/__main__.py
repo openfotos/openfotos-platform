@@ -25,6 +25,7 @@ def main() -> int:
             "PySide6 is unavailable. Run `uv sync --extra desktop` before starting the app."
         ) from exc
 
+    from .network import DesktopNetworkService
     from .ports import Session3Gateway
     from .ui import MainWindow
 
@@ -55,9 +56,11 @@ def main() -> int:
     instance_lock.setStaleLockTime(0)
     if not instance_lock.tryLock(0):
         raise SystemExit("Another OpenFotos instance is already using this local checkpoint.")
+    store = CheckpointStore(database)
+    gateway = Session3Gateway() if arguments.demo else DesktopNetworkService(store)
     window = MainWindow(
-        store=CheckpointStore(database),
-        gateway=Session3Gateway(),
+        store=store,
+        gateway=gateway,
         demo_event=DEMO_EVENT if arguments.demo else None,
     )
     window.instance_lock = instance_lock

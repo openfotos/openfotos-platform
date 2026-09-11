@@ -14,12 +14,22 @@ class OnlineServicesUnavailable(RuntimeError):
 
 class PhotographerSessionGateway(Protocol):
     def sign_in_lead(
-        self, server_url: str, username: str, password: str
+        self, server_url: str, username: str, password: str, device_label: str
     ) -> Sequence[EventCache]: ...
 
     def enroll_uploader(
         self, server_url: str, invitation: str, device_label: str
     ) -> EventCache: ...
+
+    def resume(self, server_url: str) -> Sequence[EventCache]: ...
+
+    def create_invitation(self, event_id: UUID) -> str: ...
+
+    def close_intake(self, event_id: UUID) -> EventCache: ...
+
+    def reopen_intake(self, event_id: UUID) -> EventCache: ...
+
+    def finalize(self, event_id: UUID) -> dict: ...
 
 
 class BatchProcessingService(Protocol):
@@ -38,7 +48,12 @@ class BatchUploadService(Protocol):
         *,
         transfer_limit: int,
         on_progress: Callable[[int, int], None],
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> None: ...
+
+
+class DesktopGateway(PhotographerSessionGateway, BatchUploadService, Protocol):
+    pass
 
 
 class Session3Gateway:
@@ -49,12 +64,49 @@ class Session3Gateway:
         "Launch with --demo to exercise Session 3 local inventory."
     )
 
-    def sign_in_lead(self, server_url: str, username: str, password: str) -> Sequence[EventCache]:
-        del server_url, username, password
+    def sign_in_lead(
+        self,
+        server_url: str,
+        username: str,
+        password: str,
+        device_label: str,
+    ) -> Sequence[EventCache]:
+        del server_url, username, password, device_label
         raise OnlineServicesUnavailable(self._MESSAGE)
 
     def enroll_uploader(self, server_url: str, invitation: str, device_label: str) -> EventCache:
         del server_url, invitation, device_label
+        raise OnlineServicesUnavailable(self._MESSAGE)
+
+    def resume(self, server_url: str) -> Sequence[EventCache]:
+        del server_url
+        raise OnlineServicesUnavailable(self._MESSAGE)
+
+    def create_invitation(self, event_id: UUID) -> str:
+        del event_id
+        raise OnlineServicesUnavailable(self._MESSAGE)
+
+    def close_intake(self, event_id: UUID) -> EventCache:
+        del event_id
+        raise OnlineServicesUnavailable(self._MESSAGE)
+
+    def reopen_intake(self, event_id: UUID) -> EventCache:
+        del event_id
+        raise OnlineServicesUnavailable(self._MESSAGE)
+
+    def finalize(self, event_id: UUID) -> dict:
+        del event_id
+        raise OnlineServicesUnavailable(self._MESSAGE)
+
+    def upload(
+        self,
+        batch_id: UUID,
+        *,
+        transfer_limit: int,
+        on_progress: Callable[[int, int], None],
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> None:
+        del batch_id, transfer_limit, on_progress, is_cancelled
         raise OnlineServicesUnavailable(self._MESSAGE)
 
 

@@ -6,16 +6,22 @@ from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.utils.html import format_html
 
-from openfotos_contracts import EventState
+from openfotos_contracts import DeviceStatus, EventState
 
 from .audit import record_audit
 from .models import (
+    Asset,
+    AssetObject,
     AuditAction,
     AuditEvent,
     AuditResult,
+    ContributionBatch,
     Event,
+    IngestionManifest,
     Photographer,
     PhotographerMembership,
+    UploaderDevice,
+    UploaderInvitation,
 )
 from .services import (
     change_event_pin,
@@ -39,6 +45,8 @@ class EventAdminForm(forms.ModelForm):
             "photographer",
             "name",
             "storage_limit_bytes",
+            "max_contribution_devices",
+            "processing_profile_id",
             "expires_at",
             "pin",
         )
@@ -47,6 +55,16 @@ class EventAdminForm(forms.ModelForm):
         cleaned_data = super().clean()
         if self.instance._state.adding and not cleaned_data.get("pin"):
             self.add_error("pin", "Set a six-digit PIN when creating an event.")
+        device_limit = cleaned_data.get("max_contribution_devices")
+        if self.instance.pk and device_limit is not None:
+            active_devices = self.instance.uploader_devices.filter(
+                status=DeviceStatus.ACTIVE.value
+            ).count()
+            if device_limit < active_devices:
+                self.add_error(
+                    "max_contribution_devices",
+                    f"Revoke devices before lowering the limit below {active_devices}.",
+                )
         return cleaned_data
 
 
@@ -120,6 +138,12 @@ class EventAdmin(admin.ModelAdmin):
         "public_token",
         "event_url",
         "state",
+        "reserved_original_bytes",
+        "verified_original_bytes",
+        "intake_state",
+        "intake_generation",
+        "current_ingestion_manifest",
+        "derivatives_ready_generation",
         "visitor_access_version",
         "created_at",
         "updated_at",
@@ -257,13 +281,22 @@ class EventAdmin(admin.ModelAdmin):
 
 @admin.register(AuditEvent)
 class AuditEventAdmin(admin.ModelAdmin):
-    list_display = ("created_at", "action", "result", "photographer", "event", "actor")
+    list_display = (
+        "created_at",
+        "action",
+        "result",
+        "photographer",
+        "event",
+        "actor",
+        "uploader_device",
+    )
     list_filter = ("action", "result", "photographer")
     search_fields = ("request_id", "event__name", "photographer__display_name")
     readonly_fields = (
         "photographer",
         "event",
         "actor",
+        "uploader_device",
         "action",
         "result",
         "client_hash",
@@ -283,3 +316,79 @@ class AuditEventAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+class _IngestionRecordAdmin(admin.ModelAdmin):
+    """Expose ingestion history without creating an unaudited mutation path."""
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(UploaderInvitation)
+class UploaderInvitationAdmin(_IngestionRecordAdmin):
+    list_display = (
+        "event",
+        "created_by",
+        "redemption_count",
+        "max_redemptions",
+        "expires_at",
+        "revoked_at",
+        "closed_at",
+    )
+    list_filter = ("event__photographer",)
+    exclude = ("token_hash",)
+
+
+@admin.register(UploaderDevice)
+class UploaderDeviceAdmin(_IngestionRecordAdmin):
+    list_display = ("label", "event", "role", "status", "last_active_at", "created_at")
+    list_filter = ("status", "role", "event__photographer")
+    search_fields = ("label", "event__name")
+
+
+@admin.register(ContributionBatch)
+class ContributionBatchAdmin(_IngestionRecordAdmin):
+    list_display = (
+        "id",
+        "device",
+        "intake_generation",
+        "state",
+        "declared_asset_count",
+        "declared_original_bytes",
+        "created_at",
+    )
+    list_filter = ("state", "device__event__photographer")
+
+
+@admin.register(Asset)
+class AssetAdmin(_IngestionRecordAdmin):
+    list_display = ("id", "original_filename", "batch", "width", "height", "created_at")
+    list_filter = ("batch__device__event__photographer",)
+    search_fields = ("id", "original_filename")
+
+
+@admin.register(AssetObject)
+class AssetObjectAdmin(_IngestionRecordAdmin):
+    list_display = ("asset", "variant", "state", "expected_bytes", "verified_at")
+    list_filter = ("state", "variant", "asset__batch__device__event__photographer")
+    search_fields = ("asset__id", "object_key")
+
+
+@admin.register(IngestionManifest)
+class IngestionManifestAdmin(_IngestionRecordAdmin):
+    list_display = (
+        "event",
+        "generation",
+        "state",
+        "asset_count",
+        "original_bytes",
+        "committed_at",
+    )
+    list_filter = ("state", "event__photographer")

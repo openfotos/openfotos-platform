@@ -7,6 +7,7 @@ from .models import (
     EventCache,
     InventoryItem,
     InventoryStatus,
+    LocalUploadState,
     RejectionReason,
     ScanIssue,
     ScanIssueReason,
@@ -15,6 +16,7 @@ from .models import (
     ScanSummary,
     SelectionKind,
     SourceSelection,
+    UploadCheckpoint,
 )
 from .scanner import InventoryScanner, RelocationError, ScanCancelled
 from .validation import InventoryValidator
@@ -28,6 +30,7 @@ __all__ = [
     "InventoryScanner",
     "InventoryStatus",
     "InventoryValidator",
+    "LocalUploadState",
     "RejectionReason",
     "RelocationError",
     "ScanCancelled",
@@ -38,4 +41,5 @@ __all__ = [
     "ScanSummary",
     "SelectionKind",
     "SourceSelection",
+    "UploadCheckpoint",
 ]

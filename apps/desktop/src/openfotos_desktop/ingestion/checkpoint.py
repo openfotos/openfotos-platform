@@ -16,12 +16,14 @@ from .models import (
     FileSnapshot,
     InventoryItem,
     InventoryStatus,
+    LocalUploadState,
     RejectionReason,
     ScanIssue,
     ScanIssueReason,
     ScanSummary,
     SelectionKind,
     SourceSelection,
+    UploadCheckpoint,
     ValidationResult,
 )
 
@@ -36,6 +38,13 @@ CREATE TABLE IF NOT EXISTS events (
     name TEXT NOT NULL,
     storage_limit_bytes INTEGER NOT NULL CHECK (storage_limit_bytes > 0),
     processing_profile_id TEXT NOT NULL,
+    server_url TEXT NOT NULL DEFAULT '',
+    role TEXT NOT NULL DEFAULT 'uploader',
+    reserved_original_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_original_bytes >= 0),
+    verified_original_bytes INTEGER NOT NULL DEFAULT 0 CHECK (verified_original_bytes >= 0),
+    intake_state TEXT NOT NULL DEFAULT 'open',
+    intake_generation INTEGER NOT NULL DEFAULT 1 CHECK (intake_generation > 0),
+    device_label TEXT NOT NULL DEFAULT '',
     cached_at TEXT NOT NULL
 );
 
@@ -77,6 +86,7 @@ CREATE TABLE IF NOT EXISTS inventory_items (
     reason TEXT,
     content_type TEXT,
     sha256 TEXT,
+    content_md5 TEXT,
     width INTEGER,
     height INTEGER,
     last_seen_generation INTEGER NOT NULL,
@@ -100,8 +110,17 @@ CREATE TABLE IF NOT EXISTS scan_issues (
 
 CREATE INDEX IF NOT EXISTS scan_issue_batch_generation_idx
 ON scan_issues(batch_id, generation);
+
+CREATE TABLE IF NOT EXISTS upload_checkpoints (
+    item_id TEXT PRIMARY KEY REFERENCES inventory_items(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error_code TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
 """
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 3
 
 
 def normalize_path(path: Path) -> str:
@@ -134,12 +153,47 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 if schema_version == 0:
                     self._connection.executescript(_SCHEMA)
                     self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+                elif schema_version == 1:
+                    self._migrate_version_1()
+                elif schema_version == 2:
+                    self._migrate_version_2()
         except Exception:
             self._connection.close()
             raise
         if os.name != "nt":
             self.database_path.chmod(0o600)
         self._installation_id = self._load_or_create_installation_id()
+
+    def _migrate_version_1(self) -> None:
+        self._connection.executescript(
+            """
+            ALTER TABLE events ADD COLUMN server_url TEXT NOT NULL DEFAULT '';
+            ALTER TABLE events ADD COLUMN role TEXT NOT NULL DEFAULT 'uploader';
+            ALTER TABLE events ADD COLUMN reserved_original_bytes INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE events ADD COLUMN verified_original_bytes INTEGER NOT NULL DEFAULT 0;
+            ALTER TABLE events ADD COLUMN intake_state TEXT NOT NULL DEFAULT 'open';
+            ALTER TABLE events ADD COLUMN intake_generation INTEGER NOT NULL DEFAULT 1;
+            ALTER TABLE inventory_items ADD COLUMN content_md5 TEXT;
+            CREATE TABLE upload_checkpoints (
+                item_id TEXT PRIMARY KEY REFERENCES inventory_items(id) ON DELETE CASCADE,
+                state TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                last_error_code TEXT,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            ALTER TABLE events ADD COLUMN device_label TEXT NOT NULL DEFAULT '';
+            PRAGMA user_version = 3;
+            """
+        )
+
+    def _migrate_version_2(self) -> None:
+        self._connection.executescript(
+            """
+            ALTER TABLE events ADD COLUMN device_label TEXT NOT NULL DEFAULT '';
+            PRAGMA user_version = 3;
+            """
+        )
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
@@ -172,12 +226,25 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
         with self._lock, self._connection:
             self._connection.execute(
                 """
-                INSERT INTO events(id, name, storage_limit_bytes, processing_profile_id, cached_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO events(
+                    id, name, storage_limit_bytes, processing_profile_id, server_url, role,
+                    reserved_original_bytes, verified_original_bytes, intake_state,
+                    intake_generation, device_label, cached_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     storage_limit_bytes = excluded.storage_limit_bytes,
                     processing_profile_id = excluded.processing_profile_id,
+                    server_url = excluded.server_url,
+                    role = excluded.role,
+                    reserved_original_bytes = excluded.reserved_original_bytes,
+                    verified_original_bytes = excluded.verified_original_bytes,
+                    intake_state = excluded.intake_state,
+                    intake_generation = excluded.intake_generation,
+                    device_label = CASE
+                        WHEN excluded.device_label = '' THEN events.device_label
+                        ELSE excluded.device_label
+                    END,
                     cached_at = excluded.cached_at
                 """,
                 (
@@ -185,6 +252,13 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     event.name.strip(),
                     event.storage_limit_bytes,
                     event.processing_profile_id.strip(),
+                    event.server_url.strip(),
+                    event.role,
+                    event.reserved_original_bytes,
+                    event.verified_original_bytes,
+                    event.intake_state,
+                    event.intake_generation,
+                    event.device_label.strip(),
                     _now(),
                 ),
             )
@@ -201,6 +275,13 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             name=row["name"],
             storage_limit_bytes=row["storage_limit_bytes"],
             processing_profile_id=row["processing_profile_id"],
+            server_url=row["server_url"],
+            role=row["role"],
+            reserved_original_bytes=row["reserved_original_bytes"],
+            verified_original_bytes=row["verified_original_bytes"],
+            intake_state=row["intake_state"],
+            intake_generation=row["intake_generation"],
+            device_label=row["device_label"],
         )
 
     def list_events(self) -> list[EventCache]:
@@ -212,6 +293,13 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 name=row["name"],
                 storage_limit_bytes=row["storage_limit_bytes"],
                 processing_profile_id=row["processing_profile_id"],
+                server_url=row["server_url"],
+                role=row["role"],
+                reserved_original_bytes=row["reserved_original_bytes"],
+                verified_original_bytes=row["verified_original_bytes"],
+                intake_state=row["intake_state"],
+                intake_generation=row["intake_generation"],
+                device_label=row["device_label"],
             )
             for row in rows
         ]
@@ -346,6 +434,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
 
     def start_scan(self, batch_id: UUID) -> tuple[int, bool]:
         batch = self.get_batch(batch_id)
+        if batch.state in {BatchState.RESERVED, BatchState.UPLOADING, BatchState.COMPLETE}:
+            raise ValueError("A server-reserved contribution cannot be changed or rescanned.")
         generation = batch.scan_generation + 1
         with self._lock, self._connection:
             self._connection.execute("DELETE FROM scan_issues WHERE batch_id = ?", (str(batch_id),))
@@ -386,6 +476,15 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             ).fetchone()
         return self._item_from_row(row) if row is not None else None
 
+    def get_item(self, item_id: UUID) -> InventoryItem:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM inventory_items WHERE id = ?", (str(item_id),)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown inventory item {item_id}.")
+        return self._item_from_row(row)
+
     def list_items(
         self, batch_id: UUID, *, selection_id: UUID | None = None
     ) -> list[InventoryItem]:
@@ -419,6 +518,7 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             reason=reason,
             content_type=row["content_type"],
             sha256=row["sha256"],
+            content_md5=row["content_md5"],
             width=row["width"],
             height=row["height"],
             last_seen_generation=row["last_seen_generation"],
@@ -444,8 +544,9 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 INSERT INTO inventory_items(
                     id, batch_id, selection_id, relative_path, source_path, normalized_path,
                     basename, size_bytes, modified_ns, changed_ns, status, reason,
-                    content_type, sha256, width, height, last_seen_generation, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    content_type, sha256, content_md5, width, height,
+                    last_seen_generation, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(batch_id, normalized_path) DO UPDATE SET
                     selection_id = excluded.selection_id,
                     relative_path = excluded.relative_path,
@@ -458,6 +559,7 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     reason = excluded.reason,
                     content_type = excluded.content_type,
                     sha256 = excluded.sha256,
+                    content_md5 = excluded.content_md5,
                     width = excluded.width,
                     height = excluded.height,
                     last_seen_generation = excluded.last_seen_generation,
@@ -478,6 +580,7 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     result.reason.value if result.reason else None,
                     result.content_type,
                     result.sha256,
+                    result.content_md5,
                     result.width,
                     result.height,
                     generation,
@@ -485,6 +588,197 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 ),
             )
         return item_id
+
+    def set_content_md5(self, item_id: UUID, content_md5: str) -> None:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE inventory_items SET content_md5 = ?, updated_at = ?
+                WHERE id = ? AND status = ? AND sha256 IS NOT NULL
+                """,
+                (
+                    content_md5,
+                    _now(),
+                    str(item_id),
+                    InventoryStatus.ACCEPTED.value,
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown accepted inventory item {item_id}.")
+
+    def mark_batch_reserved(self, batch_id: UUID) -> None:
+        batch = self.get_batch(batch_id)
+        if batch.state not in {BatchState.APPROVED, BatchState.RESERVED, BatchState.UPLOADING}:
+            raise ValueError("Only an approved contribution can be reserved for upload.")
+        timestamp = _now()
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE batches
+                SET state = CASE WHEN state = ? THEN ? ELSE state END, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    BatchState.APPROVED.value,
+                    BatchState.RESERVED.value,
+                    timestamp,
+                    str(batch_id),
+                ),
+            )
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO upload_checkpoints(
+                    item_id, state, attempt_count, updated_at
+                )
+                SELECT id, ?, 0, ? FROM inventory_items
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    LocalUploadState.PENDING.value,
+                    timestamp,
+                    str(batch_id),
+                    InventoryStatus.ACCEPTED.value,
+                ),
+            )
+
+    def list_upload_checkpoints(self, batch_id: UUID) -> list[UploadCheckpoint]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT upload_checkpoints.* FROM upload_checkpoints
+                JOIN inventory_items ON inventory_items.id = upload_checkpoints.item_id
+                WHERE inventory_items.batch_id = ?
+                ORDER BY inventory_items.normalized_path, inventory_items.id
+                """,
+                (str(batch_id),),
+            ).fetchall()
+        return [
+            UploadCheckpoint(
+                item_id=UUID(row["item_id"]),
+                state=LocalUploadState(row["state"]),
+                attempt_count=row["attempt_count"],
+                last_error_code=row["last_error_code"],
+            )
+            for row in rows
+        ]
+
+    def get_upload_checkpoint(self, item_id: UUID) -> UploadCheckpoint:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM upload_checkpoints WHERE item_id = ?", (str(item_id),)
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown upload checkpoint {item_id}.")
+        return UploadCheckpoint(
+            item_id=UUID(row["item_id"]),
+            state=LocalUploadState(row["state"]),
+            attempt_count=row["attempt_count"],
+            last_error_code=row["last_error_code"],
+        )
+
+    def mark_upload_started(self, item_id: UUID) -> None:
+        self._update_upload(
+            item_id,
+            state=LocalUploadState.UPLOADING,
+            increment_attempt=True,
+        )
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                UPDATE batches SET state = ?, updated_at = ?
+                WHERE id = (SELECT batch_id FROM inventory_items WHERE id = ?)
+                  AND state != ?
+                """,
+                (
+                    BatchState.UPLOADING.value,
+                    _now(),
+                    str(item_id),
+                    BatchState.COMPLETE.value,
+                ),
+            )
+
+    def mark_upload_failed(self, item_id: UUID, error_code: str) -> None:
+        self._update_upload(
+            item_id,
+            state=LocalUploadState.FAILED,
+            error_code=error_code,
+        )
+
+    def mark_upload_verified(self, item_id: UUID) -> None:
+        self._update_upload(item_id, state=LocalUploadState.VERIFIED)
+        self._refresh_batch_upload_state(item_id)
+
+    def mark_upload_excluded(self, item_id: UUID) -> None:
+        self._update_upload(item_id, state=LocalUploadState.EXCLUDED)
+        self._refresh_batch_upload_state(item_id)
+
+    def _refresh_batch_upload_state(self, item_id: UUID) -> None:
+        with self._lock, self._connection:
+            batch_row = self._connection.execute(
+                """
+                SELECT inventory_items.batch_id FROM inventory_items
+                WHERE inventory_items.id = ?
+                """,
+                (str(item_id),),
+            ).fetchone()
+            if batch_row is None:
+                raise KeyError(f"Unknown inventory item {item_id}.")
+            remaining = self._connection.execute(
+                """
+                SELECT COUNT(*) count FROM upload_checkpoints
+                JOIN inventory_items ON inventory_items.id = upload_checkpoints.item_id
+                WHERE inventory_items.batch_id = ?
+                  AND upload_checkpoints.state NOT IN (?, ?)
+                """,
+                (
+                    batch_row["batch_id"],
+                    LocalUploadState.VERIFIED.value,
+                    LocalUploadState.EXCLUDED.value,
+                ),
+            ).fetchone()["count"]
+            self._connection.execute(
+                "UPDATE batches SET state = ?, updated_at = ? WHERE id = ?",
+                (
+                    BatchState.COMPLETE.value if remaining == 0 else BatchState.UPLOADING.value,
+                    _now(),
+                    batch_row["batch_id"],
+                ),
+            )
+
+    def _update_upload(
+        self,
+        item_id: UUID,
+        *,
+        state: LocalUploadState,
+        error_code: str | None = None,
+        increment_attempt: bool = False,
+    ) -> None:
+        timestamp = _now()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE upload_checkpoints
+                SET state = ?,
+                    attempt_count = attempt_count + ?,
+                    last_error_code = ?,
+                    completed_at = CASE WHEN ? IN (?, ?) THEN ? ELSE completed_at END,
+                    updated_at = ?
+                WHERE item_id = ?
+                """,
+                (
+                    state.value,
+                    int(increment_attempt),
+                    error_code,
+                    state.value,
+                    LocalUploadState.VERIFIED.value,
+                    LocalUploadState.EXCLUDED.value,
+                    timestamp,
+                    timestamp,
+                    str(item_id),
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown upload checkpoint {item_id}.")
 
     def touch_item(self, item_id: UUID, generation: int) -> None:
         with self._lock, self._connection:

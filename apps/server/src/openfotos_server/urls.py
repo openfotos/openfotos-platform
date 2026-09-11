@@ -11,6 +11,7 @@ def health(_request):
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/v1/", include("openfotos_server.events.api_urls")),
     path("health/", health, name="health"),
     path("", include("openfotos_server.events.urls")),
 ]

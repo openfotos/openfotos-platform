@@ -5,7 +5,13 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 
-from openfotos_desktop.ingestion import CheckpointStore, EventCache, InventoryScanner
+from openfotos_desktop.ingestion import (
+    BatchState,
+    CheckpointStore,
+    EventCache,
+    InventoryScanner,
+    LocalUploadState,
+)
 
 
 def test_newer_checkpoint_schema_fails_closed(tmp_path: Path) -> None:
@@ -15,6 +21,41 @@ def test_newer_checkpoint_schema_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="newer OpenFotos"):
         CheckpointStore(database)
+
+
+def test_session3_checkpoint_migrates_without_losing_inventory(tmp_path: Path) -> None:
+    database = tmp_path / "checkpoint.sqlite3"
+    event_id = uuid4()
+    with CheckpointStore(database) as store:
+        store.cache_event(
+            EventCache(
+                id=event_id,
+                name="Reception",
+                storage_limit_bytes=25_000_000_000,
+                processing_profile_id="pilot-profile-v1",
+            )
+        )
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE upload_checkpoints")
+        for column in (
+            "server_url",
+            "role",
+            "reserved_original_bytes",
+            "verified_original_bytes",
+            "intake_state",
+            "intake_generation",
+            "device_label",
+        ):
+            connection.execute(f"ALTER TABLE events DROP COLUMN {column}")
+        connection.execute("ALTER TABLE inventory_items DROP COLUMN content_md5")
+        connection.execute("PRAGMA user_version = 1")
+
+    with CheckpointStore(database) as migrated:
+        event = migrated.get_event(event_id)
+        assert event.name == "Reception"
+        assert event.intake_generation == 1
+        assert event.device_label == ""
+        assert migrated.installation_id
 
 
 def test_approved_batch_rejects_new_selections(tmp_path: Path) -> None:
@@ -40,6 +81,33 @@ def test_approved_batch_rejects_new_selections(tmp_path: Path) -> None:
             store.add_files(batch_id, [tmp_path / "another.jpg"])
         with pytest.raises(ValueError, match="frozen"):
             store.remove_selection(selection_id)
+
+
+def test_lead_exclusion_is_a_terminal_local_upload_state(tmp_path: Path) -> None:
+    photo = tmp_path / "photo.jpg"
+    Image.new("RGB", (4, 4), color="blue").save(photo, format="JPEG")
+
+    with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
+        event_id = uuid4()
+        store.cache_event(
+            EventCache(
+                id=event_id,
+                name="Reception",
+                storage_limit_bytes=25_000_000_000,
+                processing_profile_id="pilot-profile-v1",
+            )
+        )
+        batch_id = store.create_batch(event_id)
+        store.add_files(batch_id, [photo])
+        InventoryScanner(store).scan(batch_id)
+        store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
+        store.mark_batch_reserved(batch_id)
+        item = store.list_items(batch_id)[0]
+
+        store.mark_upload_excluded(item.id)
+
+        assert store.get_upload_checkpoint(item.id).state is LocalUploadState.EXCLUDED
+        assert store.get_batch(batch_id).state is BatchState.COMPLETE
 
 
 def test_draft_selection_can_be_removed_without_touching_source(tmp_path: Path) -> None:

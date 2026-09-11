@@ -7,7 +7,7 @@ from django.db import transaction
 from django.http import HttpRequest
 from django.utils import timezone
 
-from openfotos_contracts import EventState, can_transition_event
+from openfotos_contracts import EventState, IngestionManifestState, can_transition_event
 
 from .audit import record_audit
 from .models import AuditAction, AuditResult, Event, generate_event_token
@@ -33,6 +33,15 @@ def transition_event(
             raise ValidationError("Set an event PIN before publication.")
         if event.expires_at is None or event.expires_at <= timezone.now():
             raise ValidationError("Set a future event expiry before publication.")
+        manifest = event.current_ingestion_manifest
+        if (
+            manifest is None
+            or manifest.state != IngestionManifestState.COMMITTED.value
+            or manifest.generation != event.intake_generation
+        ):
+            raise ValidationError("Finalize the current ingestion manifest before publication.")
+        if event.derivatives_ready_generation != event.intake_generation:
+            raise ValidationError("Complete private gallery derivatives before publication.")
 
     event.state = target
     event.save(update_fields=("state", "updated_at"))

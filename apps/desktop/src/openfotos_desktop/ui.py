@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QSpinBox,
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -44,11 +45,12 @@ from .ingestion import (
     EventCache,
     InventoryScanner,
     InventoryStatus,
+    LocalUploadState,
     ScanCancelled,
     ScanProgress,
     ScanSummary,
 )
-from .ports import OnlineServicesUnavailable, PhotographerSessionGateway
+from .ports import DesktopGateway
 from .theme import apply_corporate_theme, asset_path
 
 if TYPE_CHECKING:
@@ -186,9 +188,47 @@ class ScanWorker(QObject):
             self.completed.emit(summary)
 
 
+class UploadWorker(QObject):
+    progressed = Signal(int, int)
+    completed = Signal()
+    cancelled = Signal()
+    failed = Signal(str)
+
+    def __init__(
+        self,
+        gateway: DesktopGateway,
+        batch_id: UUID,
+        transfer_limit: int,
+        stop: Event,
+    ) -> None:
+        super().__init__()
+        self.gateway = gateway
+        self.batch_id = batch_id
+        self.transfer_limit = transfer_limit
+        self.stop = stop
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self.gateway.upload(
+                self.batch_id,
+                transfer_limit=self.transfer_limit,
+                on_progress=self.progressed.emit,
+                is_cancelled=self.stop.is_set,
+            )
+        except Exception as exc:  # Qt must surface worker failures to the local operator.
+            self.failed.emit(str(exc))
+        else:
+            if self.stop.is_set():
+                self.cancelled.emit()
+            else:
+                self.completed.emit()
+
+
 class LoginPage(QWidget):
-    lead_requested = Signal(str, str, str)
+    lead_requested = Signal(str, str, str, str)
     uploader_requested = Signal(str, str, str)
+    resume_requested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -255,6 +295,8 @@ class LoginPage(QWidget):
         self.password = QLineEdit()
         self.password.setPlaceholderText("Workspace password")
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.lead_device_label = QLineEdit()
+        self.lead_device_label.setPlaceholderText("e.g. Lead editing workstation")
         self.lead_button = _style_button(
             QPushButton("Sign in as event lead"),
             kind="primary",
@@ -263,6 +305,7 @@ class LoginPage(QWidget):
         lead_form.addRow("Server", self.lead_server)
         lead_form.addRow("Username", self.username)
         lead_form.addRow("Password", self.password)
+        lead_form.addRow("Device label", self.lead_device_label)
         lead_form.addRow(self.lead_button)
         tabs.addTab(lead, "Lead sign in")
 
@@ -293,12 +336,17 @@ class LoginPage(QWidget):
         self.error.setWordWrap(True)
         self.error.hide()
         access_layout.addWidget(self.error)
-        privacy = QLabel(
+        self.resume_button = _style_button(QPushButton("Resume saved session"), kind="ghost")
+        self.resume_button.clicked.connect(
+            lambda: self.resume_requested.emit(self.lead_server.text().strip())
+        )
+        access_layout.addWidget(self.resume_button)
+        self.notice = QLabel(
             "Credentials and invitations are never written to the local photo checkpoint."
         )
-        privacy.setObjectName("InfoBanner")
-        privacy.setWordWrap(True)
-        access_layout.addWidget(privacy)
+        self.notice.setObjectName("InfoBanner")
+        self.notice.setWordWrap(True)
+        access_layout.addWidget(self.notice)
         content.addWidget(access_panel, 6)
         layout.addLayout(content, 1)
 
@@ -310,6 +358,7 @@ class LoginPage(QWidget):
             self.lead_server.text().strip(),
             self.username.text().strip(),
             self.password.text(),
+            self.lead_device_label.text().strip(),
         )
 
     @Slot()
@@ -327,6 +376,9 @@ class LoginPage(QWidget):
         self.invitation.clear()
         self.error.setText(message)
         self.error.show()
+
+    def show_notice(self, message: str) -> None:
+        self.notice.setText(message)
 
 
 class EventSelectorPage(QWidget):
@@ -413,6 +465,8 @@ class SelectionPage(QWidget):
     scan_requested = Signal()
     pause_requested = Signal()
     new_batch_requested = Signal()
+    invitation_requested = Signal()
+    intake_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -446,6 +500,12 @@ class SelectionPage(QWidget):
         self.batch_status = QLabel("COLLECTING")
         self.batch_status.setObjectName("StatusBadge")
         event_layout.addWidget(self.batch_status)
+        self.invitation = _style_button(QPushButton("Copy uploader invitation"), kind="ghost")
+        self.invitation.clicked.connect(self.invitation_requested)
+        event_layout.addWidget(self.invitation)
+        self.intake = _style_button(QPushButton("Close intake"), kind="ghost")
+        self.intake.clicked.connect(self.intake_requested)
+        event_layout.addWidget(self.intake)
         layout.addWidget(event_panel)
 
         source_actions = QHBoxLayout()
@@ -569,6 +629,17 @@ class SelectionPage(QWidget):
         self.add_files.setEnabled(not batch.frozen)
         self.add_folder.setEnabled(not batch.frozen)
         self.remove_selection.setEnabled(not batch.frozen)
+        is_lead = event.role == "lead"
+        intake_open = event.intake_state == "open"
+        self.invitation.setVisible(is_lead)
+        self.invitation.setEnabled(is_lead and intake_open)
+        self.intake.setVisible(is_lead)
+        self.intake.setText("Close intake" if intake_open else "Reopen intake")
+        self.add_files.setEnabled(not batch.frozen and intake_open)
+        self.add_folder.setEnabled(not batch.frozen and intake_open)
+        self.remove_selection.setEnabled(not batch.frozen and intake_open)
+        self.scan.setEnabled(intake_open)
+        self.new_batch.setEnabled(intake_open)
         self.progress_panel.hide()
         self.progress_text.clear()
 
@@ -724,10 +795,15 @@ class ValidationPage(QWidget):
 
 
 class ApprovedPage(QWidget):
+    upload_requested = Signal(int)
+    pause_requested = Signal()
     new_batch_requested = Signal()
     verify_requested = Signal()
     export_requested = Signal()
     cleanup_requested = Signal()
+    invitation_requested = Signal()
+    intake_requested = Signal()
+    finalize_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -771,7 +847,7 @@ class ApprovedPage(QWidget):
         for number, title_text, detail in (
             ("01", "Inventory", "Photos checked locally"),
             ("02", "Approval", "Contribution frozen"),
-            ("03", "Cloud upload", "Connects in Session 4"),
+            ("03", "Cloud upload", "Ready for private transfer"),
         ):
             stage = QFrame()
             stage.setObjectName("StatCard")
@@ -783,11 +859,64 @@ class ApprovedPage(QWidget):
             stage_title.setObjectName("SectionTitle")
             stage_detail = QLabel(detail)
             stage_detail.setObjectName("BodyMuted")
+            if number == "03":
+                self.cloud_stage_detail = stage_detail
             stage_layout.addWidget(stage_number)
             stage_layout.addWidget(stage_title)
             stage_layout.addWidget(stage_detail)
             stages.addWidget(stage, 1)
         layout.addLayout(stages)
+
+        transfer_panel = QFrame()
+        transfer_panel.setObjectName("Panel")
+        transfer_layout = QVBoxLayout(transfer_panel)
+        transfer_layout.setContentsMargins(22, 18, 22, 18)
+        transfer_layout.setSpacing(10)
+        transfer_heading = QHBoxLayout()
+        transfer_title = QLabel("Private cloud transfer")
+        transfer_title.setObjectName("SectionTitle")
+        transfer_heading.addWidget(transfer_title)
+        transfer_heading.addStretch()
+        transfer_heading.addWidget(QLabel("Concurrent uploads"))
+        self.transfer_limit = QSpinBox()
+        self.transfer_limit.setRange(1, 4)
+        self.transfer_limit.setValue(3)
+        transfer_heading.addWidget(self.transfer_limit)
+        transfer_layout.addLayout(transfer_heading)
+        self.upload_progress = QProgressBar()
+        self.upload_progress.setRange(0, 1)
+        self.upload_progress.setValue(0)
+        transfer_layout.addWidget(self.upload_progress)
+        transfer_buttons = QHBoxLayout()
+        self.upload = _style_button(QPushButton("Upload originals"), kind="primary")
+        self.upload.clicked.connect(lambda: self.upload_requested.emit(self.transfer_limit.value()))
+        self.pause = _style_button(QPushButton("Pause after active uploads"), kind="ghost")
+        self.pause.clicked.connect(self.pause_requested)
+        self.pause.setEnabled(False)
+        transfer_buttons.addStretch()
+        transfer_buttons.addWidget(self.pause)
+        transfer_buttons.addWidget(self.upload)
+        transfer_layout.addLayout(transfer_buttons)
+        layout.addWidget(transfer_panel)
+
+        self.lead_panel = QFrame()
+        self.lead_panel.setObjectName("Panel")
+        lead_layout = QHBoxLayout(self.lead_panel)
+        lead_layout.setContentsMargins(22, 16, 22, 16)
+        lead_copy = QLabel("Lead controls")
+        lead_copy.setObjectName("SectionTitle")
+        lead_layout.addWidget(lead_copy)
+        lead_layout.addStretch()
+        self.invitation = _style_button(QPushButton("Copy uploader invitation"), kind="ghost")
+        self.invitation.clicked.connect(self.invitation_requested)
+        self.intake = _style_button(QPushButton("Close intake"), kind="ghost")
+        self.intake.clicked.connect(self.intake_requested)
+        self.finalize = _style_button(QPushButton("Finalize ingestion"), kind="primary")
+        self.finalize.clicked.connect(self.finalize_requested)
+        lead_layout.addWidget(self.invitation)
+        lead_layout.addWidget(self.intake)
+        lead_layout.addWidget(self.finalize)
+        layout.addWidget(self.lead_panel)
 
         buttons = QHBoxLayout()
         self.new_batch = _style_button(
@@ -817,11 +946,64 @@ class ApprovedPage(QWidget):
         layout.addLayout(buttons)
         layout.addStretch()
 
-    def show_batch(self, batch_id: UUID) -> None:
-        self.message.setText(
-            f"Batch {batch_id} is verified and ready for the Session 4 upload service. "
-            "No network transfer has occurred; new photos belong in a new contribution."
-        )
+    def show_batch(
+        self,
+        batch_id: UUID,
+        *,
+        state: BatchState,
+        event: EventCache,
+        excluded_count: int = 0,
+    ) -> None:
+        complete = state is BatchState.COMPLETE
+        if complete:
+            if excluded_count:
+                self.message.setText(
+                    f"Batch {batch_id} is resolved with {excluded_count} lead-approved "
+                    "exclusion(s). New photos belong in a new contribution."
+                )
+                self.cloud_stage_detail.setText("Verified originals stored; exclusions recorded")
+            else:
+                self.message.setText(
+                    f"Batch {batch_id} is verified in private object storage. "
+                    "New photos belong in a new contribution."
+                )
+                self.cloud_stage_detail.setText("Originals verified")
+        else:
+            self.message.setText(
+                f"Batch {batch_id} is locally verified and ready for private upload. "
+                "New photos belong in a new contribution."
+            )
+            self.cloud_stage_detail.setText("Resume-safe transfer pending")
+        self.upload.setEnabled(not complete and event.intake_state == "open")
+        self.pause.setEnabled(False)
+        self.transfer_limit.setEnabled(True)
+        self.verify.setEnabled(state is BatchState.APPROVED)
+        self.new_batch.setEnabled(event.intake_state == "open")
+        is_lead = event.role == "lead"
+        self.lead_panel.setVisible(is_lead)
+        self.invitation.setEnabled(is_lead and event.intake_state == "open")
+        self.intake.setText("Reopen intake" if event.intake_state == "closed" else "Close intake")
+        self.finalize.setEnabled(is_lead and event.intake_state == "closed" and complete)
+
+    @Slot()
+    def upload_started(self) -> None:
+        self.upload.setEnabled(False)
+        self.pause.setEnabled(True)
+        self.transfer_limit.setEnabled(False)
+        self.cloud_stage_detail.setText("Uploading originals")
+
+    @Slot(int, int)
+    def upload_progressed(self, completed: int, total: int) -> None:
+        self.upload_progress.setRange(0, max(total, 1))
+        self.upload_progress.setValue(completed)
+        self.cloud_stage_detail.setText(f"{completed} of {total} verified")
+
+    def upload_stopped(self, *, paused: bool = False) -> None:
+        self.pause.setEnabled(False)
+        self.upload.setEnabled(True)
+        self.transfer_limit.setEnabled(True)
+        if paused:
+            self.cloud_stage_detail.setText("Paused; verified files will not restart")
 
 
 class MainWindow(QMainWindow):
@@ -829,7 +1011,7 @@ class MainWindow(QMainWindow):
         self,
         *,
         store: CheckpointStore,
-        gateway: PhotographerSessionGateway,
+        gateway: DesktopGateway,
         demo_event: EventCache | None = None,
     ) -> None:
         super().__init__()
@@ -842,6 +1024,8 @@ class MainWindow(QMainWindow):
         self.current_batch_id: UUID | None = None
         self.scan_thread: QThread | None = None
         self.scan_stop: Event | None = None
+        self.upload_thread: QThread | None = None
+        self.upload_stop: Event | None = None
 
         shell = QWidget()
         shell.setObjectName("AppShell")
@@ -869,6 +1053,13 @@ class MainWindow(QMainWindow):
         self._connect_actions()
 
         if demo_event is None:
+            cached_origins = {
+                event.server_url for event in self.store.list_events() if event.server_url
+            }
+            if len(cached_origins) == 1:
+                [origin] = cached_origins
+                self.login.lead_server.setText(origin)
+                self.login.uploader_server.setText(origin)
             self.stack.setCurrentWidget(self.login)
         else:
             self.store.cache_event(demo_event)
@@ -878,6 +1069,7 @@ class MainWindow(QMainWindow):
     def _connect_actions(self) -> None:
         self.login.lead_requested.connect(self._lead_login)
         self.login.uploader_requested.connect(self._enroll_uploader)
+        self.login.resume_requested.connect(self._resume_session)
         self.events.selected.connect(self._open_event)
         self.selection.add_files_requested.connect(self._add_files)
         self.selection.add_folder_requested.connect(self._add_folder)
@@ -885,6 +1077,8 @@ class MainWindow(QMainWindow):
         self.selection.scan_requested.connect(self._start_scan)
         self.selection.pause_requested.connect(self._pause_scan)
         self.selection.new_batch_requested.connect(self._new_batch)
+        self.selection.invitation_requested.connect(self._create_invitation)
+        self.selection.intake_requested.connect(self._toggle_intake)
         self.validation.approve_requested.connect(self._approve_batch)
         self.validation.rescan_requested.connect(self._show_selection)
         self.validation.export_requested.connect(self._export_diagnostics)
@@ -892,14 +1086,27 @@ class MainWindow(QMainWindow):
         self.approved.verify_requested.connect(self._show_selection)
         self.approved.export_requested.connect(self._export_diagnostics)
         self.approved.cleanup_requested.connect(self._cleanup_event)
+        self.approved.upload_requested.connect(self._start_upload)
+        self.approved.pause_requested.connect(self._pause_upload)
+        self.approved.invitation_requested.connect(self._create_invitation)
+        self.approved.intake_requested.connect(self._toggle_intake)
+        self.approved.finalize_requested.connect(self._finalize_ingestion)
 
-    @Slot(str, str, str)
-    def _lead_login(self, server_url: str, username: str, password: str) -> None:
+    @Slot(str, str, str, str)
+    def _lead_login(
+        self,
+        server_url: str,
+        username: str,
+        password: str,
+        device_label: str,
+    ) -> None:
         try:
-            events = list(self.gateway.sign_in_lead(server_url, username, password))
-        except OnlineServicesUnavailable as exc:
+            events = list(self.gateway.sign_in_lead(server_url, username, password, device_label))
+        except RuntimeError as exc:
             self.login.show_error(str(exc))
             return
+        self.login.password.clear()
+        self._show_persistence_warning()
         for event in events:
             self.store.cache_event(event)
         self.events.set_events(events, demo=False)
@@ -909,11 +1116,24 @@ class MainWindow(QMainWindow):
     def _enroll_uploader(self, server_url: str, invitation: str, device_label: str) -> None:
         try:
             event = self.gateway.enroll_uploader(server_url, invitation, device_label)
-        except OnlineServicesUnavailable as exc:
+        except RuntimeError as exc:
             self.login.show_error(str(exc))
             return
+        self.login.invitation.clear()
+        self._show_persistence_warning()
         self.store.cache_event(event)
         self.events.set_events([event], demo=False)
+        self.stack.setCurrentWidget(self.events)
+
+    @Slot(str)
+    def _resume_session(self, server_url: str) -> None:
+        try:
+            events = list(self.gateway.resume(server_url))
+        except RuntimeError as exc:
+            self.login.show_error(str(exc))
+            return
+        self._show_persistence_warning()
+        self.events.set_events(events, demo=False)
         self.stack.setCurrentWidget(self.events)
 
     @Slot(object)
@@ -923,9 +1143,13 @@ class MainWindow(QMainWindow):
         batches = self.store.list_batches(event.id)
         self.current_batch_id = batches[-1].id if batches else self.store.create_batch(event.id)
         batch = self.store.get_batch(self.current_batch_id)
-        if batch.state is BatchState.APPROVED:
-            self.approved.show_batch(batch.id)
-            self.stack.setCurrentWidget(self.approved)
+        if batch.state in {
+            BatchState.APPROVED,
+            BatchState.RESERVED,
+            BatchState.UPLOADING,
+            BatchState.COMPLETE,
+        }:
+            self._show_approved()
         elif batch.state is BatchState.NEEDS_REVIEW:
             self._show_validation(self.store.summary(batch.id))
         else:
@@ -1019,9 +1243,7 @@ class MainWindow(QMainWindow):
     def _scan_completed(self, summary: ScanSummary) -> None:
         self.selection.scan_stopped()
         if summary.state is BatchState.APPROVED and summary.warning_count == 0:
-            if self.current_batch_id is not None:
-                self.approved.show_batch(self.current_batch_id)
-            self.stack.setCurrentWidget(self.approved)
+            self._show_approved()
         else:
             self._show_validation(summary)
 
@@ -1061,8 +1283,134 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             self._show_error(str(exc))
             return
-        self.approved.show_batch(self.current_batch_id)
+        self._show_approved()
+
+    def _show_approved(self) -> None:
+        if self.current_event is None or self.current_batch_id is None:
+            return
+        batch = self.store.get_batch(self.current_batch_id)
+        excluded_count = sum(
+            checkpoint.state is LocalUploadState.EXCLUDED
+            for checkpoint in self.store.list_upload_checkpoints(batch.id)
+        )
+        self.approved.show_batch(
+            batch.id,
+            state=batch.state,
+            event=self.current_event,
+            excluded_count=excluded_count,
+        )
         self.stack.setCurrentWidget(self.approved)
+
+    @Slot(int)
+    def _start_upload(self, transfer_limit: int) -> None:
+        if self.current_batch_id is None or self.upload_thread is not None:
+            return
+        self.approved.upload_started()
+        self.upload_stop = Event()
+        thread = QThread(self)
+        worker = UploadWorker(
+            self.gateway,
+            self.current_batch_id,
+            transfer_limit,
+            self.upload_stop,
+        )
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progressed.connect(self.approved.upload_progressed)
+        worker.completed.connect(self._upload_completed)
+        worker.cancelled.connect(self._upload_cancelled)
+        worker.failed.connect(self._upload_failed)
+        for signal in (worker.completed, worker.cancelled, worker.failed):
+            signal.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._upload_thread_finished)
+        self.upload_thread = thread
+        self._upload_worker = worker
+        thread.start()
+
+    @Slot()
+    def _pause_upload(self) -> None:
+        if self.upload_stop is not None:
+            self.upload_stop.set()
+            self.approved.cloud_stage_detail.setText("Pausing after active uploads…")
+
+    @Slot()
+    def _upload_completed(self) -> None:
+        self._show_approved()
+
+    @Slot()
+    def _upload_cancelled(self) -> None:
+        self.approved.upload_stopped(paused=True)
+
+    @Slot(str)
+    def _upload_failed(self, message: str) -> None:
+        self.approved.upload_stopped()
+        self._show_error(f"Upload stopped: {message}")
+
+    @Slot()
+    def _upload_thread_finished(self) -> None:
+        if self.upload_thread:
+            self.upload_thread.deleteLater()
+        self.upload_thread = None
+        self.upload_stop = None
+        self._upload_worker = None
+
+    @Slot()
+    def _create_invitation(self) -> None:
+        if self.current_event is None:
+            return
+        try:
+            invitation = self.gateway.create_invitation(self.current_event.id)
+        except RuntimeError as exc:
+            self._show_error(str(exc))
+            return
+        clipboard = QApplication.clipboard()
+        clipboard.setText(invitation)
+        QMessageBox.information(
+            self,
+            "Uploader invitation copied",
+            "The 72-hour uploader invitation was copied to the clipboard.",
+        )
+
+    @Slot()
+    def _toggle_intake(self) -> None:
+        if self.current_event is None:
+            return
+        selection_visible = self.stack.currentWidget() is self.selection
+        try:
+            if self.current_event.intake_state == "open":
+                event = self.gateway.close_intake(self.current_event.id)
+            else:
+                event = self.gateway.reopen_intake(self.current_event.id)
+        except RuntimeError as exc:
+            self._show_error(str(exc))
+            return
+        self.current_event = event
+        self.store.cache_event(event)
+        if selection_visible:
+            self._show_selection()
+        else:
+            self._show_approved()
+
+    @Slot()
+    def _finalize_ingestion(self) -> None:
+        if self.current_event is None:
+            return
+        try:
+            result = self.gateway.finalize(self.current_event.id)
+        except RuntimeError as exc:
+            self._show_error(str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "Ingestion finalized",
+            f"Generation {result['generation']} committed with {result['asset_count']} originals.",
+        )
+
+    def _show_persistence_warning(self) -> None:
+        warning = getattr(self.gateway, "persistence_warning", None)
+        if warning:
+            self.login.show_notice(warning)
 
     @Slot()
     def _export_diagnostics(self) -> None:
@@ -1108,5 +1456,13 @@ class MainWindow(QMainWindow):
         if self.scan_thread is not None and not self.scan_thread.wait(5_000):
             event.ignore()
             return
+        if self.upload_stop is not None:
+            self.upload_stop.set()
+        if self.upload_thread is not None and not self.upload_thread.wait(30_000):
+            event.ignore()
+            return
+        close_gateway = getattr(self.gateway, "close", None)
+        if close_gateway is not None:
+            close_gateway()
         self.store.close()
         event.accept()

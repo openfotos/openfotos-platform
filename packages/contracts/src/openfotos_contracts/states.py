@@ -24,11 +24,44 @@ class AssetState(StrEnum):
     FAILED = "failed"
 
 
+class IntakeState(StrEnum):
+    OPEN = "open"
+    CLOSED = "closed"
+
+
+class DeviceRole(StrEnum):
+    LEAD = "lead"
+    UPLOADER = "uploader"
+
+
+class DeviceStatus(StrEnum):
+    ACTIVE = "active"
+    REVOKED = "revoked"
+
+
+class ContributionState(StrEnum):
+    RESERVED = "reserved"
+    COMPLETE = "complete"
+    CANCELLED = "cancelled"
+
+
+class UploadObjectState(StrEnum):
+    RESERVED = "reserved"
+    VERIFIED = "verified"
+    FAILED = "failed"
+    EXCLUDED = "excluded"
+
+
+class IngestionManifestState(StrEnum):
+    PREPARED = "prepared"
+    COMMITTED = "committed"
+
+
 _EVENT_TRANSITIONS = {
     EventState.DRAFT: {EventState.UPLOADING, EventState.CANCELLED},
     EventState.UPLOADING: {EventState.PROCESSING, EventState.FAILED},
-    EventState.PROCESSING: {EventState.REVIEW, EventState.FAILED},
-    EventState.REVIEW: {EventState.PUBLISHED, EventState.PROCESSING},
+    EventState.PROCESSING: {EventState.UPLOADING, EventState.REVIEW, EventState.FAILED},
+    EventState.REVIEW: {EventState.UPLOADING, EventState.PUBLISHED, EventState.PROCESSING},
     EventState.PUBLISHED: {EventState.ARCHIVED, EventState.REVIEW},
     EventState.ARCHIVED: {EventState.PUBLISHED},
     EventState.FAILED: {EventState.UPLOADING, EventState.PROCESSING, EventState.CANCELLED},

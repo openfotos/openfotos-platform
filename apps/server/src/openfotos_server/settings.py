@@ -116,6 +116,29 @@ def positive_integer_setting(name: str, default: int) -> int:
 AUTH_FAILURE_LIMIT = positive_integer_setting("AUTH_FAILURE_LIMIT", 5)
 AUTH_FAILURE_WINDOW_SECONDS = positive_integer_setting("AUTH_FAILURE_WINDOW_SECONDS", 900)
 EVENT_SESSION_TTL_SECONDS = positive_integer_setting("EVENT_SESSION_TTL_SECONDS", 86_400)
+DESKTOP_ACCESS_TTL_SECONDS = positive_integer_setting("DESKTOP_ACCESS_TTL_SECONDS", 900)
+DESKTOP_REFRESH_TTL_SECONDS = positive_integer_setting("DESKTOP_REFRESH_TTL_SECONDS", 14 * 86_400)
+DESKTOP_REFRESH_RETRY_GRACE_SECONDS = positive_integer_setting(
+    "DESKTOP_REFRESH_RETRY_GRACE_SECONDS", 60
+)
+UPLOADER_INVITATION_TTL_SECONDS = positive_integer_setting(
+    "UPLOADER_INVITATION_TTL_SECONDS", 72 * 3_600
+)
+UPLOAD_LEASE_TTL_SECONDS = positive_integer_setting("UPLOAD_LEASE_TTL_SECONDS", 300)
+UPLOAD_LEASE_PAGE_SIZE = positive_integer_setting("UPLOAD_LEASE_PAGE_SIZE", 8)
+DESKTOP_API_MAX_BODY_BYTES = positive_integer_setting("DESKTOP_API_MAX_BODY_BYTES", 8 * 1024 * 1024)
+IDEMPOTENCY_TTL_SECONDS = positive_integer_setting("IDEMPOTENCY_TTL_SECONDS", 30 * 86_400)
+
+R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "").strip()
+R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "").strip()
+R2_PARENT_ACCESS_KEY_ID = os.environ.get("R2_PARENT_ACCESS_KEY_ID", "").strip()
+R2_PARENT_SECRET_ACCESS_KEY = os.environ.get("R2_PARENT_SECRET_ACCESS_KEY", "").strip()
+OBJECT_STORAGE_ENDPOINT_URL = os.environ.get(
+    "OBJECT_STORAGE_ENDPOINT_URL",
+    f"https://{R2_ACCOUNT_ID}.r2.cloudflarestorage.com" if R2_ACCOUNT_ID else "",
+).strip()
+OBJECT_STORAGE_REGION = os.environ.get("OBJECT_STORAGE_REGION", "auto").strip()
+OBJECT_STORAGE_ADDRESSING_STYLE = os.environ.get("OBJECT_STORAGE_ADDRESSING_STYLE", "path").strip()
 
 SESSION_COOKIE_NAME = "openfotos_account_session"
 SESSION_COOKIE_HTTPONLY = True

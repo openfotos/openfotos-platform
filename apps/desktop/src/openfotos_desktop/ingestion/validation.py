@@ -1,5 +1,6 @@
 """JPEG validation and checksum mechanics."""
 
+import base64
 import hashlib
 import warnings
 from pathlib import Path
@@ -14,11 +15,17 @@ _READ_CHUNK_BYTES = 1024 * 1024
 
 
 def sha256_file(path: Path) -> str:
+    return file_checksums(path)[0]
+
+
+def file_checksums(path: Path) -> tuple[str, str]:
     digest = hashlib.sha256()
+    md5_digest = hashlib.md5(usedforsecurity=False)
     with path.open("rb") as source:
         while chunk := source.read(_READ_CHUNK_BYTES):
             digest.update(chunk)
-    return digest.hexdigest()
+            md5_digest.update(chunk)
+    return digest.hexdigest(), base64.b64encode(md5_digest.digest()).decode()
 
 
 class InventoryValidator:
@@ -48,11 +55,13 @@ class InventoryValidator:
         except (OSError, UnidentifiedImageError, ValueError):
             return self._rejected(RejectionReason.INVALID_JPEG)
 
+        sha256, content_md5 = file_checksums(path)
         return ValidationResult(
             status=InventoryStatus.ACCEPTED,
             reason=None,
             content_type=JPEG_CONTENT_TYPE,
-            sha256=sha256_file(path),
+            sha256=sha256,
+            content_md5=content_md5,
             width=width,
             height=height,
         )
@@ -69,6 +78,7 @@ class InventoryValidator:
             reason=reason,
             content_type=None,
             sha256=None,
+            content_md5=None,
             width=None,
             height=None,
         )

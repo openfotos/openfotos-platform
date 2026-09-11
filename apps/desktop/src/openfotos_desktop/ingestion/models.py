@@ -12,6 +12,9 @@ class BatchState(StrEnum):
     PAUSED = "paused"
     NEEDS_REVIEW = "needs_review"
     APPROVED = "approved"
+    RESERVED = "reserved"
+    UPLOADING = "uploading"
+    COMPLETE = "complete"
 
 
 class SelectionKind(StrEnum):
@@ -23,6 +26,14 @@ class InventoryStatus(StrEnum):
     ACCEPTED = "accepted"
     REJECTED = "rejected"
     BLOCKING = "blocking"
+
+
+class LocalUploadState(StrEnum):
+    PENDING = "pending"
+    UPLOADING = "uploading"
+    VERIFIED = "verified"
+    FAILED = "failed"
+    EXCLUDED = "excluded"
 
 
 class RejectionReason(StrEnum):
@@ -62,6 +73,13 @@ class EventCache:
     name: str
     storage_limit_bytes: int
     processing_profile_id: str
+    server_url: str = ""
+    role: str = "uploader"
+    reserved_original_bytes: int = 0
+    verified_original_bytes: int = 0
+    intake_state: str = "open"
+    intake_generation: int = 1
+    device_label: str = ""
 
 
 @dataclass(frozen=True)
@@ -97,6 +115,7 @@ class ValidationResult:
     reason: RejectionReason | None
     content_type: str | None
     sha256: str | None
+    content_md5: str | None
     width: int | None
     height: int | None
 
@@ -115,6 +134,7 @@ class InventoryItem:
     reason: RejectionReason | None
     content_type: str | None
     sha256: str | None
+    content_md5: str | None
     width: int | None
     height: int | None
     last_seen_generation: int
@@ -155,3 +175,11 @@ class ScanSummary:
         return self.accepted_count > 0 and not (
             self.blocking_item_count or self.blocking_issue_count
         )
+
+
+@dataclass(frozen=True)
+class UploadCheckpoint:
+    item_id: UUID
+    state: LocalUploadState
+    attempt_count: int
+    last_error_code: str | None
