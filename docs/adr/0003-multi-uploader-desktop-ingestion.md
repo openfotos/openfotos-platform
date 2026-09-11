@@ -6,8 +6,8 @@
 ## Context
 
 The original pilot plan described one photographer and one event, but treated one desktop as the
-owner of the event's local checkpoint and final manifest. The required workflow has five to ten
-editors or photographers, each running OpenFotos on Windows or macOS. They normally divide about
+owner of the event's local checkpoint and final manifest. The required workflow has up to ten
+active contributor installations, each running OpenFotos on Windows or macOS. They normally divide about
 10,000 edited photographs into disjoint sets, but may upload concurrently to the same event or to
 different events. Each contributor must be able to choose a recursive folder, one photograph,
 multiple photographs, or a mixture of folders and files.
@@ -44,8 +44,9 @@ arriving, and independently clustered face subsets would split one person across
   duplicate warning. They consume quota and later produce separate derivatives, faces, and gallery
   entries. Do not add an event/checksum uniqueness constraint.
 - One device actively processes or uploads one batch and queues any others. Each device defaults to
-  four direct transfers and may choose one through four or pause. Five to ten devices therefore run
-  independently without a central transfer scheduler.
+  four direct transfers and may choose one through four or pause. One through ten active devices,
+  including lead installations that contribute, therefore run independently without a central
+  transfer scheduler.
 - The server atomically reserves event bytes. A desktop's cached allowance is advisory; a later
   concurrent reservation may pause when earlier reservations consume the limit. Stale reservations
   are flagged after 24 hours but remain until an audited lead decision.
@@ -98,8 +99,9 @@ are not encrypted. These are accepted pilot risks.
 
 Native Windows and macOS UI/filesystem smoke tests and a representative 10,000-photo benchmark are
 release gates, not claims established by Linux CI. Session 3 ships a redacted benchmark command and
-format; no client media enters the repository. Actual ten-device direct upload remains a Session 4
-test, and lead-desktop global clustering remains a Session 7 acceptance test.
+format; no client media enters the repository. Exact upload authorization and the refined active
+device limit are recorded in ADRs 0004 and 0005; lead-desktop global clustering remains a Session 7
+acceptance test.
 
 ## Session 3 acceptance criteria
 

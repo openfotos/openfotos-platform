@@ -98,6 +98,10 @@ independent device checkpoints targeting one event must create distinct batch/as
 
 ## Session 4: Direct upload and manifest reconciliation
 
+**Status (2026-09-11):** Complete. ADRs 0004 and 0005 replace prefix-wide upload credentials with
+exact-object PUT leases and record the device, quota, revocation, intake-generation, reconciliation,
+and publication-gate decisions.
+
 **Goal:** Move originals and metadata safely from desktop to private R2.
 
 **Work:** Implement lead authentication plus timed uploader invitations, per-device event-scoped
@@ -106,10 +110,33 @@ reservation, one-to-four-way resumable transfers per device, credential refresh,
 idempotency records, per-variant completion, intake closure, and lead-owned aggregate manifest
 validation. Use an S3-compatible local test service or fakes before real R2.
 
-**Done when:** An interrupted upload resumes without duplicate assets or transfers, invalid object
-keys are rejected, byte/checksum limits are enforced, and the server reconciles a complete test
-manifest while ten simulated clients race on one event without exceeding quota or finalizing after
-intake closure.
+**Done when:** An interrupted upload resumes without repeating verified assets, clients cannot
+choose object keys, byte/checksum limits are enforced, and the server reconciles a complete test
+manifest while ten simulated clients race on one event without exceeding quota. Finalization is
+lead-only, requires closed intake, and rejects nonterminal contributions.
+
+**Handoff:**
+
+1. Normal desktop mode now signs in a photographer or redeems a 72-hour uploader invitation,
+   persists rotating refresh tokens only in the operating-system credential store, caches
+   event/device scope, reserves a frozen contribution, streams one to four private original uploads,
+   pauses between objects, and resumes at the verified-object boundary.
+2. Django owns exact object keys, transactional event quota, the one-to-ten active contribution
+   device cap, invitation/device revocation, strict JSON and idempotency records, upload leases,
+   `HeadObject` reconciliation, reasoned lead exclusions, intake generations, and immutable
+   generation manifests. Publication now requires both the current committed ingestion manifest and
+   matching derivative readiness.
+3. The S3 adapter signs exact five-minute PUT operations with length, Content-MD5, JPEG type,
+   create-only semantics, and SHA-256 metadata. The same synthetic provider contract passed against
+   local MinIO and Cloudflare R2. R2 Object Read & Write credentials are sufficient; no Cloudflare
+   account API token is required.
+4. `./scripts/check.sh` passes with 70 deterministic tests plus one opt-in provider test. Session 4
+   authentication, ten-client quota locking, upload/reconciliation, and migrations also passed
+   against PostgreSQL 18.6 rather than SQLite.
+5. Native Windows/macOS packaging and the representative 10,000-photo rehearsal remain release
+   gates. Session 5's first failing acceptance test should prove a derivative object loses GPS and
+   nonessential EXIF while its original object's checksum remains unchanged, then mark derivative
+   readiness only for the current ingestion generation.
 
 ## Session 5: Image derivatives and private gallery
 

@@ -7,7 +7,12 @@ from django.db import transaction
 from django.http import HttpRequest
 from django.utils import timezone
 
-from openfotos_contracts import EventState, IngestionManifestState, can_transition_event
+from openfotos_contracts import (
+    EventState,
+    IngestionManifestState,
+    IntakeState,
+    can_transition_event,
+)
 
 from .audit import record_audit
 from .models import AuditAction, AuditResult, Event, generate_event_token
@@ -28,6 +33,22 @@ def transition_event(
         return event
     if not can_transition_event(current, target):
         raise ValidationError(f"Cannot transition an event from {current} to {target}.")
+    if target is EventState.UPLOADING and (
+        current in {EventState.PROCESSING, EventState.REVIEW}
+        or event.current_ingestion_manifest_id is not None
+    ):
+        raise ValidationError(
+            "Reopen intake to create a new ingestion generation before returning to Uploading."
+        )
+    if target is EventState.PROCESSING:
+        manifest = event.current_ingestion_manifest
+        if (
+            event.intake_state != IntakeState.CLOSED.value
+            or manifest is None
+            or manifest.state != IngestionManifestState.COMMITTED.value
+            or manifest.generation != event.intake_generation
+        ):
+            raise ValidationError("Finalize the current ingestion manifest before Processing.")
     if target is EventState.PUBLISHED:
         if not event.pin_hash:
             raise ValidationError("Set an event PIN before publication.")

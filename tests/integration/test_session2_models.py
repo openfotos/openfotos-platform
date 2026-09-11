@@ -9,7 +9,7 @@ from django.db import IntegrityError, transaction
 from django.test import RequestFactory
 from django.utils import timezone
 
-from openfotos_contracts import EventState, IngestionManifestState
+from openfotos_contracts import EventState, IngestionManifestState, IntakeState
 from openfotos_server.events.admin import EventAdmin, EventAdminForm
 from openfotos_server.events.models import (
     AuditAction,
@@ -32,6 +32,23 @@ def make_event(photographer: Photographer, *, pin: str = "012345", expires=True)
     event.set_pin(pin)
     event.save()
     return event
+
+
+def attach_committed_manifest(event: Event) -> IngestionManifest:
+    manifest = IngestionManifest.objects.create(
+        event=event,
+        generation=event.intake_generation,
+        state=IngestionManifestState.COMMITTED.value,
+        object_key=f"events/{event.id}/manifests/generation-{event.intake_generation:06d}.json",
+        content_sha256="a" * 64,
+        document={},
+        asset_count=1,
+        original_bytes=1,
+    )
+    event.current_ingestion_manifest = manifest
+    event.intake_state = IntakeState.CLOSED.value
+    event.save(update_fields=("current_ingestion_manifest", "intake_state"))
+    return manifest
 
 
 def test_event_pin_is_six_ascii_digits_and_uses_argon2() -> None:
@@ -71,23 +88,15 @@ def test_event_transitions_are_legal_idempotent_and_audited() -> None:
     actor = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     event = make_event(photographer)
 
-    for target in (EventState.UPLOADING, EventState.PROCESSING, EventState.REVIEW):
-        event = transition_event(event_id=event.id, target=target, actor=actor)
+    event = transition_event(event_id=event.id, target=EventState.UPLOADING, actor=actor)
+    with pytest.raises(ValidationError, match="Finalize the current ingestion manifest"):
+        transition_event(event_id=event.id, target=EventState.PROCESSING, actor=actor)
+    attach_committed_manifest(event)
+    event = transition_event(event_id=event.id, target=EventState.PROCESSING, actor=actor)
+    event = transition_event(event_id=event.id, target=EventState.REVIEW, actor=actor)
 
-    with pytest.raises(ValidationError, match="ingestion manifest"):
-        transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
-    manifest = IngestionManifest.objects.create(
-        event=event,
-        generation=event.intake_generation,
-        state=IngestionManifestState.COMMITTED.value,
-        object_key=f"events/{event.id}/manifests/generation-000001.json",
-        content_sha256="a" * 64,
-        document={},
-        asset_count=1,
-        original_bytes=1,
-    )
-    event.current_ingestion_manifest = manifest
-    event.save(update_fields=("current_ingestion_manifest",))
+    with pytest.raises(ValidationError, match="Reopen intake"):
+        transition_event(event_id=event.id, target=EventState.UPLOADING, actor=actor)
     with pytest.raises(ValidationError, match="derivatives"):
         transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
     event.derivatives_ready_generation = event.intake_generation
@@ -110,8 +119,10 @@ def test_publication_requires_a_pin_and_future_expiry() -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     actor = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     event = make_event(photographer, expires=False)
-    for target in (EventState.UPLOADING, EventState.PROCESSING, EventState.REVIEW):
-        event = transition_event(event_id=event.id, target=target, actor=actor)
+    event = transition_event(event_id=event.id, target=EventState.UPLOADING, actor=actor)
+    attach_committed_manifest(event)
+    event = transition_event(event_id=event.id, target=EventState.PROCESSING, actor=actor)
+    event = transition_event(event_id=event.id, target=EventState.REVIEW, actor=actor)
 
     with pytest.raises(ValidationError, match="future event expiry"):
         transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)

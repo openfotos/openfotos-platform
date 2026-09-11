@@ -509,12 +509,17 @@ def _server_origin(value: str) -> str:
     parsed = urlparse(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
         raise DesktopApiError("invalid_server_url", "Enter a valid OpenFotos server URL.")
-    if parsed.scheme != "https" and parsed.hostname not in {"localhost", "127.0.0.1", "::1"}:
+    local_hostname = parsed.hostname == "localhost" or parsed.hostname.endswith(".localhost")
+    if (
+        parsed.scheme != "https"
+        and not local_hostname
+        and parsed.hostname not in {"127.0.0.1", "::1"}
+    ):
         raise DesktopApiError(
             "invalid_server_url", "OpenFotos requires HTTPS except for a local test server."
         )
-    if parsed.query or parsed.fragment:
-        raise DesktopApiError("invalid_server_url", "The server URL cannot contain query data.")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise DesktopApiError("invalid_server_url", "Enter the OpenFotos server origin only.")
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
 

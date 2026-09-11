@@ -4,7 +4,7 @@
 
 | **Item**         | **Current decision**                               |
 |------------------|----------------------------------------------------|
-| Pilot            | One photographer, one reception, and 5-10 uploader devices |
+| Pilot            | One photographer, one reception, and 1-10 contribution devices |
 | Data             | Less than 20 GB of edited JPEG photographs         |
 | Delivery window  | Ten days                                           |
 | Operator         | One Python focused AI engineer using Codex         |
@@ -120,7 +120,7 @@ The photographer uploads edited photographs through a desktop application. OpenF
 
 | **Constraint** | **Value**                          | **Architectural consequence**                                        |
 |----------------|------------------------------------|----------------------------------------------------------------------|
-| Client volume  | One photographer, one reception, 5-10 uploaders | Manual provisioning and supervised operations are acceptable.        |
+| Client volume  | One photographer, one reception, 1-10 contribution devices | Manual provisioning and supervised operations are acceptable. |
 | Data size      | Less than 20 GB                    | R2 storage cost is negligible and local processing is practical.     |
 | Media type     | Photographs only                   | Video transcoding and streaming are excluded.                        |
 | Input format   | Edited JPEG only                   | RAW decoding, color pipelines and archive expectations are excluded. |
@@ -146,7 +146,8 @@ The photographer uploads edited photographs through a desktop application. OpenF
 
 ## Committed pilot capabilities
 
-- Concurrent desktop contribution to one event from five to ten Windows or macOS installations.
+- Concurrent desktop contribution to one event from one through ten active Windows or macOS
+  installations, including any lead installations that upload.
 
 - Private object storage for original JPEGs, previews and thumbnails.
 
@@ -222,16 +223,23 @@ The pilot needs authentication but does not need public account creation. OpenFo
 
 - Django sessions protect the browser dashboard.
 
-- The desktop app uses a short lived API access token and refresh token after photographer login.
+- The desktop app uses a 15-minute API access token and a rotating refresh token with an absolute
+  14-day lifetime after photographer login or uploader enrollment. A refresh response lost in
+  transit may be retried with the prior token for 60 seconds.
 
 - A lead may create a high-entropy uploader invitation that enrolls several upload-only devices for
-  at most 72 hours. Each redemption mints a named, independently revocable, event-scoped device
-  session. It is never the six-digit visitor PIN.
+  at most 72 hours and ten successful new-device redemptions. The same active installation may
+  redeem idempotently. Each new redemption mints a named, independently revocable, event-scoped
+  device session. It is never the six-digit visitor PIN.
+
+- An event allows one through ten active contribution devices in total, including lead
+  installations that upload. Revoking a device frees its slot while retaining its history.
 
 - Upload-only devices see their own batches and aggregate event totals, but not other contributors'
   filenames, photographs, gallery content, or event-management controls.
 
-- Store desktop refresh tokens in the operating system credential store when practical.
+- Store desktop refresh tokens in the operating system credential store. If it is unavailable,
+  retain them in memory only and warn that sign-in will be required after exit.
 
 - Hash passwords and event PINs with Argon2.
 
@@ -295,7 +303,7 @@ Django provides one deployable control plane while the desktop application is a 
 | API                      | Django REST Framework or focused JSON views | Version endpoints under api v1 and publish explicit request schemas.                         |
 | Database                 | PostgreSQL                                  | Use UUID primary identifiers externally and indexed foreign keys internally.                 |
 | Vector search            | pgvector                                    | Filter every query by event before similarity ranking.                                       |
-| Object storage           | Cloudflare R2 Standard                      | Use the S3 API with short lived credentials and presigned URLs.                              |
+| Object storage           | Cloudflare R2 Standard                      | Keep parent credentials on Django; issue exact-object, short-lived presigned PUT/GET URLs.    |
 | Image work               | Pillow or pyvips                            | Correct orientation and create fixed derivatives before upload.                              |
 | Face engine              | InsightFace buffalo m                       | SCRFD 2.5GF detector and ResNet50 recognizer through ONNX Runtime CPU.                       |
 | Hosting                  | Railway Hobby                               | One application replica and explicit resource limits.                                        |
@@ -427,6 +435,7 @@ the aggregate event manifest.
 | derivative state             | Tracks thumbnail and preview generation.               |
 | face state                   | Tracks detection, embeddings and uploaded metadata.    |
 | upload state                 | Tracks original, preview and thumbnail independently.  |
+| Content-MD5                  | Lets the object store reject corrupted request bodies.  |
 | attempt count and last error | Controls backoff and makes failures diagnosable.       |
 
 ## Uploader requirements
@@ -441,24 +450,29 @@ the aggregate event manifest.
 
 - Calculate the event total before starting and enforce a server supplied pilot limit such as 25 GB.
 
-- Request temporary R2 credentials scoped to the event upload prefix. Never ship a parent R2 key.
+- Request presigned PUT leases scoped to exact server-owned object keys. Never ship a parent R2
+  key or a prefix-wide read/list capability.
 
-- Use four concurrent transfers initially, with configurable retry and exponential backoff.
+- Use four concurrent transfers initially. Retry an object at most five times with exponential
+  backoff and full jitter.
 
-- Allow one through four transfers and pause per device. Up to ten installations may upload to the
-  same event concurrently; the server reserves event bytes atomically.
+- Allow one through four transfers and pause per device. Pause drains active PUTs and requests no
+  more leases. Up to ten active contribution installations may upload to the same event
+  concurrently; the server reserves each frozen batch's original bytes atomically and all-or-none.
 
 - Freeze one contribution manifest after validation approval. Later additions use another batch.
   Distinct source paths with identical checksums remain distinct accepted assets.
 
 - Upload each object using its UUID key rather than its original filename.
 
-- Refresh credentials before expiry and continue without repeating completed objects.
+- Refresh the desktop API token before expiry and request new five-minute leases as needed. Resume
+  at completed-object granularity; only an interrupted in-flight object restarts.
 
-- Post the manifest only after every accepted asset reaches a terminal state.
+- Submit the frozen contribution before upload so Django can reserve its full original-byte total.
+  Session 4 transfers originals only; preview and thumbnail variants begin in Session 5.
 
-- Post immutable contribution manifests first. Only the lead may close intake, drain or explicitly
-  exclude remaining failures, and finalize their server-owned event-wide reconciliation.
+- Reserve the immutable contribution record first. Only the lead may close intake, drain or
+  explicitly exclude remaining failures, and finalize the server-owned event-wide reconciliation.
 
 - Allow the photographer to retry failed assets and export a diagnostic log.
 
@@ -485,7 +499,9 @@ R2 storage is dynamic. OpenFotos does not pre purchase 20 GB or 100 GB and does 
 >
 > events/\<event-uuid\>/thumbnails/\<asset-uuid\>.jpg
 >
-> events/\<event-uuid\>/manifests/final.json
+> events/\<event-uuid\>/manifests/generation-\<six-digit-generation\>.json
+>
+> events/\<event-uuid\>/manifests/final.json (future publication artifact)
 >
 > exports/\<event-uuid\>/\<export-uuid\>.zip
 >
@@ -518,9 +534,18 @@ R2 storage is dynamic. OpenFotos does not pre purchase 20 GB or 100 GB and does 
 
 - The photographer keeps a local copy. R2 is the delivery store for the pilot, not the only archive.
 
-## Upload credentials
+## Upload authorization and integrity
 
-Django requests short lived R2 credentials from Cloudflare using a parent token held only in the server environment. The credentials are limited to one bucket and the event prefix. The desktop client treats them as bearer secrets, renews them when required and removes them when the event session ends.
+Django holds S3-compatible object read/write credentials only in the server environment. It signs a
+five-minute `PutObject` operation for one immutable, server-owned original key and binds its content
+length, base64 Content-MD5, JPEG content type, create-only precondition, and SHA-256 metadata. A
+desktop may request at most eight leases at once and never receives list or read permission.
+
+The desktop streams each source while recalculating SHA-256. Django accepts completion only after a
+server-side HEAD comparison of length, type, ETag/MD5, and SHA-256 metadata. Mismatches are removed
+and fail closed. These checks detect transport corruption and changed sources; they cannot prove
+honesty when an enrolled contributor deliberately declares matching false checksums for their own
+bytes. Enrollment, revocation, review, and audit history are the pilot controls for that actor.
 
 # 10 Face processing and search
 
@@ -653,7 +678,8 @@ The state machine must be idempotent. Repeating a completed API request or proce
 ## Idempotency keys
 
 Every mutating desktop request should include an idempotency key derived from event, device,
-contribution batch, operation and asset UUID. The server stores completed keys for an appropriate
+contribution batch, operation and asset UUID when the response is safe to replay. Authentication and
+raw-secret invitation issuance are exceptions. The server stores completed keys for an appropriate
 period. This prevents retries after poor connectivity from generating duplicate face rows or
 finalization records.
 
@@ -665,10 +691,13 @@ finalization records.
 | user               | Django user fields                                                      | OpenFotos administrator and photographer login.      |
 | photographer user  | photographer id, user id, role                                          | Future ready membership boundary.                    |
 | event              | id, photographer id, token, PIN hash, state, limits, expiry             | Reception and its access policy.                     |
-| uploader invitation | event id, token hash, expiry, enrollment state                         | Time-limited device enrollment.                      |
-| uploader device     | event id, device id, label, status, last activity                       | Revocable upload-only identity.                      |
-| contribution batch  | event id, device id, state, counts, reserved bytes, timestamps          | Immutable per-device ingestion unit.                 |
-| asset              | id, event id, filename, bytes, checksum, dimensions, object keys, state | One uploaded photograph and its derivatives.         |
+| uploader invitation | event id, token hash, expiry, redemption limit/count, status             | Time-limited reusable device enrollment.             |
+| uploader device     | event id, installation id, role, label, status, last activity            | Revocable contribution identity.                     |
+| desktop session     | photographer, user/device actor, token hashes, expiries, revocation       | Rotating desktop API identity.                       |
+| contribution batch | device id, generation, state, counts, reserved bytes, manifest hash       | Immutable per-device ingestion unit.                 |
+| asset               | batch id, filename, checksum, dimensions                                 | One accepted photograph.                             |
+| asset object        | asset id, variant, key, bytes, MD5, ETag, lease/state, failure/exclusion  | Independent immutable object lifecycle.              |
+| ingestion manifest | event id, generation, object key, content hash, document, state           | Server-owned aggregate reconciliation.               |
 | face               | id, event id, asset id, box, quality, model id, embedding               | One accepted face detection.                         |
 | face cluster       | id, event id, status, photo count, rank, featured                       | Anonymous face collection.                           |
 | cluster member     | cluster id, face id, similarity                                         | Cluster membership and evidence.                     |
@@ -706,15 +735,21 @@ Use a versioned JSON API for desktop operations. Browser pages may use Django fo
 |------------------------------------------|------------|---------------------------------------------------------|
 | POST api v1 auth login                   | Desktop    | Authenticate photographer and issue short lived tokens. |
 | GET api v1 events                        | Desktop    | List events assigned to the photographer.               |
+| POST api v1 auth refresh                 | Desktop    | Rotate a refresh token and issue a new access token.     |
 | POST api v1 uploader invitations redeem  | Desktop    | Exchange a timed invitation for one device session.      |
-| POST api v1 events id batches            | Desktop    | Create or resume an event-scoped contribution batch.     |
-| POST api v1 events id upload session     | Desktop    | Issue temporary prefix scoped R2 credentials.           |
-| POST api v1 events id assets batch       | Desktop    | Reserve asset UUIDs and upload object keys.             |
-| POST api v1 events id assets id complete | Desktop    | Confirm object variants, sizes and checksums.           |
+| POST api v1 events id invitations        | Lead       | Create a reusable timed uploader invitation.             |
+| POST api v1 events id batches            | Desktop    | Atomically reserve or resume an immutable contribution.  |
+| GET api v1 events id batches id          | Desktop    | Resume an authorized contribution and object states.     |
+| POST api v1 events id batches id upload-leases | Desktop | Issue exact-object presigned PUT leases.              |
+| POST api v1 events id assets id complete | Desktop    | HEAD-verify one uploaded object against its reservation. |
+| POST api v1 events id assets id exclude  | Lead       | Resolve one failed original with an audited reason.      |
+| POST api v1 events id batches id cancel  | Lead       | Cancel a batch only before any original is verified.     |
+| POST api v1 events id devices id revoke  | Lead       | Revoke a contribution device independently.              |
 | POST api v1 events id faces batch        | Desktop    | Upload validated face metadata and embeddings.          |
 | POST api v1 events id clusters batch     | Desktop    | Upload initial cluster membership and metrics.          |
 | POST api v1 events id finalize           | Lead       | Reconcile contributions and request validation.         |
 | POST api v1 events id close intake       | Lead       | Stop new batches while reserved contributions drain.    |
+| POST api v1 events id reopen intake      | Lead       | Start a new pre-publication ingestion generation.       |
 | GET api v1 jobs id                       | Desktop    | Read validation and event processing status.            |
 | POST event token unlock                  | Browser    | Verify PIN and create an authorized event session.      |
 | POST event token selfie search           | Browser    | Process one selfie and return candidate asset IDs.      |
@@ -726,7 +761,14 @@ Use a versioned JSON API for desktop operations. Browser pages may use Django fo
 
 - Return stable machine readable error codes and a human readable message.
 
-- Require an idempotency key on batch commits and finalization.
+- Require an idempotency key on batch reservation, object completion, exceptional resolution,
+  intake mutations, revocation, and finalization. The same key with another request body fails.
+
+- Keep invitation/device/batch/asset lookups tenant- and actor-scoped. Upload contributors can read
+  only their own batch details; leads can reconcile the event.
+
+- Reject unknown fields, duplicate asset IDs, unsafe filenames, wrong processing profiles,
+  oversized batches, and client-supplied object keys before any storage side effect.
 
 - Never accept an arbitrary bucket name or object key from a client.
 
@@ -865,7 +907,7 @@ Supabase offers a Mumbai region. Choosing Mumbai keeps database records and face
 
 - Private R2 bucket with no anonymous listing or object access.
 
-- Short lived prefix scoped desktop credentials and short lived visitor download URLs.
+- Five-minute exact-object desktop PUT leases and short-lived visitor download URLs.
 
 - Argon2 password and PIN hashing with server side rate limiting.
 
@@ -1010,7 +1052,7 @@ Run 500 to 1,000 representative reception images before full implementation is c
 
 | **Group**      | **Required coverage**                                                                        |
 |----------------|----------------------------------------------------------------------------------------------|
-| Storage        | Object key generation, credential scope, checksum validation and signed URL authorization.   |
+| Storage        | Object key generation, exact-operation lease scope, checksum validation and signed URL authorization. |
 | Authentication | Photographer login, token refresh, PIN attempts, cookie security and authorization failures. |
 | Tenancy        | Cross photographer and cross event access is denied for every resource type.                 |
 | Uploader       | Restart, duplicate scan, changed file, expired credentials, partial failure and retry.       |
@@ -1050,7 +1092,7 @@ cross-reading another device's filenames, or racing event finalization.
 
 - Change event IDs and asset IDs in requests and confirm denial.
 
-- Reuse expired R2 and share credentials and confirm denial.
+- Reuse expired upload leases and share URLs and confirm denial.
 
 - Attempt PIN brute force and verify throttling.
 
@@ -1069,7 +1111,7 @@ cross-reading another device's filenames, or racing event finalization.
 | 1       | Repository, Django skeleton, database and R2          | Health check deploys; event can be created in Django admin.                   |
 | 2       | Accounts, tenancy, PIN sessions and domain groundwork | Photographer dashboard and protected sample event work.                       |
 | 3       | Desktop shell, local SQLite and directory validation  | Folder scan survives restart and rejects unsupported files.                   |
-| 4       | Temporary credentials and resumable direct upload     | Interrupted test upload resumes and the manifest reconciles.                  |
+| 4       | Exact-object leases and resumable direct upload       | Interrupted test upload resumes and the manifest reconciles.                  |
 | 5       | Derivatives and gallery                               | Private thumbnails and watermarked previews display after authorization.      |
 | 6       | InsightFace benchmark and embedding contract          | Measured report for 500 to 1,000 real images; model choice confirmed.         |
 | 7       | Face ingestion, clustering and review tools           | Collections can be hidden, merged and featured.                               |
@@ -1167,7 +1209,7 @@ Each day ends with a demonstrable vertical slice, automated tests for its critic
 | Small group faces are missed               | Incomplete collections                   | Increase resolution or tile only selected group photos; allow reprocessing.                 |
 | Two people merge into one cluster          | Unrelated photographs may appear         | Use conservative thresholds, manual review and merge rather than aggressive grouping.       |
 | Desktop app exits during upload            | Hours of work may be lost                | Persist per file state in SQLite and make every upload and API commit idempotent.           |
-| Credentials leak from public source        | Storage or personal data exposure        | No secrets in Git; server mints short lived prefix scoped credentials; run secret scanning. |
+| Credentials leak from public source        | Storage or personal data exposure        | No secrets in Git; parent keys stay server-side; desktops receive five-minute exact-object PUT leases. |
 | PIN is shared widely                       | Gallery audience expands                 | Use random event token, rate limiting, expiry and revocable share links.                    |
 | Selfie is retained accidentally            | Privacy breach                           | Use memory processing, explicit cleanup paths and tests covering every failure mode.        |
 | R2 is assumed to guarantee India residency | Contract or compliance mismatch          | Disclose APAC hint limitations and change storage provider if India residency is required.  |
@@ -1267,7 +1309,7 @@ Do not publish the event until private object access, manifest completeness, clu
 
 \[ \] InsightFace processing.
 
-\[ \] Temporary R2 credentials.
+\[ \] Exact-object presigned PUT leases.
 
 \[ \] Resume and retry.
 

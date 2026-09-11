@@ -441,9 +441,11 @@ class EventSelectorPage(QWidget):
         self.events.clear()
         self.heading.setText("Select a synthetic demo event" if demo else "Choose an event")
         for event in events:
+            remaining_bytes = max(0, event.storage_limit_bytes - event.reserved_original_bytes)
             item = QListWidgetItem(
                 _asset_icon("calendar.svg"),
-                f"{event.name}    ·    {format_bytes(event.storage_limit_bytes)} allowance",
+                f"{event.name}    ·    {format_bytes(remaining_bytes)} remaining"
+                f"    ·    {format_bytes(event.verified_original_bytes)} verified",
             )
             item.setSizeHint(QSize(0, 58))
             item.setData(Qt.ItemDataRole.UserRole, event)
@@ -467,10 +469,12 @@ class SelectionPage(QWidget):
     new_batch_requested = Signal()
     invitation_requested = Signal()
     intake_requested = Signal()
+    finalize_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
         self._batch_frozen = False
+        self._intake_open = True
         layout = QVBoxLayout(self)
         layout.setContentsMargins(52, 30, 52, 34)
         layout.setSpacing(18)
@@ -506,6 +510,9 @@ class SelectionPage(QWidget):
         self.intake = _style_button(QPushButton("Close intake"), kind="ghost")
         self.intake.clicked.connect(self.intake_requested)
         event_layout.addWidget(self.intake)
+        self.finalize = _style_button(QPushButton("Finalize ingestion"), kind="primary")
+        self.finalize.clicked.connect(self.finalize_requested)
+        event_layout.addWidget(self.finalize)
         layout.addWidget(event_panel)
 
         source_actions = QHBoxLayout()
@@ -631,10 +638,13 @@ class SelectionPage(QWidget):
         self.remove_selection.setEnabled(not batch.frozen)
         is_lead = event.role == "lead"
         intake_open = event.intake_state == "open"
+        self._intake_open = intake_open
         self.invitation.setVisible(is_lead)
         self.invitation.setEnabled(is_lead and intake_open)
         self.intake.setVisible(is_lead)
         self.intake.setText("Close intake" if intake_open else "Reopen intake")
+        self.finalize.setVisible(is_lead)
+        self.finalize.setEnabled(is_lead and not intake_open)
         self.add_files.setEnabled(not batch.frozen and intake_open)
         self.add_folder.setEnabled(not batch.frozen and intake_open)
         self.remove_selection.setEnabled(not batch.frozen and intake_open)
@@ -652,6 +662,9 @@ class SelectionPage(QWidget):
             self.remove_selection,
             self.scan,
             self.new_batch,
+            self.invitation,
+            self.intake,
+            self.finalize,
         ):
             button.setEnabled(False)
         self.progress_text.setText("Discovering and validating local files…")
@@ -664,11 +677,14 @@ class SelectionPage(QWidget):
 
     def scan_stopped(self) -> None:
         self.progress_panel.hide()
-        self.add_files.setEnabled(not self._batch_frozen)
-        self.add_folder.setEnabled(not self._batch_frozen)
-        self.remove_selection.setEnabled(not self._batch_frozen)
-        self.scan.setEnabled(True)
-        self.new_batch.setEnabled(True)
+        self.add_files.setEnabled(not self._batch_frozen and self._intake_open)
+        self.add_folder.setEnabled(not self._batch_frozen and self._intake_open)
+        self.remove_selection.setEnabled(not self._batch_frozen and self._intake_open)
+        self.scan.setEnabled(self._intake_open)
+        self.new_batch.setEnabled(self._intake_open)
+        self.invitation.setEnabled(self._intake_open)
+        self.intake.setEnabled(True)
+        self.finalize.setEnabled(not self._intake_open)
 
 
 class ValidationPage(QWidget):
@@ -983,7 +999,7 @@ class ApprovedPage(QWidget):
         self.lead_panel.setVisible(is_lead)
         self.invitation.setEnabled(is_lead and event.intake_state == "open")
         self.intake.setText("Reopen intake" if event.intake_state == "closed" else "Close intake")
-        self.finalize.setEnabled(is_lead and event.intake_state == "closed" and complete)
+        self.finalize.setEnabled(is_lead and event.intake_state == "closed")
 
     @Slot()
     def upload_started(self) -> None:
@@ -1079,6 +1095,7 @@ class MainWindow(QMainWindow):
         self.selection.new_batch_requested.connect(self._new_batch)
         self.selection.invitation_requested.connect(self._create_invitation)
         self.selection.intake_requested.connect(self._toggle_intake)
+        self.selection.finalize_requested.connect(self._finalize_ingestion)
         self.validation.approve_requested.connect(self._approve_batch)
         self.validation.rescan_requested.connect(self._show_selection)
         self.validation.export_requested.connect(self._export_diagnostics)
@@ -1406,6 +1423,8 @@ class MainWindow(QMainWindow):
             "Ingestion finalized",
             f"Generation {result['generation']} committed with {result['asset_count']} originals.",
         )
+        self.selection.finalize.setEnabled(False)
+        self.approved.finalize.setEnabled(False)
 
     def _show_persistence_warning(self) -> None:
         warning = getattr(self.gateway, "persistence_warning", None)

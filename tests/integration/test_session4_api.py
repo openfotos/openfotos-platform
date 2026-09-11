@@ -188,6 +188,18 @@ def test_desktop_login_is_tenant_scoped_and_contract_is_strict(tenant) -> None:
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "invalid_request"
 
+    attempted_manifest = manifest(b"synthetic jpeg")
+    attempted_manifest["assets"][0]["object_key"] = "events/another-event/originals/chosen.jpg"
+    chosen_key = post_json(
+        client,
+        reverse("desktop-api:reserve-batch", args=(event.id,)),
+        attempted_manifest,
+        token=signed_in["access_token"],
+        idempotency_key=uuid4(),
+    )
+    assert chosen_key.status_code == 400
+    assert chosen_key.json()["error"]["code"] == "invalid_request"
+
 
 def test_uploader_cannot_read_another_device_batch_and_idempotency_conflicts(tenant) -> None:
     _, _, event = tenant

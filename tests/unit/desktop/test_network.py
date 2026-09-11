@@ -18,7 +18,12 @@ from openfotos_desktop.ingestion import (
     InventoryScanner,
     LocalUploadState,
 )
-from openfotos_desktop.network import DesktopNetworkService, SourceChangedError
+from openfotos_desktop.network import (
+    DesktopApiError,
+    DesktopNetworkService,
+    SourceChangedError,
+    _server_origin,
+)
 
 
 class MemoryTokenStore:
@@ -55,6 +60,16 @@ def approved_batch(tmp_path: Path):
     InventoryScanner(store).scan(batch_id)
     store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
     return store, event_id, batch_id, photo
+
+
+def test_local_tenant_hosts_allow_http_but_remote_hosts_require_https() -> None:
+    assert _server_origin("http://alpha.localhost:8000") == "http://alpha.localhost:8000"
+    assert _server_origin("https://alpha.openfotos.example") == "https://alpha.openfotos.example"
+
+    with pytest.raises(DesktopApiError, match="requires HTTPS"):
+        _server_origin("http://alpha.openfotos.example")
+    with pytest.raises(DesktopApiError, match="origin only"):
+        _server_origin("https://alpha.openfotos.example/api/v1")
 
 
 def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):

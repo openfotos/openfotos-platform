@@ -6,12 +6,15 @@ customers browse a PIN-protected web gallery and can submit an ephemeral selfie 
 photos.
 
 The pilot deliberately targets one photographer, one reception, less than 20 GB of photographs,
-and a ten-day delivery window. The complete product and architecture decisions are in the
+one to ten active contribution devices, and a ten-day delivery window. The complete product and
+architecture decisions are in the
 [product and technical plan](OpenFotos_Markdown/OpenFotos_Product_and_Technical_Plan.md). The
 [pilot access decision](docs/adr/0002-pilot-accounts-tenancy-and-event-access.md) records the exact
 Session 2 authorization and PIN tradeoffs. The
-[multi-uploader decision](docs/adr/0003-multi-uploader-desktop-ingestion.md) defines how five to ten
-desktop installations safely contribute to the same event.
+[multi-uploader decision](docs/adr/0003-multi-uploader-desktop-ingestion.md),
+[exact-object lease decision](docs/adr/0004-exact-object-upload-leases.md), and
+[reconciliation decision](docs/adr/0005-contribution-lifecycle-and-reconciliation.md) define how
+independent desktop installations safely contribute to the same event.
 
 ## Repository map
 
@@ -46,17 +49,24 @@ uv run python apps/server/manage.py check
 uv run python apps/server/manage.py runserver
 ```
 
-The health endpoint is `http://127.0.0.1:8000/health/`. Session 3's normal desktop mode exposes the
-real lead and uploader-enrollment screens, but intentionally does not fake the Session 4 network
-API. Start the functional local inventory with an explicitly synthetic event:
+The health endpoint is `http://127.0.0.1:8000/health/`. Start the real desktop client with:
+
+```bash
+uv run python -m openfotos_desktop
+```
+
+For a photographer with slug `demo`, use `http://demo.localhost:8000` as the server. Lead login,
+invitation enrollment, durable refresh, private direct upload, pause/resume, intake closure, and
+manifest finalization use the Session 4 API. To run local inventory without a server, start the
+explicit synthetic demo instead:
 
 ```bash
 uv run python -m openfotos_desktop --demo
 ```
 
 The demo accepts recursive folders, one or multiple files, and mixed selections. It validates and
-checkpoints JPEGs locally; it does not transfer anything to the cloud. To collect a redacted timing
-report on representative, consented local data without retaining a benchmark checkpoint:
+checkpoints JPEGs locally; it does not transfer anything to object storage. To collect a redacted
+timing report on representative, consented local data without retaining a benchmark checkpoint:
 
 ```bash
 uv run python -m openfotos_desktop.benchmark_inventory /path/to/representative/folder \
@@ -79,6 +89,21 @@ uv sync --extra server
 Copy `.env.example` to `.env` for local values. Never commit `.env`, model weights, customer
 photos, selfies, face embeddings, or production credentials. The application-source licence is
 still an explicit pre-publication decision; pretrained model weights retain separate terms.
+
+The server needs an S3-compatible bucket plus object read/write credentials. For Cloudflare R2,
+set the account ID, bucket name, access key ID, and secret; the endpoint is derived automatically.
+No account API token is used at runtime. For MinIO, start a local server and create a private test
+bucket in its console, then set `OBJECT_STORAGE_ENDPOINT_URL`, `R2_BUCKET_NAME`, and the MinIO
+access and secret keys. The opt-in provider contract test uses synthetic bytes and cleans its keys:
+
+```bash
+OPENFOTOS_LIVE_S3=1 \
+OPENFOTOS_TEST_S3_ENDPOINT=http://127.0.0.1:9000 \
+OPENFOTOS_TEST_S3_BUCKET=openfotos-session4 \
+OPENFOTOS_TEST_S3_ACCESS_KEY=replace-me \
+OPENFOTOS_TEST_S3_SECRET_KEY=replace-me \
+uv run pytest tests/integration/test_s3_object_store_live.py
+```
 
 ## Implementation sessions
 
