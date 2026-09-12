@@ -14,8 +14,26 @@ from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
-from openfotos_contracts import ContractError, ContributionInput, DeviceRole, DeviceStatus
+from openfotos_contracts import (
+    AssetDerivativesInput,
+    ContractError,
+    ContributionInput,
+    DerivativeVariant,
+    DeviceRole,
+    DeviceStatus,
+    PreviewPolicyInput,
+)
 
+from .derivative_services import (
+    confirm_preview_policy,
+    issue_derivative_leases,
+    issue_owned_original_url,
+    issue_policy_mark_url,
+    preview_policy_data,
+    register_asset_derivatives,
+    report_derivative_failure,
+    verify_derivative,
+)
 from .desktop_auth import (
     DesktopAuthError,
     authenticate_access_token,
@@ -43,6 +61,7 @@ from .models import (
     AssetObject,
     ContributionBatch,
     IdempotencyRecord,
+    PreviewPolicy,
     RateLimitPurpose,
     UploaderDevice,
 )
@@ -193,6 +212,7 @@ def _event_data(event, *, session) -> dict:
         status=DeviceStatus.ACTIVE.value,
     ).count()
     role = DeviceRole.LEAD.value if session.user_id else DeviceRole.UPLOADER.value
+    policy = PreviewPolicy.objects.filter(event=event).first()
     return {
         "id": str(event.id),
         "name": event.name,
@@ -208,6 +228,7 @@ def _event_data(event, *, session) -> dict:
         "max_contribution_devices": event.max_contribution_devices,
         "active_contribution_devices": active_devices,
         "device_label": session.device.label if session.device_id else "",
+        "preview_policy": preview_policy_data(policy),
     }
 
 
@@ -468,6 +489,230 @@ def upload_leases(request: HttpRequest, event_id: UUID, batch_id: UUID) -> JsonR
 
 @csrf_exempt
 @require_POST
+def confirm_preview_policy_view(request: HttpRequest, event_id: UUID) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+        context = _mutation_context(request, session=session, operation="confirm_preview_policy")
+        if isinstance(context, JsonResponse):
+            return context
+        body = _json_body(
+            request,
+            fields={"enabled", "template", "text", "logo_kind", "mark_png_base64"},
+        )
+        value = PreviewPolicyInput.from_dict(body)
+        policy = confirm_preview_policy(
+            session=session,
+            event_id=event_id,
+            value=value,
+            object_store=configured_object_store() if value.enabled else None,
+            request=request,
+        )
+    except ImproperlyConfigured:
+        return _error(
+            "object_store_unavailable",
+            "Object storage is not configured.",
+            status=503,
+            retryable=True,
+        )
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+    return _remember(context, {"preview_policy": preview_policy_data(policy)}, status=201)
+
+
+@require_GET
+def preview_policy_mark(request: HttpRequest, event_id: UUID) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+        data = issue_policy_mark_url(
+            session=session,
+            event_id=event_id,
+            object_store=configured_object_store(),
+        )
+    except ImproperlyConfigured:
+        return _error(
+            "object_store_unavailable",
+            "Object storage is not configured.",
+            status=503,
+            retryable=True,
+        )
+    except (DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_POST
+def register_derivatives(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+        context = _mutation_context(request, session=session, operation="register_derivatives")
+        if isinstance(context, JsonResponse):
+            return context
+        body = _json_body(
+            request,
+            fields={
+                "asset_id",
+                "source_sha256",
+                "policy_id",
+                "profile_id",
+                "captured_at",
+                "objects",
+            },
+        )
+        value = AssetDerivativesInput.from_dict(body)
+        if value.asset_id != asset_id:
+            raise ContractError("invalid_request", "The body asset ID must match the route.")
+        objects = register_asset_derivatives(session=session, event_id=event_id, value=value)
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+    return _remember(
+        context,
+        {
+            "asset_id": str(asset_id),
+            "objects": [
+                {
+                    "variant": item.variant,
+                    "state": item.state,
+                    "failure_code": item.failure_code,
+                }
+                for item in objects
+            ],
+        },
+        status=201,
+    )
+
+
+@csrf_exempt
+@require_POST
+def derivative_leases(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+        body = _json_body(request, fields={"variants"})
+        if not isinstance(body["variants"], list) or not 1 <= len(body["variants"]) <= 2:
+            raise ContractError("invalid_request", "Choose one or two derivative variants.")
+        try:
+            variants = tuple(DerivativeVariant(str(value)) for value in body["variants"])
+        except ValueError as exc:
+            raise ContractError(
+                "invalid_derivative_variant", "Unknown derivative variant."
+            ) from exc
+        leases = issue_derivative_leases(
+            session=session,
+            event_id=event_id,
+            asset_id=asset_id,
+            variants=variants,
+            object_store=configured_object_store(),
+        )
+    except ImproperlyConfigured:
+        return _error(
+            "object_store_unavailable",
+            "Object storage is not configured.",
+            status=503,
+            retryable=True,
+        )
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+    return JsonResponse({"leases": leases})
+
+
+@csrf_exempt
+@require_POST
+def complete_derivative(
+    request: HttpRequest, event_id: UUID, asset_id: UUID, variant: str
+) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+        try:
+            parsed_variant = DerivativeVariant(variant)
+        except ValueError as exc:
+            raise ContractError(
+                "invalid_derivative_variant", "Unknown derivative variant."
+            ) from exc
+        context = _mutation_context(
+            request,
+            session=session,
+            operation=f"complete_derivative_{parsed_variant.value}",
+        )
+        if isinstance(context, JsonResponse):
+            return context
+        _json_body(request, fields=set())
+        upload = verify_derivative(
+            session=session,
+            event_id=event_id,
+            asset_id=asset_id,
+            variant=parsed_variant,
+            object_store=configured_object_store(),
+            request=request,
+        )
+    except ImproperlyConfigured:
+        return _error(
+            "object_store_unavailable",
+            "Object storage is not configured.",
+            status=503,
+            retryable=True,
+        )
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+    return _remember(
+        context,
+        {"asset_id": str(asset_id), "variant": upload.variant, "state": upload.state},
+    )
+
+
+@csrf_exempt
+@require_POST
+def owned_original_url(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+        _json_body(request, fields=set())
+        data = issue_owned_original_url(
+            session=session,
+            event_id=event_id,
+            asset_id=asset_id,
+            object_store=configured_object_store(),
+        )
+    except ImproperlyConfigured:
+        return _error(
+            "object_store_unavailable",
+            "Object storage is not configured.",
+            status=503,
+            retryable=True,
+        )
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_POST
+def derivative_failure(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+        context = _mutation_context(request, session=session, operation="derivative_failure")
+        if isinstance(context, JsonResponse):
+            return context
+        body = _json_body(request, fields={"code"})
+        asset = report_derivative_failure(
+            session=session,
+            event_id=event_id,
+            asset_id=asset_id,
+            code=str(body["code"]),
+            request=request,
+        )
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+    return _remember(
+        context,
+        {
+            "asset_id": str(asset.id),
+            "failure_code": asset.derivative_failure_code,
+            "attempt_count": asset.derivative_attempt_count,
+        },
+    )
+
+
+@csrf_exempt
+@require_POST
 def complete_asset(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
@@ -630,15 +875,19 @@ def revoke_device_view(request: HttpRequest, event_id: UUID, device_id: UUID) ->
 
 def _batch_data(batch: ContributionBatch, *, session) -> dict:
     objects = AssetObject.objects.filter(asset__batch=batch)
+    originals = objects.filter(variant="originals")
     data = {
         "id": str(batch.id),
         "state": batch.state,
         "generation": batch.intake_generation,
         "asset_count": batch.declared_asset_count,
         "original_bytes": batch.declared_original_bytes,
-        "verified_asset_count": objects.filter(state="verified").count(),
-        "failed_asset_count": objects.filter(state="failed").count(),
-        "excluded_asset_count": objects.filter(state="excluded").count(),
+        "verified_asset_count": originals.filter(state="verified").count(),
+        "failed_asset_count": originals.filter(state="failed").count(),
+        "excluded_asset_count": originals.filter(state="excluded").count(),
+        "verified_derivative_count": objects.exclude(variant="originals")
+        .filter(state="verified")
+        .count(),
     }
     if session.user_id is not None or batch.device_id == session.device_id:
         data["assets"] = list(
@@ -648,8 +897,10 @@ def _batch_data(batch: ContributionBatch, *, session) -> dict:
                 "expected_bytes",
                 "state",
                 "failure_code",
+                "asset__gallery_excluded_at",
             )
         )
         for item in data["assets"]:
             item["asset_id"] = str(item["asset_id"])
+            item["gallery_excluded"] = item.pop("asset__gallery_excluded_at") is not None
     return data

@@ -63,9 +63,15 @@ def transition_event(
             raise ValidationError("Finalize the current ingestion manifest before publication.")
         if event.derivatives_ready_generation != event.intake_generation:
             raise ValidationError("Complete private gallery derivatives before publication.")
+        if not hasattr(event, "preview_policy"):
+            raise ValidationError("Confirm the event preview settings before publication.")
 
     event.state = target
-    event.save(update_fields=("state", "updated_at"))
+    update_fields = ["state", "updated_at"]
+    if current is EventState.PUBLISHED and target is EventState.REVIEW:
+        event.visitor_access_version = uuid4()
+        update_fields.append("visitor_access_version")
+    event.save(update_fields=update_fields)
     record_audit(
         photographer=event.photographer,
         event=event,

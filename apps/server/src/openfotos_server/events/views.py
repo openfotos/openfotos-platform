@@ -1,26 +1,60 @@
-"""Server-rendered photographer and visitor authorization flows."""
+"""Server-rendered photographer and private gallery flows."""
 
+from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
+from django.core.exceptions import ImproperlyConfigured, ValidationError
+from django.core.paginator import Paginator
 from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
-from django.views.decorators.http import require_http_methods, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
+
+from openfotos_contracts import EventState, OriginalDownloadPolicy
 
 from .audit import record_audit
 from .cookies import delete_visitor_cookie, has_valid_visitor_cookie, set_visitor_cookie
-from .forms import EventPinForm, PhotographerLoginForm
+from .forms import (
+    DownloadPolicyForm,
+    EventPinForm,
+    GalleryExclusionForm,
+    PhotographerLoginForm,
+)
+from .gallery_services import (
+    GALLERY_PAGE_SIZE,
+    available_gallery_assets,
+    change_download_policy,
+    exclude_from_gallery,
+    gallery_page,
+    gallery_photo,
+    restore_to_gallery,
+)
+from .ingestion_services import IngestionError
 from .models import (
+    Asset,
     AuditAction,
     AuditResult,
     Event,
     PhotographerMembership,
+    PreviewPolicy,
     RateLimitPurpose,
 )
+from .object_store import configured_object_store
 from .rate_limits import clear_failures, rate_limit_status, register_failure
+from .services import transition_event
 
 GENERIC_LOGIN_ERROR = "We could not sign you in with those details."
 GENERIC_PIN_ERROR = "We could not unlock this event. Check the PIN and try again."
 GENERIC_RATE_LIMIT_ERROR = "Too many attempts. Please wait before trying again."
+
+
+def _private_response(response: HttpResponse) -> HttpResponse:
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    return response
+
+
+def _private_render(request, template_name, context=None, *, status=None) -> HttpResponse:
+    return _private_response(render(request, template_name, context, status=status))
 
 
 def _tenant(request: HttpRequest):
@@ -42,7 +76,7 @@ def _active_membership(request: HttpRequest, photographer):
 
 def _throttled_response(request, template_name, form, retry_after_seconds):
     form.add_error(None, GENERIC_RATE_LIMIT_ERROR)
-    response = render(request, template_name, {"form": form}, status=429)
+    response = _private_render(request, template_name, {"form": form}, status=429)
     response.headers["Retry-After"] = str(retry_after_seconds)
     return response
 
@@ -55,7 +89,7 @@ def photographer_login(request: HttpRequest) -> HttpResponse:
 
     form = PhotographerLoginForm(request.POST or None)
     if request.method == "GET":
-        return render(request, "openfotos_events/login.html", {"form": form})
+        return _private_render(request, "openfotos_events/login.html", {"form": form})
 
     subject = f"{photographer.id}:{request.POST.get('username', '')}"
     current_limit = rate_limit_status(
@@ -128,7 +162,7 @@ def photographer_login(request: HttpRequest) -> HttpResponse:
             failed_limit.retry_after_seconds,
         )
     form.add_error(None, GENERIC_LOGIN_ERROR)
-    return render(request, "openfotos_events/login.html", {"form": form})
+    return _private_render(request, "openfotos_events/login.html", {"form": form})
 
 
 def dashboard(request: HttpRequest) -> HttpResponse:
@@ -139,10 +173,191 @@ def dashboard(request: HttpRequest) -> HttpResponse:
     if _active_membership(request, photographer) is None:
         raise Http404
     events = Event.objects.filter(photographer=photographer)
-    return render(
+    return _private_render(
         request,
         "openfotos_events/dashboard.html",
         {"photographer": photographer, "events": events},
+    )
+
+
+def _photographer_event(request: HttpRequest, event_id) -> Event:
+    photographer = _tenant(request)
+    if _active_membership(request, photographer) is None:
+        raise Http404
+    try:
+        return Event.objects.select_related("photographer", "current_ingestion_manifest").get(
+            pk=event_id,
+            photographer=photographer,
+        )
+    except Event.DoesNotExist as exc:
+        raise Http404 from exc
+
+
+def _gallery_listing(event: Event, request: HttpRequest) -> tuple[object, list]:
+    query = available_gallery_assets(event)
+    if not query.exists():
+        return Paginator(query, GALLERY_PAGE_SIZE).get_page(request.GET.get("page")), []
+    try:
+        return gallery_page(
+            event=event,
+            page_number=request.GET.get("page"),
+            object_store=configured_object_store(),
+        )
+    except (ImproperlyConfigured, IngestionError):
+        messages.error(request, "Gallery media is temporarily unavailable. Please try again.")
+        return Paginator(query.none(), GALLERY_PAGE_SIZE).get_page(1), []
+
+
+@require_GET
+def photographer_event(request: HttpRequest, event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    page, images = _gallery_listing(event, request)
+    excluded_assets = Asset.objects.filter(
+        batch__device__event=event,
+        gallery_excluded_at__isnull=False,
+    ).order_by("original_filename", "id")
+    failed_assets = Asset.objects.filter(
+        batch__device__event=event,
+        derivative_failure_code__gt="",
+        gallery_excluded_at__isnull=True,
+    ).order_by("original_filename", "id")
+    return _private_render(
+        request,
+        "openfotos_events/dashboard_event.html",
+        {
+            "event": event,
+            "policy": PreviewPolicy.objects.filter(event=event).first(),
+            "page": page,
+            "images": images,
+            "excluded_assets": excluded_assets,
+            "failed_assets": failed_assets,
+            "download_form": DownloadPolicyForm(initial={"policy": event.original_download_policy}),
+            "ready": event.derivatives_ready_generation == event.intake_generation,
+        },
+    )
+
+
+@require_POST
+def update_download_policy(request: HttpRequest, event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    form = DownloadPolicyForm(request.POST)
+    if not form.is_valid():
+        messages.error(request, "Choose a supported original-download policy.")
+    else:
+        change_download_policy(
+            event=event,
+            actor=request.user,
+            policy=OriginalDownloadPolicy(form.cleaned_data["policy"]),
+            request=request,
+        )
+        messages.success(request, "Original-download policy updated.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def publish_event(request: HttpRequest, event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    try:
+        transition_event(
+            event_id=event.id,
+            target=EventState.PUBLISHED,
+            actor=request.user,
+            request=request,
+        )
+    except ValidationError as exc:
+        messages.error(request, "; ".join(exc.messages))
+    else:
+        messages.success(request, "The private gallery is published.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def unpublish_event(request: HttpRequest, event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    try:
+        transition_event(
+            event_id=event.id,
+            target=EventState.REVIEW,
+            actor=request.user,
+            request=request,
+        )
+    except ValidationError as exc:
+        messages.error(request, "; ".join(exc.messages))
+    else:
+        messages.success(
+            request,
+            "The gallery returned to Review and visitor sessions were revoked.",
+        )
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def exclude_gallery_asset(request: HttpRequest, event_id, asset_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    form = GalleryExclusionForm(request.POST)
+    try:
+        if not form.is_valid():
+            raise IngestionError("invalid_exclusion_reason", "An exclusion reason is required.")
+        exclude_from_gallery(
+            event=event,
+            asset_id=asset_id,
+            actor=request.user,
+            reason=form.cleaned_data["reason"],
+            request=request,
+        )
+    except IngestionError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "The failed photo was excluded from publication.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def restore_gallery_asset(request: HttpRequest, event_id, asset_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    try:
+        restore_to_gallery(
+            event=event,
+            asset_id=asset_id,
+            actor=request.user,
+            request=request,
+        )
+    except IngestionError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "The photo was restored to derivative processing.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_GET
+def photographer_photo(request: HttpRequest, event_id, asset_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    try:
+        image, previous_asset, next_asset = gallery_photo(
+            event=event,
+            asset_id=asset_id,
+            object_store=configured_object_store(),
+        )
+    except IngestionError as exc:
+        if exc.code == "asset_not_found":
+            raise Http404 from exc
+        return _private_response(
+            HttpResponse("Gallery media is temporarily unavailable.", status=503)
+        )
+    except ImproperlyConfigured:
+        return _private_response(
+            HttpResponse("Gallery media is temporarily unavailable.", status=503)
+        )
+    return _private_render(
+        request,
+        "openfotos_events/photo.html",
+        {
+            "event": event,
+            "image": image,
+            "previous_asset": previous_asset,
+            "next_asset": next_asset,
+            "dashboard_mode": True,
+        },
     )
 
 
@@ -182,11 +397,16 @@ def _available_event(request: HttpRequest, token: str) -> Event:
 def event_access(request: HttpRequest, token: str) -> HttpResponse:
     event = _available_event(request, token)
     if request.method == "GET" and has_valid_visitor_cookie(request, event):
-        return render(request, "openfotos_events/event.html", {"event": event})
+        page, images = _gallery_listing(event, request)
+        return _private_render(
+            request,
+            "openfotos_events/event.html",
+            {"event": event, "page": page, "images": images},
+        )
 
     form = EventPinForm(request.POST or None)
     if request.method == "GET":
-        response = render(request, "openfotos_events/unlock.html", {"form": form})
+        response = _private_render(request, "openfotos_events/unlock.html", {"form": form})
         if request.COOKIES.get(f"openfotos_event_{event.id.hex}"):
             delete_visitor_cookie(response, event)
         return response
@@ -251,4 +471,38 @@ def event_access(request: HttpRequest, token: str) -> HttpResponse:
             failed_limit.retry_after_seconds,
         )
     form.add_error(None, GENERIC_PIN_ERROR)
-    return render(request, "openfotos_events/unlock.html", {"form": form})
+    return _private_render(request, "openfotos_events/unlock.html", {"form": form})
+
+
+@require_GET
+def visitor_photo(request: HttpRequest, token: str, asset_id) -> HttpResponse:
+    event = _available_event(request, token)
+    if not has_valid_visitor_cookie(request, event):
+        raise Http404
+    try:
+        image, previous_asset, next_asset = gallery_photo(
+            event=event,
+            asset_id=asset_id,
+            object_store=configured_object_store(),
+        )
+    except IngestionError as exc:
+        if exc.code == "asset_not_found":
+            raise Http404 from exc
+        return _private_response(
+            HttpResponse("Gallery media is temporarily unavailable.", status=503)
+        )
+    except ImproperlyConfigured:
+        return _private_response(
+            HttpResponse("Gallery media is temporarily unavailable.", status=503)
+        )
+    return _private_render(
+        request,
+        "openfotos_events/photo.html",
+        {
+            "event": event,
+            "image": image,
+            "previous_asset": previous_asset,
+            "next_asset": next_asset,
+            "dashboard_mode": False,
+        },
+    )

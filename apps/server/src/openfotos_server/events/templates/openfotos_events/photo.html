@@ -1,0 +1,33 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}Photo {{ image.asset.gallery_position }} · {{ event.name }}{% endblock %}
+
+{% block content %}
+<div class="photo-toolbar">
+  {% if dashboard_mode %}
+    <a href="{% url 'events:photographer-event' event_id=event.id %}">← Gallery review</a>
+  {% else %}
+    <a href="{% url 'events:event-access' token=event.public_token %}">← Gallery</a>
+  {% endif %}
+  <span>Photo {{ image.asset.gallery_position }}</span>
+</div>
+<figure class="photo-stage">
+  <img src="{{ image.url }}" width="{{ image.width }}" height="{{ image.height }}" alt="Photo {{ image.asset.gallery_position }} from {{ event.name }}">
+</figure>
+<nav class="photo-navigation" aria-label="Photo navigation">
+  {% if previous_asset %}
+    {% if dashboard_mode %}
+      <a href="{% url 'events:photographer-photo' event_id=event.id asset_id=previous_asset.id %}">Previous photo</a>
+    {% else %}
+      <a href="{% url 'events:visitor-photo' token=event.public_token asset_id=previous_asset.id %}">Previous photo</a>
+    {% endif %}
+  {% else %}<span></span>{% endif %}
+  {% if next_asset %}
+    {% if dashboard_mode %}
+      <a href="{% url 'events:photographer-photo' event_id=event.id asset_id=next_asset.id %}">Next photo</a>
+    {% else %}
+      <a href="{% url 'events:visitor-photo' token=event.public_token asset_id=next_asset.id %}">Next photo</a>
+    {% endif %}
+  {% endif %}
+</nav>
+{% endblock %}

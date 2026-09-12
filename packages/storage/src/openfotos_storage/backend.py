@@ -33,6 +33,12 @@ class PresignedPut:
     expires_at: datetime
 
 
+@dataclass(frozen=True)
+class PresignedGet:
+    url: str
+    expires_at: datetime
+
+
 class S3ObjectStore:
     """Issue narrow upload leases and inspect objects without exposing parent credentials."""
 
@@ -100,6 +106,35 @@ class S3ObjectStore:
                 "If-None-Match": "*",
                 "x-amz-meta-openfotos-sha256": sha256,
             },
+            expires_at=datetime.now(UTC) + timedelta(seconds=expires_in_seconds),
+        )
+
+    def presign_get(
+        self,
+        *,
+        key: str,
+        expires_in_seconds: int,
+        content_disposition: str = "inline",
+    ) -> PresignedGet:
+        if not key or expires_in_seconds <= 0:
+            raise ValueError("Object key and URL lifetime are required.")
+        parameters = {
+            "Bucket": self.bucket_name,
+            "Key": key,
+            "ResponseContentDisposition": content_disposition,
+            "ResponseCacheControl": "private, no-store",
+        }
+        try:
+            url = self._client.generate_presigned_url(
+                "get_object",
+                Params=parameters,
+                ExpiresIn=expires_in_seconds,
+                HttpMethod="GET",
+            )
+        except BotoCoreError as exc:
+            raise ObjectStoreError("An object URL could not be created.") from exc
+        return PresignedGet(
+            url=url,
             expires_at=datetime.now(UTC) + timedelta(seconds=expires_in_seconds),
         )
 

@@ -5,6 +5,8 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
 
+from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+
 
 class BatchState(StrEnum):
     DRAFT = "draft"
@@ -68,6 +70,18 @@ class ScanLimits:
 
 
 @dataclass(frozen=True)
+class PreviewPolicyCache:
+    id: UUID
+    enabled: bool
+    template: WatermarkTemplate
+    text: str
+    logo_kind: WatermarkLogoKind
+    renderer_id: str
+    derivative_profile_id: str
+    mark_sha256: str
+
+
+@dataclass(frozen=True)
 class EventCache:
     id: UUID
     name: str
@@ -80,6 +94,7 @@ class EventCache:
     intake_state: str = "open"
     intake_generation: int = 1
     device_label: str = ""
+    preview_policy: PreviewPolicyCache | None = None
 
 
 @dataclass(frozen=True)
@@ -180,6 +195,15 @@ class ScanSummary:
 @dataclass(frozen=True)
 class UploadCheckpoint:
     item_id: UUID
+    state: LocalUploadState
+    attempt_count: int
+    last_error_code: str | None
+
+
+@dataclass(frozen=True)
+class DerivativeCheckpoint:
+    item_id: UUID
+    variant: str
     state: LocalUploadState
     attempt_count: int
     last_error_code: str | None

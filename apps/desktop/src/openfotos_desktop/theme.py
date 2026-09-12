@@ -168,7 +168,7 @@ QLabel#StatValue[tone="warning"] { color: #a15c07; }
 QLabel#StatValue[tone="danger"] { color: #b42318; }
 QLabel#StatValue[tone="accent"] { color: #24578f; }
 
-QLineEdit {
+QLineEdit, QComboBox, QSpinBox {
     min-height: 40px;
     padding: 0 12px;
     color: #172033;
@@ -178,8 +178,19 @@ QLineEdit {
     selection-background-color: #24578f;
 }
 
-QLineEdit:hover { border-color: #aeb8c5; }
-QLineEdit:focus { border: 1px solid #24578f; }
+QLineEdit:hover, QComboBox:hover, QSpinBox:hover { border-color: #aeb8c5; }
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 1px solid #24578f; }
+
+QComboBox::drop-down {
+    width: 30px;
+    border: none;
+}
+
+QCheckBox {
+    spacing: 9px;
+    color: #27364a;
+    font-weight: 600;
+}
 
 QPushButton, QToolButton {
     min-height: 38px;

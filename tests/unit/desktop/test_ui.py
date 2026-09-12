@@ -6,7 +6,7 @@ from PySide6.QtWidgets import QApplication, QToolButton
 
 from openfotos_desktop.ingestion import CheckpointStore, EventCache
 from openfotos_desktop.ports import Session3Gateway
-from openfotos_desktop.ui import LoginPage, MainWindow, SelectionPage
+from openfotos_desktop.ui import LoginPage, MainWindow, PreviewPolicyPage, SelectionPage
 
 DEMO_EVENT = EventCache(
     id=UUID("00000000-0000-4000-8000-000000000003"),
@@ -102,3 +102,34 @@ def test_coordination_only_lead_can_finalize_after_closing_intake(tmp_path: Path
     assert page.finalize.isEnabled()
     assert not page.scan.isEnabled()
     store.close()
+
+
+def test_unconfigured_lead_gets_optional_watermark_setup_with_clean_default(
+    tmp_path: Path,
+) -> None:
+    application()
+    event = EventCache(
+        id=UUID("00000000-0000-4000-8000-000000000005"),
+        name="Reception",
+        storage_limit_bytes=25_000_000_000,
+        processing_profile_id="pilot-profile-v1",
+        role="lead",
+    )
+    window = MainWindow(
+        store=CheckpointStore(tmp_path / "policy.sqlite3"),
+        gateway=Session3Gateway(),
+        demo_event=event,
+    )
+
+    window.events.open_button.click()
+    assert isinstance(window.stack.currentWidget(), PreviewPolicyPage)
+    draft = window.preview_policy.draft()
+    assert not draft["enabled"]
+    assert draft["mark_png"] == b""
+
+    window.preview_policy.enabled.setChecked(True)
+    window.preview_policy.text.setText("OFTS Studio")
+    branded = window.preview_policy.draft()
+    assert branded["enabled"]
+    assert branded["mark_png"].startswith(b"\x89PNG")
+    window.close()

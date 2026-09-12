@@ -21,16 +21,16 @@
       {% for event in events %}
         <article class="event-row">
           <div>
-            <h3>{{ event.name }}</h3>
+            <h3><a href="{% url 'events:photographer-event' event_id=event.id %}">{{ event.name }}</a></h3>
             <p class="muted">Status: {{ event.get_state_display }}</p>
             {% if event.expires_at %}
               <p class="muted">Expires: {{ event.expires_at|date:"j M Y, P T" }}</p>
             {% endif %}
           </div>
           {% if event.state == "published" %}
-            <a href="{% url 'events:event-access' token=event.public_token %}">Open event link</a>
+            <a href="{% url 'events:photographer-event' event_id=event.id %}">Manage gallery</a>
           {% else %}
-            <span class="muted">Not publicly available</span>
+            <a href="{% url 'events:photographer-event' event_id=event.id %}">Review event</a>
           {% endif %}
         </article>
       {% endfor %}

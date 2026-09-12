@@ -134,8 +134,8 @@ The photographer uploads edited photographs through a desktop application. OpenF
 | **Term**        | **Meaning in the pilot**                                                                   |
 |-----------------|--------------------------------------------------------------------------------------------|
 | Original        | The exact edited JPEG uploaded by the photographer, not the camera RAW file.               |
-| Preview         | A reduced size JPEG with the photographer watermark burned into the pixels.                |
-| Thumbnail       | A small derivative used by the gallery grid.                                               |
+| Preview         | A reduced-size JPEG; it contains the event watermark only when the lead enables one.       |
+| Thumbnail       | A clean small derivative used by the gallery grid.                                         |
 | Face collection | An anonymous cluster of visually similar detected faces within one event.                  |
 | Selfie search   | A similarity search that returns candidate event photographs, not a statement of identity. |
 | Client          | The photographer using OpenFotos for the pilot.                                            |
@@ -159,7 +159,7 @@ The photographer uploads edited photographs through a desktop application. OpenF
 
 - Selfie based photograph search.
 
-- Watermarked previews.
+- Optional event-level watermarked previews configured and locked by the lead desktop.
 
 - Individual original resolution JPEG downloads when enabled.
 
@@ -469,7 +469,8 @@ the aggregate event manifest.
   at completed-object granularity; only an interrupted in-flight object restarts.
 
 - Submit the frozen contribution before upload so Django can reserve its full original-byte total.
-  Session 4 transfers originals only; preview and thumbnail variants begin in Session 5.
+  One resume-safe desktop action then uploads originals and generates/uploads both derivative
+  variants under the event's confirmed preview policy.
 
 - Reserve the immutable contribution record first. Only the lead may close intake, drain or
   explicitly exclude remaining failures, and finalize the server-owned event-wide reconciliation.
@@ -499,6 +500,8 @@ R2 storage is dynamic. OpenFotos does not pre purchase 20 GB or 100 GB and does 
 >
 > events/\<event-uuid\>/thumbnails/\<asset-uuid\>.jpg
 >
+> events/\<event-uuid\>/preview-policy/\<policy-uuid\>/mark.png
+>
 > events/\<event-uuid\>/manifests/generation-\<six-digit-generation\>.json
 >
 > events/\<event-uuid\>/manifests/final.json (future publication artifact)
@@ -512,8 +515,8 @@ R2 storage is dynamic. OpenFotos does not pre purchase 20 GB or 100 GB and does 
 | **Object**        | **Purpose**                   | **Recommended treatment**                                                                           |
 |-------------------|-------------------------------|-----------------------------------------------------------------------------------------------------|
 | Original          | Authorized download           | Exact uploaded JPEG; private; content disposition attachment.                                       |
-| Preview           | Lightbox and larger browsing  | About 2048 pixels long edge; quality tuned after visual review; watermark burned in.                |
-| Thumbnail         | Gallery grid                  | About 400 to 600 pixels long edge; optimized for fast display.                                      |
+| Preview           | Lightbox and larger browsing  | Maximum 2048-pixel long edge, quality 85; optional confirmed event watermark burned in.             |
+| Thumbnail         | Gallery grid                  | Maximum 512-pixel long edge, quality 78; always clean and optimized for fast display.                |
 | Recognition input | Local detection and embedding | Use the local original or a downscaled working image; do not store a separate copy unless required. |
 
 ## Delivery rules
@@ -522,13 +525,20 @@ R2 storage is dynamic. OpenFotos does not pre purchase 20 GB or 100 GB and does 
 
 - Django verifies the event or share session before generating a presigned GET URL.
 
-- Use short expiries, normally five to fifteen minutes.
+- Use five-minute exact-object GET URLs for the pilot.
 
 - Serve image bytes directly from R2 so Railway does not pay image egress or handle large responses.
 
-- Strip GPS and unnecessary EXIF metadata from derivatives while leaving the original unchanged.
+- Apply EXIF orientation, convert to sRGB, do not upscale, and strip GPS, EXIF, ICC profiles,
+  comments, and other metadata from derivatives while leaving the original unchanged. Retain only
+  the parsed capture timestamp in the database for ordering.
 
-- Burn the watermark into the preview once during ingestion.
+- The lead confirms one immutable preview policy in the desktop. When enabled, burn its canonical
+  raster mark into the preview once during ingestion; never watermark thumbnails or originals.
+
+- Offer four fixed layouts: compact bottom-right, bottom-center, large centered brand, and repeated
+  diagonal. Accept the built-in OFTS wordmark or a custom transparent PNG, optional single-line
+  Unicode text, or both. The desktop preview sample remains local.
 
 - Do not dynamically build a complete event ZIP on the Django server. Prepare exports as offline jobs if required.
 
@@ -539,7 +549,9 @@ R2 storage is dynamic. OpenFotos does not pre purchase 20 GB or 100 GB and does 
 Django holds S3-compatible object read/write credentials only in the server environment. It signs a
 five-minute `PutObject` operation for one immutable, server-owned original key and binds its content
 length, base64 Content-MD5, JPEG content type, create-only precondition, and SHA-256 metadata. A
-desktop may request at most eight leases at once and never receives list or read permission.
+desktop may request at most eight leases at once and never receives list or prefix-wide permission.
+It can receive a five-minute exact GET only for the canonical event watermark mark or for a verified
+original owned by that contributor when local source recovery is required.
 
 The desktop streams each source while recalculating SHA-256. Django accepts completion only after a
 server-side HEAD comparison of length, type, ETag/MD5, and SHA-256 metadata. Mismatches are removed
@@ -662,9 +674,16 @@ The state machine must be idempotent. Repeating a completed API request or proce
 - Each contributor desktop owns derivative and face work for its photos. After intake closes, the
   lead desktop performs one event-wide clustering pass over compatible embeddings.
 
+- Django owns the event's immutable derivative profile and optional watermark policy. Contributor
+  desktops fetch the canonical mark and fail closed on renderer/profile mismatch.
+
 - Django records jobs and state but does not queue thousands of inference tasks.
 
 - A failed asset can be retried independently.
+
+- After five reported derivative attempts, the lead can audit-exclude the asset from gallery
+  publication while retaining its original and manifest record; the exclusion is reversible before
+  publication.
 
 - Finalization verifies the manifest, required object variants and metadata counts.
 
@@ -772,7 +791,8 @@ Use a versioned JSON API for desktop operations. Browser pages may use Django fo
 
 - Never accept an arbitrary bucket name or object key from a client.
 
-- Paginate gallery and asset responses.
+- Paginate the masonry gallery at 48 thumbnails per page and provide server-rendered preview pages
+  with previous, next, and back navigation. Never expose uploaded filenames to visitors.
 
 - Do not return embeddings, internal object keys or face crops to public visitors.
 
@@ -1057,7 +1077,7 @@ Run 500 to 1,000 representative reception images before full implementation is c
 | Tenancy        | Cross photographer and cross event access is denied for every resource type.                 |
 | Uploader       | Restart, duplicate scan, changed file, expired credentials, partial failure and retry.       |
 | Concurrency    | Ten device sessions, atomic quota reservation, intake closure, stale work, and lead-only finalization. |
-| Images         | Orientation, corrupt JPEG, extreme dimensions, EXIF removal and watermark output.            |
+| Images         | Orientation, corrupt JPEG, extreme dimensions, metadata removal, optional watermark output, and clean thumbnails. |
 | Faces          | No face, one face, many faces, invalid embedding and model mismatch.                         |
 | Gallery        | Pagination, cluster visibility, download policy and expired share.                           |
 | Privacy        | Selfie removal on success, validation failure, timeout and unexpected exception.             |
@@ -1073,6 +1093,9 @@ Run 500 to 1,000 representative reception images before full implementation is c
 cross-reading another device's filenames, or racing event finalization.
 
 \[ \] Every published photograph has an original, preview, thumbnail and database record.
+
+\[ \] An event with watermarking disabled publishes clean previews, while every watermark layout
+affects previews only and leaves thumbnail/original checksums unchanged.
 
 \[ \] No private object can be retrieved without an authorized short lived URL.
 
@@ -1112,7 +1135,7 @@ cross-reading another device's filenames, or racing event finalization.
 | 2       | Accounts, tenancy, PIN sessions and domain groundwork | Photographer dashboard and protected sample event work.                       |
 | 3       | Desktop shell, local SQLite and directory validation  | Folder scan survives restart and rejects unsupported files.                   |
 | 4       | Exact-object leases and resumable direct upload       | Interrupted test upload resumes and the manifest reconciles.                  |
-| 5       | Derivatives and gallery                               | Private thumbnails and watermarked previews display after authorization.      |
+| 5       | Derivatives and gallery                               | Private clean thumbnails and optionally watermarked previews display after authorization. |
 | 6       | InsightFace benchmark and embedding contract          | Measured report for 500 to 1,000 real images; model choice confirmed.         |
 | 7       | Face ingestion, clustering and review tools           | Collections can be hidden, merged and featured.                               |
 | 8       | Selfie search and original downloads                  | Consent, in memory processing, scoped vector search and signed download work. |
@@ -1127,7 +1150,7 @@ Each day ends with a demonstrable vertical slice, automated tests for its critic
 
 33. Private reliable upload and complete manifest.
 
-34. PIN protected gallery with watermarked previews.
+34. PIN protected gallery with clean or optionally watermarked previews.
 
 35. Original resolution download authorization.
 
@@ -1147,7 +1170,7 @@ Each day ends with a demonstrable vertical slice, automated tests for its critic
 
 \[ \] Confirm the 25 GB event allowance and JPEG only policy.
 
-\[ \] Confirm watermark file, placement and preview quality.
+\[ \] Confirm whether watermarking is enabled, then review its logo/text template and preview quality.
 
 \[ \] Confirm whether downloads are enabled for the complete event or selected shares.
 

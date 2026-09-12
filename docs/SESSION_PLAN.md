@@ -140,15 +140,42 @@ lead-only, requires closed intake, and rejects nonterminal contributions.
 
 ## Session 5: Image derivatives and private gallery
 
+**Status (2026-09-12):** Complete. ADR 0006 records the immutable optional preview policy,
+desktop-owned derivative profile, exact private GET authorization, retry/exclusion workflow,
+gallery presentation, publication gate, and accepted screenshot/residual-URL risks.
+
 **Goal:** Publish fast, authorized browsing assets while preserving uploaded originals.
 
-**Work:** Apply EXIF orientation, generate thumbnails and watermarked previews, remove derivative
-metadata, add gallery pagination/lightbox pages, authorize short-lived object URLs, and implement
-download policy plumbing.
+**Work:** Apply EXIF orientation, generate clean thumbnails and optionally watermarked previews,
+remove derivative metadata, add gallery pagination/lightbox pages, authorize short-lived object
+URLs, and implement download policy plumbing.
 
 **Done when:** Authorized visitors can browse private derivatives, unauthorized and expired
-sessions cannot obtain URLs, previews contain the watermark, derivatives contain no GPS data, and
-original checksums remain unchanged.
+sessions cannot obtain URLs, enabled previews contain the selected watermark while disabled ones
+remain clean, derivatives contain no GPS data, and original checksums remain unchanged.
+
+**Handoff:**
+
+1. The lead desktop now provides a clean-by-default preview settings screen with a local sample,
+   built-in OFTS or custom transparent logo, Unicode text, and four fixed layouts. Confirmation is
+   explicit, event-scoped, immutable, stored by Django, and readable by contributor installations.
+2. One restart-safe sync uploads originals and then produces a 2048/q85 preview and clean 512/q78
+   thumbnail. It applies orientation, converts to sRGB, strips derivative metadata, validates source
+   and derivative checksums, can read back only the same contributor's exact original, and removes
+   private temporary files after server verification.
+3. Django validates derivative manifests, issues exact PUT/GET URLs, reconciles readiness at both
+   derivative completion and finalization, and permits audited gallery exclusion only after five
+   failures. Publication requires the current manifest, confirmed policy, and complete non-excluded
+   derivatives.
+4. The photographer dashboard supports review, failure/exclusion status, publish/unpublish, and the
+   three-mode original-download policy. Authorized visitors receive a 48-item masonry gallery and
+   standalone preview navigation with private/no-store HTML and five-minute signed media URLs;
+   uploaded filenames and original URLs are absent.
+5. Original downloads and explicit share enforcement remain Session 8. Disabling downloads cannot
+   prevent saving or screenshotting an authorized 2048 preview, and a revoked five-minute signed URL
+   can remain usable until expiry. Native Windows/macOS packaging and representative visual review
+   remain release gates. Session 6's first failing acceptance test should reject a recognizer whose
+   model/hash/embedding contract differs from the event before persisting any face vector.
 
 ## Session 6: Face-engine benchmark and embedding contract
 

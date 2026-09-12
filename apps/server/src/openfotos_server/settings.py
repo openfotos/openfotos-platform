@@ -128,6 +128,9 @@ UPLOAD_LEASE_TTL_SECONDS = positive_integer_setting("UPLOAD_LEASE_TTL_SECONDS", 
 UPLOAD_LEASE_PAGE_SIZE = positive_integer_setting("UPLOAD_LEASE_PAGE_SIZE", 8)
 DESKTOP_API_MAX_BODY_BYTES = positive_integer_setting("DESKTOP_API_MAX_BODY_BYTES", 8 * 1024 * 1024)
 IDEMPOTENCY_TTL_SECONDS = positive_integer_setting("IDEMPOTENCY_TTL_SECONDS", 30 * 86_400)
+SIGNED_URL_TTL_SECONDS = positive_integer_setting("SIGNED_URL_TTL_SECONDS", 300)
+if SIGNED_URL_TTL_SECONDS > 300:
+    raise ImproperlyConfigured("SIGNED_URL_TTL_SECONDS cannot exceed the five-minute pilot limit.")
 
 R2_ACCOUNT_ID = os.environ.get("R2_ACCOUNT_ID", "").strip()
 R2_BUCKET_NAME = os.environ.get("R2_BUCKET_NAME", "").strip()

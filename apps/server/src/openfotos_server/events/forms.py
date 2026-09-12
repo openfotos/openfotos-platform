@@ -2,6 +2,8 @@
 
 from django import forms
 
+from openfotos_contracts import OriginalDownloadPolicy
+
 
 class PhotographerLoginForm(forms.Form):
     username = forms.CharField(
@@ -29,3 +31,16 @@ class EventPinForm(forms.Form):
             }
         ),
     )
+
+
+class DownloadPolicyForm(forms.Form):
+    policy = forms.ChoiceField(
+        choices=tuple(
+            (policy.value, policy.value.replace("-", " ").title())
+            for policy in OriginalDownloadPolicy
+        )
+    )
+
+
+class GalleryExclusionForm(forms.Form):
+    reason = forms.CharField(max_length=240, strip=True)

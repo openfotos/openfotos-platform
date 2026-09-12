@@ -5,6 +5,8 @@ from pathlib import Path
 from typing import Protocol
 from uuid import UUID
 
+from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+
 from .ingestion import EventCache
 
 
@@ -31,6 +33,17 @@ class PhotographerSessionGateway(Protocol):
 
     def finalize(self, event_id: UUID) -> dict: ...
 
+    def confirm_preview_policy(
+        self,
+        event_id: UUID,
+        *,
+        enabled: bool,
+        template: WatermarkTemplate,
+        text: str,
+        logo_kind: WatermarkLogoKind,
+        mark_png: bytes,
+    ) -> EventCache: ...
+
 
 class BatchProcessingService(Protocol):
     def process(
@@ -49,6 +62,7 @@ class BatchUploadService(Protocol):
         transfer_limit: int,
         on_progress: Callable[[int, int], None],
         is_cancelled: Callable[[], bool] | None = None,
+        on_stage: Callable[[str, int, int], None] | None = None,
     ) -> None: ...
 
 
@@ -98,6 +112,19 @@ class Session3Gateway:
         del event_id
         raise OnlineServicesUnavailable(self._MESSAGE)
 
+    def confirm_preview_policy(
+        self,
+        event_id: UUID,
+        *,
+        enabled: bool,
+        template: WatermarkTemplate,
+        text: str,
+        logo_kind: WatermarkLogoKind,
+        mark_png: bytes,
+    ) -> EventCache:
+        del event_id, enabled, template, text, logo_kind, mark_png
+        raise OnlineServicesUnavailable(self._MESSAGE)
+
     def upload(
         self,
         batch_id: UUID,
@@ -105,8 +132,9 @@ class Session3Gateway:
         transfer_limit: int,
         on_progress: Callable[[int, int], None],
         is_cancelled: Callable[[], bool] | None = None,
+        on_stage: Callable[[str, int, int], None] | None = None,
     ) -> None:
-        del batch_id, transfer_limit, on_progress, is_cancelled
+        del batch_id, transfer_limit, on_progress, is_cancelled, on_stage
         raise OnlineServicesUnavailable(self._MESSAGE)
 
 

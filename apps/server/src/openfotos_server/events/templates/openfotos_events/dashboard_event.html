@@ -1,0 +1,91 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}{{ event.name }} · Gallery review{% endblock %}
+
+{% block content %}
+<p><a href="{% url 'events:dashboard' %}">← All events</a></p>
+<div class="gallery-heading">
+  <div>
+    <p class="eyebrow">Photographer gallery review</p>
+    <h1>{{ event.name }}</h1>
+    <p class="muted">State: {{ event.get_state_display }} · generation {{ event.intake_generation }}</p>
+  </div>
+  <div class="status-pill {% if ready %}ready{% endif %}">{% if ready %}READY{% else %}PROCESSING{% endif %}</div>
+</div>
+
+<div class="settings-grid">
+  <section class="card compact-card">
+    <h2>Preview policy</h2>
+    {% if policy %}
+      <p>{% if policy.enabled %}Watermark enabled · {{ policy.get_template_display }}{% else %}Clean previews confirmed{% endif %}</p>
+      <p class="muted">Configured in the lead desktop app. This policy is locked.</p>
+    {% else %}
+      <p>Waiting for lead confirmation in the desktop app.</p>
+    {% endif %}
+  </section>
+  <section class="card compact-card">
+    <h2>Original downloads</h2>
+    <form method="post" action="{% url 'events:update-download-policy' event_id=event.id %}">
+      {% csrf_token %}
+      {{ download_form.policy.label_tag }}
+      {{ download_form.policy }}
+      <button type="submit">Save policy</button>
+    </form>
+    <p class="muted">This controls exact originals. Displayed previews can still be saved or captured.</p>
+  </section>
+</div>
+
+<section class="card compact-card publication-card">
+  <div>
+    <h2>Publication</h2>
+    {% if event.state == "published" %}
+      <p><a href="{% url 'events:event-access' token=event.public_token %}">Open the visitor link</a></p>
+    {% elif ready %}
+      <p>Derivative and authorization gates are complete. Publication remains deliberate.</p>
+    {% else %}
+      <p class="muted">Publication unlocks after the current manifest and all included derivatives are ready.</p>
+    {% endif %}
+  </div>
+  {% if event.state == "published" %}
+    <form method="post" action="{% url 'events:unpublish-event' event_id=event.id %}">
+      {% csrf_token %}<button type="submit" class="button-secondary">Return to Review</button>
+    </form>
+  {% else %}
+    <form method="post" action="{% url 'events:publish-event' event_id=event.id %}">
+      {% csrf_token %}<button type="submit" {% if not ready %}disabled{% endif %}>Publish gallery</button>
+    </form>
+  {% endif %}
+</section>
+
+{% if failed_assets %}
+<section class="card compact-card">
+  <h2>Derivative failures</h2>
+  <p class="muted">Retry in desktop or record a reason to omit a persistently failing asset.</p>
+  {% for asset in failed_assets %}
+    <form class="failure-row" method="post" action="{% url 'events:exclude-gallery-asset' event_id=event.id asset_id=asset.id %}">
+      {% csrf_token %}
+      <span>Asset {{ asset.id }} · {{ asset.derivative_failure_code }} · {{ asset.derivative_attempt_count }} attempt{{ asset.derivative_attempt_count|pluralize }}</span>
+      <input name="reason" maxlength="240" required aria-label="Exclusion reason" placeholder="Reason for gallery omission">
+      <button type="submit" {% if asset.derivative_attempt_count < 5 %}disabled title="Retry five times before exclusion"{% endif %}>Exclude</button>
+    </form>
+  {% endfor %}
+</section>
+{% endif %}
+
+{% if excluded_assets %}
+<section class="card compact-card">
+  <h2>Excluded from gallery</h2>
+  {% for asset in excluded_assets %}
+    <div class="failure-row">
+      <span>Asset {{ asset.id }} · {{ asset.gallery_exclusion_reason }}</span>
+      <form method="post" action="{% url 'events:restore-gallery-asset' event_id=event.id asset_id=asset.id %}">
+        {% csrf_token %}<button type="submit" class="button-secondary">Restore</button>
+      </form>
+    </div>
+  {% endfor %}
+</section>
+{% endif %}
+
+<h2>Gallery preview</h2>
+{% include "openfotos_events/gallery_grid.html" with dashboard_mode=True %}
+{% endblock %}

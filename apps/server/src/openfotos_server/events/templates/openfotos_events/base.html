@@ -4,6 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
   <title>{% block title %}OpenFotos{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'openfotos_events/app.css' %}">
 </head>
@@ -12,6 +13,11 @@
     <span class="brand">OpenFotos</span>
   </header>
   <main class="page-shell">
+    {% if messages %}
+      <div class="messages" aria-live="polite">
+        {% for message in messages %}<p class="message {{ message.tags }}">{{ message }}</p>{% endfor %}
+      </div>
+    {% endif %}
     {% block content %}{% endblock %}
   </main>
 </body>

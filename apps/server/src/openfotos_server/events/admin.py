@@ -20,6 +20,7 @@ from .models import (
     IngestionManifest,
     Photographer,
     PhotographerMembership,
+    PreviewPolicy,
     UploaderDevice,
     UploaderInvitation,
 )
@@ -379,6 +380,20 @@ class AssetObjectAdmin(_IngestionRecordAdmin):
     list_display = ("asset", "variant", "state", "expected_bytes", "verified_at")
     list_filter = ("state", "variant", "asset__batch__device__event__photographer")
     search_fields = ("asset__id", "object_key")
+
+
+@admin.register(PreviewPolicy)
+class PreviewPolicyAdmin(_IngestionRecordAdmin):
+    list_display = (
+        "event",
+        "enabled",
+        "template",
+        "logo_kind",
+        "derivative_profile_id",
+        "confirmed_at",
+    )
+    list_filter = ("enabled", "template", "logo_kind", "event__photographer")
+    search_fields = ("event__name", "event__photographer__display_name")
 
 
 @admin.register(IngestionManifest)

@@ -17,6 +17,7 @@ from openfotos_desktop.ingestion import (
     EventCache,
     InventoryScanner,
     LocalUploadState,
+    PreviewPolicyCache,
 )
 from openfotos_desktop.network import (
     DesktopApiError,
@@ -73,6 +74,21 @@ def test_local_tenant_hosts_allow_http_but_remote_hosts_require_https() -> None:
 
 
 def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
+    def event_data():
+        return {
+            "id": str(event_id),
+            "name": "Reception",
+            "storage_limit_bytes": 25_000_000_000,
+            "processing_profile_id": "pilot-profile-v1",
+            "role": "lead",
+            "reserved_original_bytes": 0,
+            "verified_original_bytes": 0,
+            "intake_state": "open",
+            "intake_generation": 1,
+            "device_label": "",
+            "preview_policy": state.get("policy"),
+        }
+
     def handle(request: httpx.Request) -> httpx.Response:
         path = request.url.path
         if path == "/api/v1/auth/login/":
@@ -81,38 +97,46 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                 json={
                     "access_token": "access-token",
                     "refresh_token": "refresh-token",
-                    "events": [
-                        {
-                            "id": str(event_id),
-                            "name": "Reception",
-                            "storage_limit_bytes": 25_000_000_000,
-                            "processing_profile_id": "pilot-profile-v1",
-                            "role": "lead",
-                            "reserved_original_bytes": 0,
-                            "verified_original_bytes": 0,
-                            "intake_state": "open",
-                            "intake_generation": 1,
-                            "device_label": "",
-                        }
-                    ],
+                    "events": [event_data()],
                 },
             )
+        if path == "/api/v1/events/":
+            if state.get("policy_after_refresh"):
+                state["policy"] = state["policy_after_refresh"]
+            return httpx.Response(200, json={"events": [event_data()]})
         if path == f"/api/v1/events/{event_id}/batches/":
             state["manifest"] = json.loads(request.content)
             return httpx.Response(201, json={"id": str(batch_id), "state": "reserved"})
         if path == f"/api/v1/events/{event_id}/batches/{batch_id}/":
+            assets = [
+                {
+                    "asset_id": str(asset_id),
+                    "variant": "originals",
+                    "state": "verified" if state.get("verified") else "reserved",
+                    "failure_code": "",
+                    "gallery_excluded": False,
+                }
+            ]
+            assets.extend(
+                {
+                    "asset_id": str(asset_id),
+                    "variant": value["variant"],
+                    "state": (
+                        "verified"
+                        if value["variant"] in state.get("verified_derivatives", set())
+                        else "reserved"
+                    ),
+                    "failure_code": "",
+                    "gallery_excluded": False,
+                }
+                for value in state.get("derivative_manifest", [])
+            )
             return httpx.Response(
                 200,
                 json={
                     "id": str(batch_id),
                     "state": "complete" if state.get("verified") else "reserved",
-                    "assets": [
-                        {
-                            "asset_id": str(asset_id),
-                            "state": "verified" if state.get("verified") else "reserved",
-                            "failure_code": "",
-                        }
-                    ],
+                    "assets": assets,
                 },
             )
         if path == f"/api/v1/events/{event_id}/batches/{batch_id}/upload-leases/":
@@ -139,6 +163,59 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
         if path == f"/api/v1/events/{event_id}/assets/{asset_id}/complete/":
             state["verified"] = True
             return httpx.Response(200, json={"asset_id": str(asset_id), "state": "verified"})
+        if path == f"/api/v1/events/{event_id}/assets/{asset_id}/derivatives/":
+            body = json.loads(request.content)
+            state["derivative_manifest"] = body["objects"]
+            state.setdefault("verified_derivatives", set())
+            return httpx.Response(
+                201,
+                json={
+                    "asset_id": str(asset_id),
+                    "objects": [
+                        {
+                            "variant": value["variant"],
+                            "state": (
+                                "verified"
+                                if value["variant"] in state["verified_derivatives"]
+                                else "reserved"
+                            ),
+                            "failure_code": "",
+                        }
+                        for value in body["objects"]
+                    ],
+                },
+            )
+        if path == f"/api/v1/events/{event_id}/assets/{asset_id}/derivative-leases/":
+            variants = json.loads(request.content)["variants"]
+            objects = {value["variant"]: value for value in state["derivative_manifest"]}
+            return httpx.Response(
+                200,
+                json={
+                    "leases": [
+                        {
+                            "asset_id": str(asset_id),
+                            "variant": variant,
+                            "url": f"https://storage.invalid/{variant}",
+                            "headers": {
+                                "Content-Length": str(objects[variant]["size_bytes"]),
+                                "Content-MD5": objects[variant]["content_md5"],
+                                "Content-Type": "image/jpeg",
+                                "If-None-Match": "*",
+                                "x-amz-meta-openfotos-sha256": objects[variant]["sha256"],
+                            },
+                        }
+                        for variant in variants
+                    ]
+                },
+            )
+        prefix = f"/api/v1/events/{event_id}/assets/{asset_id}/derivatives/"
+        if path.startswith(prefix) and path.endswith("/complete/"):
+            variant = path.removeprefix(prefix).removesuffix("/complete/")
+            state.setdefault("verified_derivatives", set()).add(variant)
+            return httpx.Response(
+                200,
+                json={"asset_id": str(asset_id), "variant": variant, "state": "verified"},
+            )
         raise AssertionError(f"Unexpected API request: {request.method} {path}")
 
     return handle
@@ -178,19 +255,89 @@ def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_
     )
     progress = []
 
-    service.upload(
-        batch_id, transfer_limit=1, on_progress=lambda done, total: progress.append((done, total))
-    )
+    with pytest.raises(DesktopApiError) as failure:
+        service.upload(
+            batch_id,
+            transfer_limit=1,
+            on_progress=lambda done, total: progress.append((done, total)),
+        )
 
     assert events[0].device_label == "Lead workstation"
     assert state["manifest"]["device_label"] == "Lead workstation"
     assert state["storage_attempts"] == 5
     assert sleeps == [1.0, 2.0, 4.0, 8.0]
     assert progress[-1] == (1, 1)
+    assert failure.value.code == "preview_policy_not_confirmed"
     assert store.get_batch(batch_id).state is BatchState.COMPLETE
     checkpoint = store.get_upload_checkpoint(asset_id)
     assert checkpoint.state is LocalUploadState.VERIFIED
     assert checkpoint.attempt_count == 5
+    service.close()
+    store.close()
+
+
+def test_one_sync_generates_uploads_and_resumes_both_derivatives(tmp_path: Path) -> None:
+    store, event_id, batch_id, _photo = approved_batch(tmp_path)
+    asset_id = store.list_items(batch_id)[0].id
+    policy = PreviewPolicyCache(
+        id=uuid4(),
+        enabled=False,
+        template="compact-bottom-right",
+        text="",
+        logo_kind="none",
+        renderer_id="watermark-raster-v1",
+        derivative_profile_id="gallery-jpeg-v1",
+        mark_sha256="",
+    )
+    state = {
+        "policy_after_refresh": {
+            "id": str(policy.id),
+            "enabled": policy.enabled,
+            "template": policy.template,
+            "text": policy.text,
+            "logo_kind": policy.logo_kind,
+            "renderer_id": policy.renderer_id,
+            "derivative_profile_id": policy.derivative_profile_id,
+            "mark_sha256": policy.mark_sha256,
+        }
+    }
+    uploads = []
+
+    def storage_handler(request: httpx.Request) -> httpx.Response:
+        content = request.read()
+        uploads.append((request.url.path, content))
+        assert request.headers["if-none-match"] == "*"
+        return httpx.Response(200)
+
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, state))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(storage_handler)),
+    )
+    service.sign_in_lead("http://localhost:8000", "lead", "password", "Lead workstation")
+    stages = []
+    service.upload(
+        batch_id,
+        transfer_limit=1,
+        on_progress=lambda *_: None,
+        on_stage=lambda stage, done, total: stages.append((stage, done, total)),
+    )
+
+    assert [path for path, _content in uploads] == [
+        "/original",
+        "/previews",
+        "/thumbnails",
+    ]
+    assert all(content.startswith(b"\xff\xd8") for _path, content in uploads[1:])
+    assert stages[-1] == ("derivatives", 2, 2)
+    assert store.derivatives_complete(batch_id)
+    assert not list(store.derivative_cache_directory(batch_id).iterdir())
+
+    service.upload(batch_id, transfer_limit=1, on_progress=lambda *_: None)
+    assert len(uploads) == 3
     service.close()
     store.close()
 

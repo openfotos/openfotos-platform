@@ -7,12 +7,16 @@ from threading import Event
 from typing import TYPE_CHECKING
 from uuid import UUID
 
+from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
+from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QIcon
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -38,6 +42,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from openfotos_contracts import (
+    MAX_WATERMARK_TEXT_LENGTH,
+    WatermarkLogoKind,
+    WatermarkTemplate,
+)
+
+from .branding import WatermarkCompositionError, compose_watermark_mark
+from .derivatives import DerivativeError, RenderPolicy, render_for_review
 from .diagnostics import RedactedDiagnosticExporter
 from .ingestion import (
     BatchState,
@@ -190,6 +202,7 @@ class ScanWorker(QObject):
 
 class UploadWorker(QObject):
     progressed = Signal(int, int)
+    stage_progressed = Signal(str, int, int)
     completed = Signal()
     cancelled = Signal()
     failed = Signal(str)
@@ -215,6 +228,7 @@ class UploadWorker(QObject):
                 transfer_limit=self.transfer_limit,
                 on_progress=self.progressed.emit,
                 is_cancelled=self.stop.is_set,
+                on_stage=self.stage_progressed.emit,
             )
         except Exception as exc:  # Qt must surface worker failures to the local operator.
             self.failed.emit(str(exc))
@@ -458,6 +472,240 @@ class EventSelectorPage(QWidget):
         item = self.events.currentItem()
         if item:
             self.selected.emit(item.data(Qt.ItemDataRole.UserRole))
+
+
+class PreviewPolicyPage(QWidget):
+    confirmed = Signal(object)
+    back_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._event: EventCache | None = None
+        self._custom_logo_path: Path | None = None
+        self._sample_path: Path | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(52, 28, 52, 34)
+        layout.setSpacing(16)
+        layout.addWidget(
+            PageHeading(
+                "Preview policy",
+                "Choose gallery preview branding",
+                "These settings are locked for the event. They affect previews only; "
+                "thumbnails stay clean and original downloads keep their exact bytes.",
+                "Lead setup",
+            )
+        )
+
+        content = QHBoxLayout()
+        content.setSpacing(18)
+        controls = QFrame()
+        controls.setObjectName("Panel")
+        form = QFormLayout(controls)
+        form.setContentsMargins(22, 20, 22, 20)
+        form.setSpacing(13)
+        self.enabled = QCheckBox("Add a watermark to gallery previews")
+        self.enabled.setChecked(False)
+        self.enabled.toggled.connect(self._watermark_toggled)
+        form.addRow(self.enabled)
+        self.template = QComboBox()
+        for label, template in (
+            ("Compact · bottom right", WatermarkTemplate.COMPACT_BOTTOM_RIGHT),
+            ("Balanced · bottom center", WatermarkTemplate.BOTTOM_CENTER),
+            ("Large brand · center", WatermarkTemplate.CENTER_BRAND),
+            ("Repeated · diagonal", WatermarkTemplate.REPEATED_DIAGONAL),
+        ):
+            self.template.addItem(label, template)
+        self.template.currentIndexChanged.connect(self._render_preview)
+        form.addRow("Template", self.template)
+        self.logo = QComboBox()
+        self.logo.addItem("Built-in OFTS wordmark", WatermarkLogoKind.OFTS)
+        self.logo.addItem("Custom transparent PNG", WatermarkLogoKind.CUSTOM)
+        self.logo.addItem("No logo", WatermarkLogoKind.NONE)
+        self.logo.currentIndexChanged.connect(self._logo_changed)
+        form.addRow("Logo", self.logo)
+        self.custom_logo = _style_button(QPushButton("Choose custom PNG"), kind="ghost")
+        self.custom_logo.clicked.connect(self._choose_custom_logo)
+        form.addRow("Custom file", self.custom_logo)
+        self.text = QLineEdit()
+        self.text.setMaxLength(MAX_WATERMARK_TEXT_LENGTH)
+        self.text.setPlaceholderText("Optional, e.g. © OFTS Studio")
+        self.text.textChanged.connect(self._render_preview)
+        form.addRow("Watermark text", self.text)
+        self.sample = _style_button(QPushButton("Use a local photo sample"), kind="ghost")
+        self.sample.clicked.connect(self._choose_sample)
+        form.addRow("Preview sample", self.sample)
+        self.note = QLabel(
+            "The sample stays on this workstation. Custom logos preserve their original "
+            "colors and transparency."
+        )
+        self.note.setObjectName("BodyMuted")
+        self.note.setWordWrap(True)
+        form.addRow(self.note)
+        content.addWidget(controls, 4)
+
+        preview_panel = QFrame()
+        preview_panel.setObjectName("HeroPanel")
+        preview_layout = QVBoxLayout(preview_panel)
+        preview_layout.setContentsMargins(18, 16, 18, 16)
+        preview_title = QLabel("Preview result")
+        preview_title.setObjectName("SectionTitle")
+        preview_layout.addWidget(preview_title)
+        self.preview = QLabel()
+        self.preview.setMinimumSize(520, 320)
+        self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview.setStyleSheet("background: #111827; border-radius: 8px;")
+        preview_layout.addWidget(self.preview, 1)
+        self.error = QLabel()
+        self.error.setObjectName("ErrorBanner")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        preview_layout.addWidget(self.error)
+        content.addWidget(preview_panel, 6)
+        layout.addLayout(content, 1)
+
+        footer = QHBoxLayout()
+        self.back = _style_button(QPushButton("Back to events"), kind="ghost")
+        self.back.clicked.connect(self.back_requested)
+        self.confirm = _style_button(QPushButton("Confirm and lock settings"), kind="primary")
+        self.confirm.clicked.connect(self._confirm)
+        footer.addWidget(self.back)
+        footer.addStretch()
+        footer.addWidget(self.confirm)
+        layout.addLayout(footer)
+        self._watermark_toggled(False)
+
+    def show_event(self, event: EventCache) -> None:
+        self._event = event
+        self._custom_logo_path = None
+        self._sample_path = None
+        self.enabled.setChecked(False)
+        self.template.setCurrentIndex(0)
+        self.logo.setCurrentIndex(0)
+        self.text.clear()
+        self._render_preview()
+
+    def draft(self) -> dict:
+        enabled = self.enabled.isChecked()
+        template = WatermarkTemplate(self.template.currentData())
+        if not enabled:
+            return {
+                "enabled": False,
+                "template": template,
+                "text": "",
+                "logo_kind": WatermarkLogoKind.NONE,
+                "mark_png": b"",
+            }
+        logo_kind = WatermarkLogoKind(self.logo.currentData())
+        text = self.text.text().strip()
+        return {
+            "enabled": True,
+            "template": template,
+            "text": text,
+            "logo_kind": logo_kind,
+            "mark_png": compose_watermark_mark(
+                logo_kind=logo_kind,
+                text=text,
+                custom_logo_path=self._custom_logo_path,
+            ),
+        }
+
+    @Slot(bool)
+    def _watermark_toggled(self, enabled: bool) -> None:
+        for control in (self.template, self.logo, self.text):
+            control.setEnabled(enabled)
+        self.custom_logo.setEnabled(
+            enabled and WatermarkLogoKind(self.logo.currentData()) is WatermarkLogoKind.CUSTOM
+        )
+        self._render_preview()
+
+    @Slot()
+    def _logo_changed(self) -> None:
+        self.custom_logo.setEnabled(
+            self.enabled.isChecked()
+            and WatermarkLogoKind(self.logo.currentData()) is WatermarkLogoKind.CUSTOM
+        )
+        self._render_preview()
+
+    @Slot()
+    def _choose_custom_logo(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Choose a transparent logo", "", "PNG images (*.png)"
+        )
+        if filename:
+            self._custom_logo_path = Path(filename)
+            self.custom_logo.setText(Path(filename).name)
+            self._render_preview()
+
+    @Slot()
+    def _choose_sample(self) -> None:
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Choose a local preview sample", "", "JPEG photos (*.jpg *.jpeg)"
+        )
+        if filename:
+            self._sample_path = Path(filename)
+            self.sample.setText(Path(filename).name)
+            self._render_preview()
+
+    @Slot()
+    def _render_preview(self) -> None:
+        try:
+            draft = self.draft()
+            rendered = render_for_review(
+                self._sample_image(),
+                RenderPolicy(
+                    enabled=draft["enabled"],
+                    template=draft["template"],
+                    mark_png=draft["mark_png"],
+                ),
+            )
+        except (OSError, UnidentifiedImageError, WatermarkCompositionError, DerivativeError) as exc:
+            self.error.setText(str(exc))
+            self.error.show()
+            return
+        self.error.hide()
+        pixmap = QPixmap.fromImage(ImageQt(rendered))
+        self.preview.setPixmap(
+            pixmap.scaled(
+                self.preview.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+
+    def _sample_image(self) -> Image.Image:
+        if self._sample_path is not None:
+            with Image.open(self._sample_path) as opened:
+                opened.load()
+                return ImageOps.exif_transpose(opened).convert("RGB")
+        image = Image.new("RGB", (1200, 760), "#172554")
+        draw = ImageDraw.Draw(image)
+        for y in range(image.height):
+            ratio = y / image.height
+            draw.line(
+                (0, y, image.width, y),
+                fill=(round(23 + 75 * ratio), round(37 + 82 * ratio), round(84 + 66 * ratio)),
+            )
+        draw.ellipse((110, 90, 570, 550), fill="#d97706")
+        draw.rounded_rectangle((480, 200, 1090, 680), radius=70, fill="#0f766e")
+        draw.text((54, 680), "LOCAL PREVIEW SAMPLE", fill="#f8fafc")
+        return image
+
+    @Slot()
+    def _confirm(self) -> None:
+        try:
+            draft = self.draft()
+        except WatermarkCompositionError as exc:
+            self.error.setText(str(exc))
+            self.error.show()
+            return
+        choice = QMessageBox.question(
+            self,
+            "Lock preview settings?",
+            "These preview settings apply to every contribution and cannot change after "
+            "processing starts. Originals will remain untouched. Continue?",
+        )
+        if choice == QMessageBox.StandardButton.Yes:
+            self.confirmed.emit(draft)
 
 
 class SelectionPage(QWidget):
@@ -902,9 +1150,16 @@ class ApprovedPage(QWidget):
         self.upload_progress = QProgressBar()
         self.upload_progress.setRange(0, 1)
         self.upload_progress.setValue(0)
+        self.original_progress = self.upload_progress
+        transfer_layout.addWidget(QLabel("Originals"))
         transfer_layout.addWidget(self.upload_progress)
+        transfer_layout.addWidget(QLabel("Gallery previews and thumbnails"))
+        self.derivative_progress = QProgressBar()
+        self.derivative_progress.setRange(0, 1)
+        self.derivative_progress.setValue(0)
+        transfer_layout.addWidget(self.derivative_progress)
         transfer_buttons = QHBoxLayout()
-        self.upload = _style_button(QPushButton("Upload originals"), kind="primary")
+        self.upload = _style_button(QPushButton("Process and upload contribution"), kind="primary")
         self.upload.clicked.connect(lambda: self.upload_requested.emit(self.transfer_limit.value()))
         self.pause = _style_button(QPushButton("Pause after active uploads"), kind="ghost")
         self.pause.clicked.connect(self.pause_requested)
@@ -969,8 +1224,11 @@ class ApprovedPage(QWidget):
         state: BatchState,
         event: EventCache,
         excluded_count: int = 0,
+        derivative_failure_count: int = 0,
+        derivatives_complete: bool = False,
     ) -> None:
-        complete = state is BatchState.COMPLETE
+        originals_complete = state is BatchState.COMPLETE
+        complete = originals_complete and derivatives_complete
         if complete:
             if excluded_count:
                 self.message.setText(
@@ -980,17 +1238,31 @@ class ApprovedPage(QWidget):
                 self.cloud_stage_detail.setText("Verified originals stored; exclusions recorded")
             else:
                 self.message.setText(
-                    f"Batch {batch_id} is verified in private object storage. "
-                    "New photos belong in a new contribution."
+                    f"Batch {batch_id} and its gallery media are verified in private object "
+                    "storage. New photos belong in a new contribution."
                 )
-                self.cloud_stage_detail.setText("Originals verified")
+                self.cloud_stage_detail.setText("Originals and gallery media verified")
+        elif originals_complete:
+            if derivative_failure_count:
+                self.message.setText(
+                    f"Batch {batch_id} has verified originals, but {derivative_failure_count} "
+                    "photo(s) need gallery processing retry or lead review."
+                )
+                self.cloud_stage_detail.setText("Gallery derivative failure")
+            else:
+                self.message.setText(
+                    f"Batch {batch_id} has verified originals. Gallery previews and clean "
+                    "thumbnails are ready to resume."
+                )
+                self.cloud_stage_detail.setText("Gallery processing pending")
         else:
             self.message.setText(
                 f"Batch {batch_id} is locally verified and ready for private upload. "
                 "New photos belong in a new contribution."
             )
             self.cloud_stage_detail.setText("Resume-safe transfer pending")
-        self.upload.setEnabled(not complete and event.intake_state == "open")
+        can_sync = event.intake_state == "open" or originals_complete
+        self.upload.setEnabled(not complete and can_sync)
         self.pause.setEnabled(False)
         self.transfer_limit.setEnabled(True)
         self.verify.setEnabled(state is BatchState.APPROVED)
@@ -1010,9 +1282,18 @@ class ApprovedPage(QWidget):
 
     @Slot(int, int)
     def upload_progressed(self, completed: int, total: int) -> None:
-        self.upload_progress.setRange(0, max(total, 1))
-        self.upload_progress.setValue(completed)
-        self.cloud_stage_detail.setText(f"{completed} of {total} verified")
+        self.original_progress.setRange(0, max(total, 1))
+        self.original_progress.setValue(completed)
+        self.cloud_stage_detail.setText(f"{completed} of {total} originals verified")
+
+    @Slot(str, int, int)
+    def stage_progressed(self, stage: str, completed: int, total: int) -> None:
+        if stage == "originals":
+            self.upload_progressed(completed, total)
+            return
+        self.derivative_progress.setRange(0, max(total, 1))
+        self.derivative_progress.setValue(completed)
+        self.cloud_stage_detail.setText(f"{completed} of {total} gallery derivatives verified")
 
     def upload_stopped(self, *, paused: bool = False) -> None:
         self.pause.setEnabled(False)
@@ -1055,10 +1336,18 @@ class MainWindow(QMainWindow):
         self.stack.setObjectName("PageStack")
         self.login = LoginPage()
         self.events = EventSelectorPage()
+        self.preview_policy = PreviewPolicyPage()
         self.selection = SelectionPage()
         self.validation = ValidationPage()
         self.approved = ApprovedPage()
-        for page in (self.login, self.events, self.selection, self.validation, self.approved):
+        for page in (
+            self.login,
+            self.events,
+            self.preview_policy,
+            self.selection,
+            self.validation,
+            self.approved,
+        ):
             self.stack.addWidget(page)
         shell_layout.addWidget(self.stack, 1)
         self.setCentralWidget(shell)
@@ -1087,6 +1376,8 @@ class MainWindow(QMainWindow):
         self.login.uploader_requested.connect(self._enroll_uploader)
         self.login.resume_requested.connect(self._resume_session)
         self.events.selected.connect(self._open_event)
+        self.preview_policy.confirmed.connect(self._confirm_preview_policy)
+        self.preview_policy.back_requested.connect(lambda: self.stack.setCurrentWidget(self.events))
         self.selection.add_files_requested.connect(self._add_files)
         self.selection.add_folder_requested.connect(self._add_folder)
         self.selection.remove_selection_requested.connect(self._remove_selection)
@@ -1157,6 +1448,16 @@ class MainWindow(QMainWindow):
     def _open_event(self, event: EventCache) -> None:
         self.current_event = event
         self.header.set_context(event.name)
+        if event.role == "lead" and event.preview_policy is None:
+            self.preview_policy.show_event(event)
+            self.stack.setCurrentWidget(self.preview_policy)
+            return
+        self._open_event_inventory()
+
+    def _open_event_inventory(self) -> None:
+        if self.current_event is None:
+            return
+        event = self.current_event
         batches = self.store.list_batches(event.id)
         self.current_batch_id = batches[-1].id if batches else self.store.create_batch(event.id)
         batch = self.store.get_batch(self.current_batch_id)
@@ -1171,6 +1472,27 @@ class MainWindow(QMainWindow):
             self._show_validation(self.store.summary(batch.id))
         else:
             self._show_selection()
+
+    @Slot(object)
+    def _confirm_preview_policy(self, draft: dict) -> None:
+        if self.current_event is None:
+            return
+        try:
+            event = self.gateway.confirm_preview_policy(
+                self.current_event.id,
+                enabled=draft["enabled"],
+                template=draft["template"],
+                text=draft["text"],
+                logo_kind=draft["logo_kind"],
+                mark_png=draft["mark_png"],
+            )
+        except RuntimeError as exc:
+            self.preview_policy.error.setText(str(exc))
+            self.preview_policy.error.show()
+            return
+        self.current_event = event
+        self.store.cache_event(event)
+        self._open_event_inventory()
 
     @Slot()
     def _new_batch(self) -> None:
@@ -1306,15 +1628,25 @@ class MainWindow(QMainWindow):
         if self.current_event is None or self.current_batch_id is None:
             return
         batch = self.store.get_batch(self.current_batch_id)
-        excluded_count = sum(
-            checkpoint.state is LocalUploadState.EXCLUDED
-            for checkpoint in self.store.list_upload_checkpoints(batch.id)
-        )
+        upload_checkpoints = self.store.list_upload_checkpoints(batch.id)
+        derivative_checkpoints = self.store.list_derivative_checkpoints(batch.id)
+        excluded_items = {
+            checkpoint.item_id
+            for checkpoint in (*upload_checkpoints, *derivative_checkpoints)
+            if checkpoint.state is LocalUploadState.EXCLUDED
+        }
+        failed_derivative_items = {
+            checkpoint.item_id
+            for checkpoint in derivative_checkpoints
+            if checkpoint.state is LocalUploadState.FAILED
+        }
         self.approved.show_batch(
             batch.id,
             state=batch.state,
             event=self.current_event,
-            excluded_count=excluded_count,
+            excluded_count=len(excluded_items),
+            derivative_failure_count=len(failed_derivative_items),
+            derivatives_complete=self.store.derivatives_complete(batch.id),
         )
         self.stack.setCurrentWidget(self.approved)
 
@@ -1334,6 +1666,7 @@ class MainWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progressed.connect(self.approved.upload_progressed)
+        worker.stage_progressed.connect(self.approved.stage_progressed)
         worker.completed.connect(self._upload_completed)
         worker.cancelled.connect(self._upload_cancelled)
         worker.failed.connect(self._upload_failed)

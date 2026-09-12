@@ -13,13 +13,18 @@ from django.db.models import F, Q
 from django.utils import timezone
 
 from openfotos_contracts import (
+    DERIVATIVE_PROFILE_ID,
+    WATERMARK_RENDERER_ID,
     ContributionState,
     DeviceRole,
     DeviceStatus,
     EventState,
     IngestionManifestState,
     IntakeState,
+    OriginalDownloadPolicy,
     UploadObjectState,
+    WatermarkLogoKind,
+    WatermarkTemplate,
 )
 from openfotos_storage import AssetVariant
 
@@ -80,6 +85,12 @@ class AuditAction(models.TextChoices):
     EVENT_INTAKE_CLOSED = "event.intake_closed", "Event intake closed"
     EVENT_INTAKE_REOPENED = "event.intake_reopened", "Event intake reopened"
     EVENT_INGESTION_FINALIZED = "event.ingestion_finalized", "Event ingestion finalized"
+    PREVIEW_POLICY_CONFIRMED = "preview_policy.confirmed", "Preview policy confirmed"
+    DERIVATIVE_UPLOAD_VERIFIED = "derivative_upload.verified", "Derivative upload verified"
+    DERIVATIVE_FAILED = "derivative.failed", "Derivative failed"
+    ASSET_GALLERY_EXCLUDED = "asset.gallery_excluded", "Asset excluded from gallery"
+    ASSET_GALLERY_RESTORED = "asset.gallery_restored", "Asset restored to gallery"
+    DOWNLOAD_POLICY_CHANGED = "event.download_policy_changed", "Download policy changed"
 
 
 class AuditResult(models.TextChoices):
@@ -200,6 +211,14 @@ class Event(models.Model):
     )
     intake_generation = models.PositiveIntegerField(default=1, editable=False)
     processing_profile_id = models.CharField(max_length=100, default="pilot-profile-v1")
+    original_download_policy = models.CharField(
+        max_length=24,
+        choices=tuple(
+            (policy.value, policy.value.replace("-", " ").title())
+            for policy in OriginalDownloadPolicy
+        ),
+        default=OriginalDownloadPolicy.DISABLED.value,
+    )
     derivatives_ready_generation = models.PositiveIntegerField(
         blank=True, null=True, editable=False
     )
@@ -408,6 +427,20 @@ class Asset(models.Model):
     width = models.PositiveIntegerField()
     height = models.PositiveIntegerField()
     sha256 = models.CharField(max_length=64, validators=[SHA256_VALIDATOR])
+    captured_at = models.DateTimeField(blank=True, null=True)
+    gallery_position = models.PositiveIntegerField(blank=True, null=True)
+    gallery_excluded_at = models.DateTimeField(blank=True, null=True, editable=False)
+    gallery_exclusion_reason = models.CharField(max_length=240, blank=True)
+    gallery_excluded_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+        related_name="gallery_excluded_assets",
+    )
+    derivative_failure_code = models.CharField(max_length=64, blank=True)
+    derivative_failure_at = models.DateTimeField(blank=True, null=True, editable=False)
+    derivative_attempt_count = models.PositiveSmallIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
@@ -422,7 +455,10 @@ class AssetObject(models.Model):
     )
     object_key = models.CharField(max_length=255, unique=True)
     expected_bytes = models.PositiveBigIntegerField()
+    sha256 = models.CharField(max_length=64, validators=[SHA256_VALIDATOR])
     content_md5 = models.CharField(max_length=24, validators=[MD5_VALIDATOR])
+    width = models.PositiveIntegerField()
+    height = models.PositiveIntegerField()
     state = models.CharField(
         max_length=16,
         choices=tuple((state.value, state.value.title()) for state in UploadObjectState),
@@ -451,6 +487,64 @@ class AssetObject(models.Model):
             )
         ]
         indexes = [models.Index(fields=("state",), name="object_state_idx")]
+
+
+class PreviewPolicy(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
+    event = models.OneToOneField(
+        Event,
+        on_delete=models.PROTECT,
+        related_name="preview_policy",
+    )
+    enabled = models.BooleanField(default=False)
+    template = models.CharField(
+        max_length=32,
+        choices=tuple(
+            (template.value, template.value.replace("-", " ").title())
+            for template in WatermarkTemplate
+        ),
+        default=WatermarkTemplate.COMPACT_BOTTOM_RIGHT.value,
+    )
+    text = models.CharField(max_length=60, blank=True)
+    logo_kind = models.CharField(
+        max_length=16,
+        choices=tuple((kind.value, kind.value.upper()) for kind in WatermarkLogoKind),
+        default=WatermarkLogoKind.NONE.value,
+    )
+    renderer_id = models.CharField(max_length=100, default=WATERMARK_RENDERER_ID, editable=False)
+    derivative_profile_id = models.CharField(
+        max_length=100,
+        default=DERIVATIVE_PROFILE_ID,
+        editable=False,
+    )
+    mark_object_key = models.CharField(max_length=255, blank=True, unique=True, null=True)
+    mark_sha256 = models.CharField(max_length=64, blank=True, validators=[SHA256_VALIDATOR])
+    mark_bytes = models.PositiveIntegerField(default=0)
+    mark_width = models.PositiveIntegerField(default=0)
+    mark_height = models.PositiveIntegerField(default=0)
+    confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="confirmed_preview_policies",
+    )
+    confirmed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(enabled=False, mark_object_key__isnull=True, mark_bytes=0)
+                    | Q(
+                        enabled=True,
+                        mark_object_key__isnull=False,
+                        mark_bytes__gt=0,
+                        mark_width__gt=0,
+                        mark_height__gt=0,
+                    )
+                ),
+                name="preview_policy_mark_matches_enabled",
+            )
+        ]
 
 
 class IngestionManifest(models.Model):

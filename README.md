@@ -14,7 +14,9 @@ Session 2 authorization and PIN tradeoffs. The
 [multi-uploader decision](docs/adr/0003-multi-uploader-desktop-ingestion.md),
 [exact-object lease decision](docs/adr/0004-exact-object-upload-leases.md), and
 [reconciliation decision](docs/adr/0005-contribution-lifecycle-and-reconciliation.md) define how
-independent desktop installations safely contribute to the same event.
+independent desktop installations safely contribute to the same event. The
+[preview and gallery decision](docs/adr/0006-preview-policy-derivatives-and-private-gallery.md)
+defines optional event watermarking, local derivative generation, and private browsing.
 
 ## Repository map
 
@@ -57,7 +59,9 @@ uv run python -m openfotos_desktop
 
 For a photographer with slug `demo`, use `http://demo.localhost:8000` as the server. Lead login,
 invitation enrollment, durable refresh, private direct upload, pause/resume, intake closure, and
-manifest finalization use the Session 4 API. To run local inventory without a server, start the
+manifest finalization use the desktop API. Event leads confirm optional preview watermarking in the
+desktop; the same sync action uploads originals and their private previews/thumbnails. To run local
+inventory without a server, start the
 explicit synthetic demo instead:
 
 ```bash

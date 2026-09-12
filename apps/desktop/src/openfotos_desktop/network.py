@@ -1,8 +1,11 @@
-"""Authenticated desktop API access and resumable original uploads."""
+"""Authenticated desktop API access and resumable original/derivative sync."""
 
 import base64
 import hashlib
+import os
 import random
+import re
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -13,12 +16,47 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 import httpx
 
+from openfotos_contracts import (
+    DERIVATIVE_PROFILE_ID,
+    WATERMARK_RENDERER_ID,
+    DerivativeVariant,
+    WatermarkLogoKind,
+    WatermarkTemplate,
+)
+
 from .credentials import RefreshTokenStore
-from .ingestion import BatchState, CheckpointStore, EventCache, InventoryStatus, LocalUploadState
+from .derivatives import DerivativeError, DerivativeRenderer, RenderPolicy
+from .ingestion import (
+    BatchState,
+    CheckpointStore,
+    EventCache,
+    InventoryStatus,
+    LocalUploadState,
+    PreviewPolicyCache,
+)
 from .ingestion.validation import file_checksums
 
 _CHUNK_BYTES = 1024 * 1024
 _MAX_UPLOAD_ATTEMPTS = 5
+_FATAL_DERIVATIVE_CODES = frozenset(
+    {
+        "asset_not_found",
+        "derivative_manifest_conflict",
+        "derivative_profile_mismatch",
+        "device_revoked",
+        "event_not_found",
+        "event_not_processing",
+        "invalid_access_token",
+        "invalid_server_response",
+        "original_not_verified",
+        "original_readback_checksum_mismatch",
+        "preview_policy_mismatch",
+        "preview_policy_not_confirmed",
+        "session_unavailable",
+        "source_checksum_mismatch",
+        "watermark_checksum_mismatch",
+    }
+)
 
 
 class DesktopApiError(RuntimeError):
@@ -156,6 +194,30 @@ class DesktopNetworkService:
             idempotency_key=_operation_key(event_id, "finalize"),
         )
 
+    def confirm_preview_policy(
+        self,
+        event_id: UUID,
+        *,
+        enabled: bool,
+        template: WatermarkTemplate,
+        text: str,
+        logo_kind: WatermarkLogoKind,
+        mark_png: bytes,
+    ) -> EventCache:
+        self._request(
+            "POST",
+            f"/api/v1/events/{event_id}/preview-policy/confirm/",
+            json={
+                "enabled": enabled,
+                "template": template.value,
+                "text": text,
+                "logo_kind": logo_kind.value,
+                "mark_png_base64": base64.b64encode(mark_png).decode() if enabled else "",
+            },
+            idempotency_key=_operation_key(event_id, "confirm-preview-policy"),
+        )
+        return self._refresh_cached_event(event_id)
+
     def upload(
         self,
         batch_id: UUID,
@@ -163,6 +225,7 @@ class DesktopNetworkService:
         transfer_limit: int,
         on_progress,
         is_cancelled=None,
+        on_stage=None,
     ) -> None:
         if transfer_limit not in range(1, 5):
             raise ValueError("Use one to four concurrent transfers.")
@@ -206,19 +269,51 @@ class DesktopNetworkService:
             raise DesktopApiError(
                 "batch_not_approved", "Approve the local contribution before uploading."
             )
-        if batch.state is BatchState.COMPLETE:
-            checkpoints = self.store.list_upload_checkpoints(batch.id)
-            verified = sum(
-                checkpoint.state is LocalUploadState.VERIFIED for checkpoint in checkpoints
-            )
-            on_progress(verified, len(items))
+        self._upload_originals(
+            event=event,
+            batch_id=batch.id,
+            items=items,
+            transfer_limit=transfer_limit,
+            on_progress=on_progress,
+            on_stage=on_stage,
+            is_cancelled=is_cancelled,
+        )
+        if is_cancelled and is_cancelled():
             return
+        event = self.store.get_event(event.id)
+        if event.preview_policy is None:
+            event = self._refresh_cached_event(event.id)
+        if event.preview_policy is None:
+            raise DesktopApiError(
+                "preview_policy_not_confirmed",
+                "The event lead must confirm preview settings before gallery processing.",
+            )
+        self.store.ensure_derivative_checkpoints(batch.id)
+        self._sync_batch(event.id, batch.id)
+        self._process_derivatives(
+            event=event,
+            batch_id=batch.id,
+            items=items,
+            on_stage=on_stage,
+            is_cancelled=is_cancelled,
+        )
 
+    def _upload_originals(
+        self,
+        *,
+        event: EventCache,
+        batch_id: UUID,
+        items: dict[UUID, object],
+        transfer_limit: int,
+        on_progress,
+        on_stage,
+        is_cancelled,
+    ) -> None:
         while True:
-            self._sync_batch(event.id, batch.id)
+            self._sync_batch(event.id, batch_id)
             checkpoints = {
                 checkpoint.item_id: checkpoint
-                for checkpoint in self.store.list_upload_checkpoints(batch.id)
+                for checkpoint in self.store.list_upload_checkpoints(batch_id)
             }
             completed = sum(
                 checkpoint.state is LocalUploadState.VERIFIED for checkpoint in checkpoints.values()
@@ -228,6 +323,8 @@ class DesktopNetworkService:
                 for checkpoint in checkpoints.values()
             )
             on_progress(completed, len(items))
+            if on_stage:
+                on_stage("originals", completed, len(items))
             pending_ids = [
                 item_id
                 for item_id, checkpoint in checkpoints.items()
@@ -245,7 +342,7 @@ class DesktopNetworkService:
                 return
             lease_response = self._request(
                 "POST",
-                f"/api/v1/events/{event.id}/batches/{batch.id}/upload-leases/",
+                f"/api/v1/events/{event.id}/batches/{batch_id}/upload-leases/",
                 json={"asset_ids": [str(item_id) for item_id in pending_ids[:transfer_limit]]},
             )
             leases = lease_response["leases"]
@@ -331,6 +428,316 @@ class DesktopNetworkService:
         maximum = min(16.0, 2.0 ** max(0, checkpoint.attempt_count - 1))
         self._sleep(self._jitter(0.0, maximum))
 
+    def _process_derivatives(
+        self,
+        *,
+        event: EventCache,
+        batch_id: UUID,
+        items: dict[UUID, object],
+        on_stage,
+        is_cancelled,
+    ) -> None:
+        policy = event.preview_policy
+        if policy is None:  # guarded by upload; retained as a narrow type boundary
+            raise DesktopApiError(
+                "preview_policy_not_confirmed", "Preview settings are unavailable."
+            )
+        mark_png = self._policy_mark(event.id, policy)
+        cache_directory = self.store.derivative_cache_directory(batch_id)
+        renderer = DerivativeRenderer()
+        try:
+            for item in sorted(items.values(), key=lambda value: str(value.id)):
+                if is_cancelled and is_cancelled():
+                    return
+                checkpoints = self._item_derivative_checkpoints(item.id)
+                if all(
+                    checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                    for checkpoint in checkpoints.values()
+                ):
+                    self._report_derivative_progress(batch_id, on_stage)
+                    continue
+                while True:
+                    pending = [
+                        checkpoint
+                        for checkpoint in checkpoints.values()
+                        if checkpoint.state
+                        not in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                    ]
+                    attempts = max(checkpoint.attempt_count for checkpoint in pending)
+                    if attempts >= _MAX_UPLOAD_ATTEMPTS:
+                        raise DesktopApiError(
+                            "derivative_attempts_exhausted",
+                            "A gallery derivative failed five times and now needs lead review.",
+                        )
+                    try:
+                        self._process_asset_derivatives(
+                            event=event,
+                            item=item,
+                            policy=policy,
+                            mark_png=mark_png,
+                            renderer=renderer,
+                            cache_directory=cache_directory,
+                            pending=pending,
+                        )
+                    except (DerivativeError, DesktopApiError) as exc:
+                        code = exc.code
+                        current = self._item_derivative_checkpoints(item.id)
+                        for checkpoint in current.values():
+                            if checkpoint.state not in {
+                                LocalUploadState.VERIFIED,
+                                LocalUploadState.EXCLUDED,
+                            }:
+                                self.store.mark_derivative_failed(item.id, checkpoint.variant, code)
+                        if isinstance(exc, DesktopApiError) and exc.code in _FATAL_DERIVATIVE_CODES:
+                            raise
+                        self._report_derivative_failure(
+                            event.id,
+                            item.id,
+                            code,
+                            attempt=max(value.attempt_count for value in current.values()),
+                        )
+                        checkpoints = self._item_derivative_checkpoints(item.id)
+                        if max(value.attempt_count for value in checkpoints.values()) >= 5:
+                            raise DesktopApiError(
+                                "derivative_attempts_exhausted",
+                                "A gallery derivative failed five times and now needs lead review.",
+                            ) from exc
+                        if isinstance(exc, DesktopApiError) and exc.retryable:
+                            self._derivative_backoff(checkpoints)
+                        continue
+                    self._sync_batch(event.id, batch_id)
+                    checkpoints = self._item_derivative_checkpoints(item.id)
+                    self._report_derivative_progress(batch_id, on_stage)
+                    if all(
+                        checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                        for checkpoint in checkpoints.values()
+                    ):
+                        break
+            if not self.store.derivatives_complete(batch_id):
+                raise DesktopApiError(
+                    "derivative_state_unavailable",
+                    "Gallery processing stopped before every derivative was verified.",
+                    retryable=True,
+                )
+        finally:
+            self.store.cleanup_derivative_cache(batch_id)
+
+    def _process_asset_derivatives(
+        self,
+        *,
+        event: EventCache,
+        item,
+        policy: PreviewPolicyCache,
+        mark_png: bytes,
+        renderer: DerivativeRenderer,
+        cache_directory: Path,
+        pending: list,
+    ) -> None:
+        for checkpoint in pending:
+            self.store.mark_derivative_started(item.id, checkpoint.variant)
+        source_path, downloaded = self._derivative_source(event.id, item, cache_directory)
+        rendered = None
+        try:
+            rendered = renderer.render(
+                source_path,
+                expected_source_sha256=item.sha256,
+                policy=RenderPolicy(
+                    enabled=policy.enabled,
+                    template=policy.template,
+                    mark_png=mark_png,
+                ),
+                cache_directory=cache_directory,
+                asset_stem=str(item.id),
+            )
+            response = self._request(
+                "POST",
+                f"/api/v1/events/{event.id}/assets/{item.id}/derivatives/",
+                json={
+                    "asset_id": str(item.id),
+                    "source_sha256": item.sha256,
+                    "policy_id": str(policy.id),
+                    "profile_id": policy.derivative_profile_id,
+                    "captured_at": (
+                        rendered.captured_at.isoformat() if rendered.captured_at else None
+                    ),
+                    "objects": [rendered.preview.as_contract(), rendered.thumbnail.as_contract()],
+                },
+                idempotency_key=_operation_key(item.id, "register-derivatives"),
+            )
+            rendered_by_variant = {
+                rendered.preview.variant.value: rendered.preview,
+                rendered.thumbnail.variant.value: rendered.thumbnail,
+            }
+            pending_variants = []
+            for value in response["objects"]:
+                variant = value["variant"]
+                if value["state"] == "verified":
+                    self.store.mark_derivative_verified(item.id, variant)
+                    rendered_by_variant[variant].path.unlink(missing_ok=True)
+                else:
+                    pending_variants.append(variant)
+            if not pending_variants:
+                return
+            lease_response = self._request(
+                "POST",
+                f"/api/v1/events/{event.id}/assets/{item.id}/derivative-leases/",
+                json={"variants": pending_variants},
+            )
+            if len(lease_response["leases"]) != len(pending_variants):
+                raise DesktopApiError(
+                    "derivative_state_unavailable",
+                    "The server returned incomplete derivative upload work.",
+                    retryable=True,
+                )
+            for lease in lease_response["leases"]:
+                variant = lease["variant"]
+                self._upload_derivative(
+                    event_id=event.id,
+                    asset_id=item.id,
+                    rendered=rendered_by_variant[variant],
+                    lease=lease,
+                )
+                self.store.mark_derivative_verified(item.id, variant)
+                rendered_by_variant[variant].path.unlink(missing_ok=True)
+        finally:
+            if downloaded:
+                source_path.unlink(missing_ok=True)
+            if rendered is not None:
+                rendered.preview.path.unlink(missing_ok=True)
+                rendered.thumbnail.path.unlink(missing_ok=True)
+
+    def _derivative_source(self, event_id: UUID, item, cache_directory: Path) -> tuple[Path, bool]:
+        try:
+            if item.source_path.is_file() and _path_sha256(item.source_path) == item.sha256:
+                return item.source_path, False
+        except OSError:
+            pass
+        data = self._request(
+            "POST",
+            f"/api/v1/events/{event_id}/assets/{item.id}/source-url/",
+            json={},
+        )
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f"{item.id}-source-", suffix=".jpg", dir=cache_directory
+        )
+        os.close(descriptor)
+        destination = Path(temporary_name)
+        if os.name != "nt":
+            destination.chmod(0o600)
+        digest = hashlib.sha256()
+        try:
+            with self.storage_client.stream("GET", data["url"]) as response:
+                if response.status_code != 200:
+                    raise DesktopApiError(
+                        "original_readback_failed",
+                        f"Private original read-back failed with HTTP {response.status_code}.",
+                        retryable=response.status_code in {408, 429} or response.status_code >= 500,
+                    )
+                with destination.open("wb") as output:
+                    for chunk in response.iter_bytes(_CHUNK_BYTES):
+                        digest.update(chunk)
+                        output.write(chunk)
+            if digest.hexdigest() != item.sha256 or data["sha256"] != item.sha256:
+                raise DesktopApiError(
+                    "original_readback_checksum_mismatch",
+                    "The private original read-back failed checksum validation.",
+                )
+        except Exception:
+            destination.unlink(missing_ok=True)
+            raise
+        return destination, True
+
+    def _upload_derivative(self, *, event_id: UUID, asset_id: UUID, rendered, lease: dict) -> None:
+        body = _DigestingBody(rendered.path)
+        try:
+            response = self.storage_client.put(lease["url"], headers=lease["headers"], content=body)
+        except (httpx.HTTPError, OSError) as exc:
+            raise DesktopApiError(
+                "derivative_upload_interrupted",
+                "A gallery derivative upload was interrupted.",
+                retryable=True,
+            ) from exc
+        if response.status_code != 412 and (
+            body.sha256.hexdigest() != rendered.sha256
+            or base64.b64encode(body.md5.digest()).decode() != rendered.content_md5
+        ):
+            raise DesktopApiError(
+                "derivative_cache_changed", "A cached gallery derivative changed before upload."
+            )
+        if response.status_code not in {200, 201, 204, 412}:
+            raise DesktopApiError(
+                "derivative_upload_http_error",
+                f"Object storage rejected a derivative with HTTP {response.status_code}.",
+                retryable=response.status_code in {408, 429} or response.status_code >= 500,
+            )
+        self._request(
+            "POST",
+            f"/api/v1/events/{event_id}/assets/{asset_id}/derivatives/"
+            f"{rendered.variant.value}/complete/",
+            json={},
+            idempotency_key=_operation_key(asset_id, f"complete-{rendered.variant.value}"),
+        )
+
+    def _policy_mark(self, event_id: UUID, policy: PreviewPolicyCache) -> bytes:
+        if not policy.enabled:
+            return b""
+        data = self._request("GET", f"/api/v1/events/{event_id}/preview-policy/mark/")
+        try:
+            response = self.storage_client.get(data["url"])
+        except httpx.HTTPError as exc:
+            raise DesktopApiError(
+                "watermark_download_interrupted",
+                "The confirmed watermark could not be downloaded.",
+                retryable=True,
+            ) from exc
+        if response.status_code != 200 or len(response.content) > 4 * 1024 * 1024:
+            raise DesktopApiError(
+                "watermark_download_failed",
+                "The confirmed watermark could not be downloaded.",
+                retryable=response.status_code in {408, 429} or response.status_code >= 500,
+            )
+        if (
+            hashlib.sha256(response.content).hexdigest() != policy.mark_sha256
+            or data["sha256"] != policy.mark_sha256
+        ):
+            raise DesktopApiError(
+                "watermark_checksum_mismatch",
+                "The confirmed watermark failed checksum validation.",
+            )
+        return response.content
+
+    def _item_derivative_checkpoints(self, item_id: UUID) -> dict[str, object]:
+        return {
+            variant.value: self.store.get_derivative_checkpoint(item_id, variant.value)
+            for variant in DerivativeVariant
+        }
+
+    def _report_derivative_failure(
+        self, event_id: UUID, item_id: UUID, code: str, *, attempt: int
+    ) -> None:
+        stable_code = code if re.fullmatch(r"[a-z0-9_]{1,64}", code) else "derivative_failed"
+        self._request(
+            "POST",
+            f"/api/v1/events/{event_id}/assets/{item_id}/derivative-failure/",
+            json={"code": stable_code[:64]},
+            idempotency_key=_operation_key(item_id, f"derivative-failure-{attempt}"),
+        )
+
+    def _derivative_backoff(self, checkpoints: dict[str, object]) -> None:
+        attempts = max(checkpoint.attempt_count for checkpoint in checkpoints.values())
+        maximum = min(16.0, 2.0 ** max(0, attempts - 1))
+        self._sleep(self._jitter(0.0, maximum))
+
+    def _report_derivative_progress(self, batch_id: UUID, on_stage) -> None:
+        if not on_stage:
+            return
+        checkpoints = self.store.list_derivative_checkpoints(batch_id)
+        complete = sum(
+            item.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+            for item in checkpoints
+        )
+        on_stage("derivatives", complete, len(checkpoints))
+
     def _manifest_items(self, batch_id: UUID) -> dict[UUID, object]:
         items = {
             item.id: item
@@ -352,17 +759,31 @@ class DesktopNetworkService:
         local = {item.item_id: item for item in self.store.list_upload_checkpoints(batch_id)}
         for item in response.get("assets", []):
             item_id = UUID(item["asset_id"])
+            variant = item.get("variant", "originals")
             if item_id not in local:
                 continue
-            if (
-                item["state"] == "verified"
-                and local[item_id].state is not LocalUploadState.VERIFIED
-            ):
-                self.store.mark_upload_verified(item_id)
-            elif item["state"] == "failed":
-                self.store.mark_upload_failed(item_id, item["failure_code"] or "server_rejected")
-            elif item["state"] == "excluded":
-                self.store.mark_upload_excluded(item_id)
+            if variant == "originals":
+                if (
+                    item["state"] == "verified"
+                    and local[item_id].state is not LocalUploadState.VERIFIED
+                ):
+                    self.store.mark_upload_verified(item_id)
+                elif item["state"] == "failed":
+                    self.store.mark_upload_failed(
+                        item_id, item["failure_code"] or "server_rejected"
+                    )
+                elif item["state"] == "excluded":
+                    self.store.mark_upload_excluded(item_id)
+                    self.store.mark_derivatives_excluded(item_id)
+            elif variant in {value.value for value in DerivativeVariant}:
+                if item.get("gallery_excluded"):
+                    self.store.mark_derivatives_excluded(item_id)
+                elif item["state"] == "verified":
+                    self.store.mark_derivative_verified(item_id, variant)
+                elif item["state"] == "failed":
+                    self.store.mark_derivative_failed(
+                        item_id, variant, item["failure_code"] or "server_rejected"
+                    )
 
     def _event_action(self, event_id: UUID, action: str) -> EventCache:
         response = self._request(
@@ -372,6 +793,13 @@ class DesktopNetworkService:
             idempotency_key=_operation_key(event_id, action),
         )
         return self._cache_events(self._require_session().server_url, [response])[0]
+
+    def _refresh_cached_event(self, event_id: UUID) -> EventCache:
+        response = self._request("GET", "/api/v1/events/")
+        matches = [value for value in response["events"] if UUID(value["id"]) == event_id]
+        if not matches:
+            raise DesktopApiError("event_not_found", "The event is no longer available.")
+        return self._cache_events(self._require_session().server_url, matches)[0]
 
     def _accept_tokens(self, origin: str, response: dict) -> None:
         session = _Session(
@@ -407,6 +835,7 @@ class DesktopNetworkService:
                     or device_label
                     or cached_labels.get(UUID(value["id"]), "")
                 ),
+                preview_policy=_preview_policy(value.get("preview_policy")),
             )
             for value in values
         ]
@@ -503,6 +932,56 @@ def _response_json(response: httpx.Response) -> dict:
             "invalid_server_response", "The OpenFotos server returned an invalid response."
         )
     return body
+
+
+def _preview_policy(value: object) -> PreviewPolicyCache | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise DesktopApiError(
+            "invalid_server_response", "The server returned an invalid preview policy."
+        )
+    try:
+        if not isinstance(value["enabled"], bool):
+            raise TypeError
+        policy = PreviewPolicyCache(
+            id=UUID(str(value["id"])),
+            enabled=value["enabled"],
+            template=WatermarkTemplate(str(value["template"])),
+            text=str(value["text"]),
+            logo_kind=WatermarkLogoKind(str(value["logo_kind"])),
+            renderer_id=str(value["renderer_id"]),
+            derivative_profile_id=str(value["derivative_profile_id"]),
+            mark_sha256=str(value["mark_sha256"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise DesktopApiError(
+            "invalid_server_response", "The server returned an invalid preview policy."
+        ) from exc
+    if (
+        policy.renderer_id != WATERMARK_RENDERER_ID
+        or policy.derivative_profile_id != DERIVATIVE_PROFILE_ID
+    ):
+        raise DesktopApiError(
+            "derivative_profile_mismatch",
+            "This desktop version cannot process the event's gallery profile.",
+        )
+    if policy.enabled and (
+        not re.fullmatch(r"[0-9a-f]{64}", policy.mark_sha256)
+        or (policy.logo_kind is WatermarkLogoKind.NONE and not policy.text)
+    ):
+        raise DesktopApiError(
+            "invalid_server_response", "The server returned an invalid preview policy."
+        )
+    return policy
+
+
+def _path_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _server_origin(value: str) -> str:

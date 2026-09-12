@@ -1,5 +1,18 @@
 """Contracts shared by the desktop, server, and vision code."""
 
+from .derivatives import (
+    DERIVATIVE_PROFILE_ID,
+    MAX_WATERMARK_TEXT_LENGTH,
+    WATERMARK_RENDERER_ID,
+    AssetDerivativesInput,
+    DerivativeObjectInput,
+    DerivativeVariant,
+    OriginalDownloadPolicy,
+    PreviewPolicyInput,
+    WatermarkLogoKind,
+    WatermarkTemplate,
+    normalized_watermark_text,
+)
 from .ingestion import ContractError, ContributionInput, OriginalAssetInput
 from .states import (
     AssetState,
@@ -15,7 +28,11 @@ from .states import (
 )
 
 __all__ = [
+    "AssetDerivativesInput",
     "AssetState",
+    "DERIVATIVE_PROFILE_ID",
+    "DerivativeObjectInput",
+    "DerivativeVariant",
     "ContributionState",
     "ContributionInput",
     "ContractError",
@@ -24,8 +41,15 @@ __all__ = [
     "EventState",
     "IngestionManifestState",
     "IntakeState",
+    "MAX_WATERMARK_TEXT_LENGTH",
     "OriginalAssetInput",
+    "OriginalDownloadPolicy",
+    "PreviewPolicyInput",
     "UploadObjectState",
+    "WATERMARK_RENDERER_ID",
+    "WatermarkLogoKind",
+    "WatermarkTemplate",
     "can_transition_asset",
     "can_transition_event",
+    "normalized_watermark_text",
 ]

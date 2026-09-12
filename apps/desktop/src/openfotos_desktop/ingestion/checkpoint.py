@@ -1,6 +1,7 @@
 """Durable, event-scoped SQLite checkpoints for desktop inventory."""
 
 import os
+import shutil
 import sqlite3
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
@@ -9,9 +10,12 @@ from pathlib import Path
 from threading import RLock
 from uuid import UUID, uuid4
 
+from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+
 from .models import (
     BatchState,
     ContributionBatch,
+    DerivativeCheckpoint,
     EventCache,
     FileSnapshot,
     InventoryItem,
@@ -45,6 +49,14 @@ CREATE TABLE IF NOT EXISTS events (
     intake_state TEXT NOT NULL DEFAULT 'open',
     intake_generation INTEGER NOT NULL DEFAULT 1 CHECK (intake_generation > 0),
     device_label TEXT NOT NULL DEFAULT '',
+    preview_policy_id TEXT,
+    preview_watermark_enabled INTEGER CHECK (preview_watermark_enabled IN (0, 1)),
+    preview_template TEXT,
+    preview_text TEXT NOT NULL DEFAULT '',
+    preview_logo_kind TEXT,
+    preview_renderer_id TEXT,
+    derivative_profile_id TEXT,
+    preview_mark_sha256 TEXT NOT NULL DEFAULT '',
     cached_at TEXT NOT NULL
 );
 
@@ -119,8 +131,19 @@ CREATE TABLE IF NOT EXISTS upload_checkpoints (
     completed_at TEXT,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS derivative_checkpoints (
+    item_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+    variant TEXT NOT NULL CHECK (variant IN ('previews', 'thumbnails')),
+    state TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error_code TEXT,
+    completed_at TEXT,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (item_id, variant)
+);
 """
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 
 
 def normalize_path(path: Path) -> str:
@@ -155,8 +178,12 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     self._connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
                 elif schema_version == 1:
                     self._migrate_version_1()
+                    self._migrate_version_3()
                 elif schema_version == 2:
                     self._migrate_version_2()
+                    self._migrate_version_3()
+                elif schema_version == 3:
+                    self._migrate_version_3()
         except Exception:
             self._connection.close()
             raise
@@ -195,6 +222,35 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             """
         )
 
+    def _migrate_version_3(self) -> None:
+        self._connection.executescript(
+            """
+            ALTER TABLE events ADD COLUMN preview_policy_id TEXT;
+            ALTER TABLE events ADD COLUMN preview_watermark_enabled INTEGER;
+            ALTER TABLE events ADD COLUMN preview_template TEXT;
+            ALTER TABLE events ADD COLUMN preview_text TEXT NOT NULL DEFAULT '';
+            ALTER TABLE events ADD COLUMN preview_logo_kind TEXT;
+            ALTER TABLE events ADD COLUMN preview_renderer_id TEXT;
+            ALTER TABLE events ADD COLUMN derivative_profile_id TEXT;
+            ALTER TABLE events ADD COLUMN preview_mark_sha256 TEXT NOT NULL DEFAULT '';
+            CREATE TABLE derivative_checkpoints (
+                item_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
+                variant TEXT NOT NULL CHECK (variant IN ('previews', 'thumbnails')),
+                state TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                last_error_code TEXT,
+                completed_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (item_id, variant)
+            );
+            INSERT INTO derivative_checkpoints(item_id, variant, state, updated_at)
+            SELECT item_id, 'previews', 'pending', updated_at FROM upload_checkpoints;
+            INSERT INTO derivative_checkpoints(item_id, variant, state, updated_at)
+            SELECT item_id, 'thumbnails', 'pending', updated_at FROM upload_checkpoints;
+            PRAGMA user_version = 4;
+            """
+        )
+
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
@@ -229,8 +285,11 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 INSERT INTO events(
                     id, name, storage_limit_bytes, processing_profile_id, server_url, role,
                     reserved_original_bytes, verified_original_bytes, intake_state,
-                    intake_generation, device_label, cached_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    intake_generation, device_label, preview_policy_id,
+                    preview_watermark_enabled, preview_template, preview_text,
+                    preview_logo_kind, preview_renderer_id, derivative_profile_id,
+                    preview_mark_sha256, cached_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     storage_limit_bytes = excluded.storage_limit_bytes,
@@ -245,6 +304,14 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                         WHEN excluded.device_label = '' THEN events.device_label
                         ELSE excluded.device_label
                     END,
+                    preview_policy_id = excluded.preview_policy_id,
+                    preview_watermark_enabled = excluded.preview_watermark_enabled,
+                    preview_template = excluded.preview_template,
+                    preview_text = excluded.preview_text,
+                    preview_logo_kind = excluded.preview_logo_kind,
+                    preview_renderer_id = excluded.preview_renderer_id,
+                    derivative_profile_id = excluded.derivative_profile_id,
+                    preview_mark_sha256 = excluded.preview_mark_sha256,
                     cached_at = excluded.cached_at
                 """,
                 (
@@ -259,6 +326,14 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     event.intake_state,
                     event.intake_generation,
                     event.device_label.strip(),
+                    str(event.preview_policy.id) if event.preview_policy else None,
+                    int(event.preview_policy.enabled) if event.preview_policy else None,
+                    event.preview_policy.template.value if event.preview_policy else None,
+                    event.preview_policy.text if event.preview_policy else "",
+                    event.preview_policy.logo_kind.value if event.preview_policy else None,
+                    event.preview_policy.renderer_id if event.preview_policy else None,
+                    event.preview_policy.derivative_profile_id if event.preview_policy else None,
+                    event.preview_policy.mark_sha256 if event.preview_policy else "",
                     _now(),
                 ),
             )
@@ -270,6 +345,29 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             ).fetchone()
         if row is None:
             raise KeyError(f"Unknown cached event {event_id}.")
+        return self._event_from_row(row)
+
+    def list_events(self) -> list[EventCache]:
+        with self._lock:
+            rows = self._connection.execute("SELECT * FROM events ORDER BY name, id").fetchall()
+        return [self._event_from_row(row) for row in rows]
+
+    @staticmethod
+    def _event_from_row(row: sqlite3.Row) -> EventCache:
+        from .models import PreviewPolicyCache
+
+        policy = None
+        if row["preview_policy_id"]:
+            policy = PreviewPolicyCache(
+                id=UUID(row["preview_policy_id"]),
+                enabled=bool(row["preview_watermark_enabled"]),
+                template=WatermarkTemplate(row["preview_template"]),
+                text=row["preview_text"],
+                logo_kind=WatermarkLogoKind(row["preview_logo_kind"]),
+                renderer_id=row["preview_renderer_id"],
+                derivative_profile_id=row["derivative_profile_id"],
+                mark_sha256=row["preview_mark_sha256"],
+            )
         return EventCache(
             id=UUID(row["id"]),
             name=row["name"],
@@ -282,33 +380,17 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             intake_state=row["intake_state"],
             intake_generation=row["intake_generation"],
             device_label=row["device_label"],
+            preview_policy=policy,
         )
 
-    def list_events(self) -> list[EventCache]:
-        with self._lock:
-            rows = self._connection.execute("SELECT * FROM events ORDER BY name, id").fetchall()
-        return [
-            EventCache(
-                id=UUID(row["id"]),
-                name=row["name"],
-                storage_limit_bytes=row["storage_limit_bytes"],
-                processing_profile_id=row["processing_profile_id"],
-                server_url=row["server_url"],
-                role=row["role"],
-                reserved_original_bytes=row["reserved_original_bytes"],
-                verified_original_bytes=row["verified_original_bytes"],
-                intake_state=row["intake_state"],
-                intake_generation=row["intake_generation"],
-                device_label=row["device_label"],
-            )
-            for row in rows
-        ]
-
     def delete_local_event(self, event_id: UUID) -> None:
+        batch_ids = [batch.id for batch in self.list_batches(event_id)]
         with self._lock, self._connection:
             cursor = self._connection.execute("DELETE FROM events WHERE id = ?", (str(event_id),))
         if cursor.rowcount == 0:
             raise KeyError(f"Unknown cached event {event_id}.")
+        for batch_id in batch_ids:
+            self.cleanup_derivative_cache(batch_id)
 
     def create_batch(self, event_id: UUID, *, label: str = "") -> UUID:
         self.get_event(event_id)
@@ -640,6 +722,24 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     InventoryStatus.ACCEPTED.value,
                 ),
             )
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO derivative_checkpoints(
+                    item_id, variant, state, attempt_count, updated_at
+                )
+                SELECT id, variants.variant, ?, 0, ? FROM inventory_items
+                CROSS JOIN (
+                    SELECT 'previews' AS variant UNION ALL SELECT 'thumbnails'
+                ) AS variants
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    LocalUploadState.PENDING.value,
+                    timestamp,
+                    str(batch_id),
+                    InventoryStatus.ACCEPTED.value,
+                ),
+            )
 
     def list_upload_checkpoints(self, batch_id: UUID) -> list[UploadCheckpoint]:
         with self._lock:
@@ -779,6 +879,143 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             )
         if cursor.rowcount == 0:
             raise KeyError(f"Unknown upload checkpoint {item_id}.")
+
+    def ensure_derivative_checkpoints(self, batch_id: UUID) -> None:
+        self.get_batch(batch_id)
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO derivative_checkpoints(
+                    item_id, variant, state, attempt_count, updated_at
+                )
+                SELECT id, variants.variant, ?, 0, ? FROM inventory_items
+                CROSS JOIN (
+                    SELECT 'previews' AS variant UNION ALL SELECT 'thumbnails'
+                ) AS variants
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    LocalUploadState.PENDING.value,
+                    _now(),
+                    str(batch_id),
+                    InventoryStatus.ACCEPTED.value,
+                ),
+            )
+
+    def list_derivative_checkpoints(self, batch_id: UUID) -> list[DerivativeCheckpoint]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT derivative_checkpoints.* FROM derivative_checkpoints
+                JOIN inventory_items ON inventory_items.id = derivative_checkpoints.item_id
+                WHERE inventory_items.batch_id = ?
+                ORDER BY inventory_items.normalized_path, derivative_checkpoints.variant
+                """,
+                (str(batch_id),),
+            ).fetchall()
+        return [self._derivative_from_row(row) for row in rows]
+
+    def get_derivative_checkpoint(self, item_id: UUID, variant: str) -> DerivativeCheckpoint:
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT * FROM derivative_checkpoints WHERE item_id = ? AND variant = ?
+                """,
+                (str(item_id), variant),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown derivative checkpoint {item_id}/{variant}.")
+        return self._derivative_from_row(row)
+
+    @staticmethod
+    def _derivative_from_row(row: sqlite3.Row) -> DerivativeCheckpoint:
+        return DerivativeCheckpoint(
+            item_id=UUID(row["item_id"]),
+            variant=row["variant"],
+            state=LocalUploadState(row["state"]),
+            attempt_count=row["attempt_count"],
+            last_error_code=row["last_error_code"],
+        )
+
+    def mark_derivative_started(self, item_id: UUID, variant: str) -> None:
+        self._update_derivative(
+            item_id,
+            variant,
+            state=LocalUploadState.UPLOADING,
+            increment_attempt=True,
+        )
+
+    def mark_derivative_failed(self, item_id: UUID, variant: str, error_code: str) -> None:
+        self._update_derivative(
+            item_id,
+            variant,
+            state=LocalUploadState.FAILED,
+            error_code=error_code,
+        )
+
+    def mark_derivative_verified(self, item_id: UUID, variant: str) -> None:
+        self._update_derivative(item_id, variant, state=LocalUploadState.VERIFIED)
+
+    def mark_derivatives_excluded(self, item_id: UUID) -> None:
+        for variant in ("previews", "thumbnails"):
+            self._update_derivative(item_id, variant, state=LocalUploadState.EXCLUDED)
+
+    def _update_derivative(
+        self,
+        item_id: UUID,
+        variant: str,
+        *,
+        state: LocalUploadState,
+        error_code: str | None = None,
+        increment_attempt: bool = False,
+    ) -> None:
+        if variant not in {"previews", "thumbnails"}:
+            raise ValueError("Derivative variants are previews or thumbnails.")
+        timestamp = _now()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE derivative_checkpoints
+                SET state = ?, attempt_count = attempt_count + ?, last_error_code = ?,
+                    completed_at = CASE WHEN ? IN (?, ?) THEN ? ELSE completed_at END,
+                    updated_at = ?
+                WHERE item_id = ? AND variant = ?
+                """,
+                (
+                    state.value,
+                    int(increment_attempt),
+                    error_code,
+                    state.value,
+                    LocalUploadState.VERIFIED.value,
+                    LocalUploadState.EXCLUDED.value,
+                    timestamp,
+                    timestamp,
+                    str(item_id),
+                    variant,
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown derivative checkpoint {item_id}/{variant}.")
+
+    def derivatives_complete(self, batch_id: UUID) -> bool:
+        checkpoints = self.list_derivative_checkpoints(batch_id)
+        return bool(checkpoints) and all(
+            checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+            for checkpoint in checkpoints
+        )
+
+    def derivative_cache_directory(self, batch_id: UUID) -> Path:
+        self.get_batch(batch_id)
+        destination = self.database_path.parent / "derivatives" / str(batch_id)
+        destination.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if os.name != "nt":
+            destination.chmod(0o700)
+        return destination
+
+    def cleanup_derivative_cache(self, batch_id: UUID) -> None:
+        destination = self.database_path.parent / "derivatives" / str(batch_id)
+        if destination.is_dir():
+            shutil.rmtree(destination)
 
     def touch_item(self, item_id: UUID, generation: int) -> None:
         with self._lock, self._connection:

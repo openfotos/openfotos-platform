@@ -31,7 +31,7 @@ a {
 }
 
 .page-shell {
-  width: min(100% - 2rem, 62rem);
+  width: min(100% - 2rem, 80rem);
   margin: 3rem auto;
 }
 
@@ -78,7 +78,8 @@ form label {
   font-weight: 650;
 }
 
-input {
+input,
+select {
   width: 100%;
   padding: 0.75rem;
   border: 1px solid #9db0b6;
@@ -96,6 +97,11 @@ button {
   font: inherit;
   font-weight: 700;
   cursor: pointer;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .button-secondary {
@@ -135,6 +141,125 @@ button {
   color: #526670;
 }
 
+.messages {
+  margin-bottom: 1rem;
+}
+
+.message {
+  padding: 0.8rem 1rem;
+  border-radius: 0.6rem;
+  background: #e9f2f3;
+}
+
+.message.error {
+  color: #7d171b;
+  background: #fdebec;
+}
+
+.gallery-heading,
+.photo-toolbar,
+.photo-navigation,
+.publication-card,
+.failure-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.compact-card {
+  margin-bottom: 1rem;
+  padding: 1.25rem;
+}
+
+.status-pill {
+  padding: 0.45rem 0.7rem;
+  border-radius: 999px;
+  color: #75510a;
+  background: #fff2cf;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.status-pill.ready {
+  color: #12613c;
+  background: #dff5e9;
+}
+
+.gallery-grid {
+  columns: 4 15rem;
+  column-gap: 0.8rem;
+}
+
+.gallery-tile {
+  display: block;
+  margin-bottom: 0.8rem;
+  overflow: hidden;
+  border-radius: 0.7rem;
+  background: #dfe8ea;
+  break-inside: avoid;
+}
+
+.gallery-tile img {
+  display: block;
+  width: 100%;
+  height: auto;
+  transition: transform 160ms ease;
+}
+
+.gallery-tile:hover img,
+.gallery-tile:focus img {
+  transform: scale(1.015);
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+.photo-stage {
+  display: grid;
+  min-height: 50vh;
+  margin: 1rem 0;
+  padding: 1rem;
+  place-items: center;
+  border-radius: 1rem;
+  background: #101820;
+}
+
+.photo-stage img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  max-height: 78vh;
+}
+
+.failure-row {
+  padding: 0.8rem 0;
+  border-top: 1px solid #d9e2e5;
+}
+
+.failure-row input {
+  max-width: 24rem;
+}
+
+.failure-row button,
+.publication-card button {
+  margin-top: 0;
+}
+
 .event-details {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
@@ -162,6 +287,13 @@ button {
   .page-heading,
   .event-row {
     align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .gallery-heading,
+  .publication-card,
+  .failure-row {
+    align-items: stretch;
     flex-direction: column;
   }
 }

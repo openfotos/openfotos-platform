@@ -155,7 +155,10 @@ def reserve_contribution(
                 variant=AssetVariant.ORIGINAL.value,
                 object_key=asset_key(locked_event.id, asset.id, AssetVariant.ORIGINAL),
                 expected_bytes=item.size_bytes,
+                sha256=item.sha256,
                 content_md5=item.content_md5,
+                width=item.width,
+                height=item.height,
             )
             for asset, item in zip(assets, contribution.assets, strict=True)
         ]
@@ -619,6 +622,8 @@ def finalize_ingestion(
     object_store: S3ObjectStore,
     request=None,
 ) -> IngestionManifest:
+    from .derivative_services import refresh_derivative_readiness
+
     event = _lead_event(session, event_id)
     with transaction.atomic():
         locked_event = Event.objects.select_for_update().get(pk=event.pk)
@@ -627,6 +632,7 @@ def finalize_ingestion(
         if locked_event.state == EventState.PROCESSING.value:
             current = locked_event.current_ingestion_manifest
             if current and current.generation == locked_event.intake_generation:
+                transaction.on_commit(lambda: refresh_derivative_readiness(locked_event.id))
                 return current
         if locked_event.state != EventState.UPLOADING.value:
             raise IngestionError("event_not_uploading", "The event cannot be finalized now.")
@@ -732,6 +738,7 @@ def finalize_ingestion(
             "excluded_asset_count": locked_manifest.excluded_asset_count,
         },
     )
+    refresh_derivative_readiness(event.id)
     return locked_manifest
 
 
@@ -846,7 +853,7 @@ def _object_mismatch(upload: AssetObject, head) -> str:
         return "asset_size_mismatch"
     if head.content_type.lower().partition(";")[0] != "image/jpeg":
         return "asset_content_type_mismatch"
-    if head.metadata.get("openfotos-sha256") != upload.asset.sha256:
+    if head.metadata.get("openfotos-sha256") != upload.sha256:
         return "asset_checksum_mismatch"
     if head.etag.lower() != expected_etag:
         return "asset_checksum_mismatch"

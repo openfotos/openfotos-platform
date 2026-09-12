@@ -17,6 +17,7 @@ from openfotos_server.events.models import (
     IngestionManifest,
     Photographer,
     PhotographerMembership,
+    PreviewPolicy,
 )
 from openfotos_server.events.services import change_event_pin, transition_event
 
@@ -101,6 +102,7 @@ def test_event_transitions_are_legal_idempotent_and_audited() -> None:
         transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
     event.derivatives_ready_generation = event.intake_generation
     event.save(update_fields=("derivatives_ready_generation",))
+    PreviewPolicy.objects.create(event=event, enabled=False, confirmed_by=actor)
 
     event = transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
 
