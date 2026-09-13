@@ -37,3 +37,6 @@ deployment/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# lfw_dataset
+lfw_dataset

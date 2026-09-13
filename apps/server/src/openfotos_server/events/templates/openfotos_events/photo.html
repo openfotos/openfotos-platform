@@ -5,9 +5,17 @@
 {% block content %}
 <div class="photo-toolbar">
   {% if dashboard_mode %}
-    <a href="{% url 'events:photographer-event' event_id=event.id %}">← Gallery review</a>
+    {% if selected_sub_event %}
+      <a href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>
+    {% else %}
+      <a href="{% url 'events:photographer-event' event_id=event.id %}">← Gallery review</a>
+    {% endif %}
   {% else %}
-    <a href="{% url 'events:event-access' token=event.public_token %}">← Gallery</a>
+    {% if selected_sub_event %}
+      <a href="{% url 'events:visitor-sub-event' token=event.public_token sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>
+    {% else %}
+      <a href="{% url 'events:event-access' token=event.public_token %}">← Gallery</a>
+    {% endif %}
   {% endif %}
   <span>Photo {{ image.asset.gallery_position }}</span>
 </div>
@@ -17,16 +25,16 @@
 <nav class="photo-navigation" aria-label="Photo navigation">
   {% if previous_asset %}
     {% if dashboard_mode %}
-      <a href="{% url 'events:photographer-photo' event_id=event.id asset_id=previous_asset.id %}">Previous photo</a>
+      {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url 'events:photographer-photo' event_id=event.id asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
     {% else %}
-      <a href="{% url 'events:visitor-photo' token=event.public_token asset_id=previous_asset.id %}">Previous photo</a>
+      {% if selected_sub_event %}<a href="{% url 'events:visitor-sub-event-photo' token=event.public_token sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url 'events:visitor-photo' token=event.public_token asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
     {% endif %}
   {% else %}<span></span>{% endif %}
   {% if next_asset %}
     {% if dashboard_mode %}
-      <a href="{% url 'events:photographer-photo' event_id=event.id asset_id=next_asset.id %}">Next photo</a>
+      {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url 'events:photographer-photo' event_id=event.id asset_id=next_asset.id %}">Next photo</a>{% endif %}
     {% else %}
-      <a href="{% url 'events:visitor-photo' token=event.public_token asset_id=next_asset.id %}">Next photo</a>
+      {% if selected_sub_event %}<a href="{% url 'events:visitor-sub-event-photo' token=event.public_token sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url 'events:visitor-photo' token=event.public_token asset_id=next_asset.id %}">Next photo</a>{% endif %}
     {% endif %}
   {% endif %}
 </nav>

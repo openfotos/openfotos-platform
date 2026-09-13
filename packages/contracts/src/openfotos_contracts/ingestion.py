@@ -113,6 +113,7 @@ class OriginalAssetInput:
 @dataclass(frozen=True)
 class ContributionInput:
     batch_id: UUID
+    sub_event_id: UUID
     label: str
     processing_profile_id: str
     device_label: str
@@ -122,7 +123,14 @@ class ContributionInput:
     def from_dict(cls, raw: object) -> "ContributionInput":
         value = _strict_fields(
             raw,
-            {"batch_id", "label", "processing_profile_id", "device_label", "assets"},
+            {
+                "batch_id",
+                "sub_event_id",
+                "label",
+                "processing_profile_id",
+                "device_label",
+                "assets",
+            },
             context="Contribution",
         )
         assets_value = value["assets"]
@@ -153,6 +161,7 @@ class ContributionInput:
             raise ContractError("invalid_request", "A processing profile is required.")
         return cls(
             batch_id=_uuid(value["batch_id"], field="batch_id"),
+            sub_event_id=_uuid(value["sub_event_id"], field="sub_event_id"),
             label=label,
             processing_profile_id=processing_profile_id,
             device_label=device_label,
@@ -167,6 +176,7 @@ class ContributionInput:
         return {
             "format": "openfotos-contribution-v1",
             "batch_id": str(self.batch_id),
+            "sub_event_id": str(self.sub_event_id),
             "label": self.label,
             "processing_profile_id": self.processing_profile_id,
             "assets": [

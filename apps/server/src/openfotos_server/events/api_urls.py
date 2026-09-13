@@ -7,14 +7,7 @@ app_name = "desktop-api"
 urlpatterns = [
     path("auth/login/", api.login, name="login"),
     path("auth/refresh/", api.refresh, name="refresh"),
-    path("uploader-invitations/redeem/", api.redeem, name="redeem"),
     path("events/", api.events, name="events"),
-    path("events/<uuid:event_id>/invitations/", api.invitations, name="invitations"),
-    path(
-        "events/<uuid:event_id>/invitations/<uuid:invitation_id>/revoke/",
-        api.revoke_invitation_view,
-        name="revoke-invitation",
-    ),
     path("events/<uuid:event_id>/batches/", api.reserve_batch, name="reserve-batch"),
     path(
         "events/<uuid:event_id>/preview-policy/confirm/",
@@ -80,8 +73,8 @@ urlpatterns = [
     path("events/<uuid:event_id>/intake/reopen/", api.intake_action, {"action": "reopen"}),
     path("events/<uuid:event_id>/finalize/", api.finalize, name="finalize"),
     path(
-        "events/<uuid:event_id>/devices/<uuid:device_id>/revoke/",
-        api.revoke_device_view,
-        name="revoke-device",
+        "events/<uuid:event_id>/installations/<uuid:installation_id>/revoke/",
+        api.revoke_installation_view,
+        name="revoke-installation",
     ),
 ]

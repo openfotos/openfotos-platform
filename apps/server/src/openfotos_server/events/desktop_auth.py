@@ -1,4 +1,4 @@
-"""Opaque desktop sessions and event-scoped uploader enrollment."""
+"""Opaque desktop sessions for authenticated photographer installations."""
 
 import hashlib
 import secrets
@@ -11,7 +11,7 @@ from django.contrib.auth import authenticate
 from django.db import transaction
 from django.utils import timezone
 
-from openfotos_contracts import DeviceRole, DeviceStatus, IntakeState
+from openfotos_contracts import InstallationStatus
 
 from .audit import record_audit
 from .models import (
@@ -19,10 +19,9 @@ from .models import (
     AuditResult,
     DesktopSession,
     Event,
+    EventInstallation,
     Photographer,
     PhotographerMembership,
-    UploaderDevice,
-    UploaderInvitation,
 )
 
 
@@ -37,12 +36,6 @@ class SessionTokens:
     session: DesktopSession
     access_token: str
     refresh_token: str
-
-
-@dataclass(frozen=True)
-class IssuedInvitation:
-    invitation: UploaderInvitation
-    token: str
 
 
 def token_digest(token: str) -> str:
@@ -65,7 +58,7 @@ def _active_membership(photographer: Photographer, user) -> bool:
     )
 
 
-def authenticate_lead(
+def authenticate_photographer(
     *,
     photographer: Photographer,
     username: str,
@@ -100,27 +93,20 @@ def authenticate_lead(
 
 @transaction.atomic
 def _issue_session(
-    *,
-    photographer: Photographer,
-    installation_id: UUID,
-    user=None,
-    device: UploaderDevice | None = None,
+    *, photographer: Photographer, installation_id: UUID, user
 ) -> SessionTokens:
     now = timezone.now()
     access_token = _new_token("access")
     refresh_token = _new_token("refresh")
-    existing = DesktopSession.objects.filter(
+    DesktopSession.objects.filter(
         photographer=photographer,
         installation_id=installation_id,
         user=user,
-        device=device,
         revoked_at__isnull=True,
-    )
-    existing.update(revoked_at=now)
+    ).update(revoked_at=now)
     session = DesktopSession.objects.create(
         photographer=photographer,
         user=user,
-        device=device,
         installation_id=installation_id,
         access_token_hash=token_digest(access_token),
         access_expires_at=now + timedelta(seconds=settings.DESKTOP_ACCESS_TTL_SECONDS),
@@ -133,9 +119,7 @@ def _issue_session(
 def authenticate_access_token(token: str) -> DesktopSession:
     now = timezone.now()
     try:
-        session = DesktopSession.objects.select_related(
-            "photographer", "user", "device", "device__event"
-        ).get(
+        session = DesktopSession.objects.select_related("photographer", "user").get(
             access_token_hash=token_digest(token),
             access_expires_at__gt=now,
             revoked_at__isnull=True,
@@ -144,7 +128,7 @@ def authenticate_access_token(token: str) -> DesktopSession:
         raise DesktopAuthError(
             "invalid_access_token", "The desktop session is unavailable."
         ) from exc
-    _validate_session_actor(session, now=now)
+    _validate_session_actor(session)
     return session
 
 
@@ -155,47 +139,25 @@ def refresh_session(refresh_token: str, *, request=None) -> SessionTokens:
         try:
             session = (
                 DesktopSession.objects.select_for_update(of=("self",))
-                .select_related("photographer", "user", "device", "device__event")
+                .select_related("photographer", "user")
                 .get(refresh_token_hash=digest)
             )
         except DesktopSession.DoesNotExist:
-            reused = (
-                DesktopSession.objects.select_for_update(of=("self",))
-                .filter(
-                    previous_refresh_token_hash=digest,
-                    revoked_at__isnull=True,
-                )
-                .first()
-            )
-            grace = timedelta(seconds=settings.DESKTOP_REFRESH_RETRY_GRACE_SECONDS)
-            if (
-                reused is not None
-                and reused.refresh_expires_at > now
-                and now - reused.updated_at <= grace
-            ):
-                session = reused
-            elif reused is not None:
-                reused.revoked_at = now
-                reused.save(update_fields=("revoked_at", "updated_at"))
-                session = None
-            else:
-                session = None
+            session = _session_for_previous_refresh(digest, now=now)
         if session is not None:
             if session.revoked_at is not None or session.refresh_expires_at <= now:
                 session = None
             else:
-                _validate_session_actor(session, now=now)
+                _validate_session_actor(session)
                 access_token, new_refresh_token = _rotate_session_tokens(session, now=now)
     if session is None:
         raise DesktopAuthError("invalid_refresh_token", "The desktop session must sign in again.")
     record_audit(
         photographer=session.photographer,
         actor=session.user,
-        uploader_device=session.device,
         action=AuditAction.DESKTOP_TOKEN_REFRESH,
         result=AuditResult.SUCCEEDED,
         request=request,
-        event=session.device.event if session.device else None,
         metadata={"session_id": str(session.id)},
     )
     return SessionTokens(
@@ -203,6 +165,22 @@ def refresh_session(refresh_token: str, *, request=None) -> SessionTokens:
         access_token=access_token,
         refresh_token=new_refresh_token,
     )
+
+
+def _session_for_previous_refresh(digest: str, *, now) -> DesktopSession | None:
+    reused = (
+        DesktopSession.objects.select_for_update(of=("self",))
+        .select_related("photographer", "user")
+        .filter(previous_refresh_token_hash=digest, revoked_at__isnull=True)
+        .first()
+    )
+    grace = timedelta(seconds=settings.DESKTOP_REFRESH_RETRY_GRACE_SECONDS)
+    if reused is not None and reused.refresh_expires_at > now and now - reused.updated_at <= grace:
+        return reused
+    if reused is not None:
+        reused.revoked_at = now
+        reused.save(update_fields=("revoked_at", "updated_at"))
+    return None
 
 
 def _rotate_session_tokens(session: DesktopSession, *, now) -> tuple[str, str]:
@@ -224,147 +202,59 @@ def _rotate_session_tokens(session: DesktopSession, *, now) -> tuple[str, str]:
     return access_token, refresh_token
 
 
-def _validate_session_actor(session: DesktopSession, *, now) -> None:
-    if session.user_id is not None:
-        if not _active_membership(session.photographer, session.user):
-            raise DesktopAuthError("invalid_access_token", "The desktop session is unavailable.")
-        return
-    device = session.device
-    if (
-        device is None
-        or device.status != DeviceStatus.ACTIVE.value
-        or device.event.photographer_id != session.photographer_id
-        or (device.event.expires_at is not None and device.event.expires_at <= now)
-    ):
+def _validate_session_actor(session: DesktopSession) -> None:
+    if not _active_membership(session.photographer, session.user):
         raise DesktopAuthError("invalid_access_token", "The desktop session is unavailable.")
 
 
 @transaction.atomic
-def register_lead_device(*, session: DesktopSession, event: Event, label: str) -> UploaderDevice:
-    if session.user_id is None or not _active_membership(event.photographer, session.user):
+def register_event_installation(
+    *, session: DesktopSession, event: Event, label: str, request=None
+) -> EventInstallation:
+    if not _active_membership(event.photographer, session.user):
         raise DesktopAuthError("event_not_found", "The event is unavailable.")
     if session.photographer_id != event.photographer_id:
         raise DesktopAuthError("event_not_found", "The event is unavailable.")
     locked_event = Event.objects.select_for_update().get(pk=event.pk)
-    existing = UploaderDevice.objects.filter(
+    existing = EventInstallation.objects.filter(
         event=locked_event,
         installation_id=session.installation_id,
     ).first()
     if existing is not None:
-        if existing.status != DeviceStatus.ACTIVE.value:
-            raise DesktopAuthError("device_revoked", "This workstation was revoked for the event.")
+        if (
+            existing.status != InstallationStatus.ACTIVE.value
+            or existing.user_id != session.user_id
+        ):
+            raise DesktopAuthError(
+                "installation_revoked", "This workstation is unavailable for the event."
+            )
         return existing
-    _require_available_device_slot(locked_event)
-    return UploaderDevice.objects.create(
+    active_count = EventInstallation.objects.filter(
         event=locked_event,
+        status=InstallationStatus.ACTIVE.value,
+    ).count()
+    if active_count >= locked_event.max_contribution_devices:
+        raise DesktopAuthError(
+            "event_device_limit",
+            "This event already has the maximum number of active photographer workstations.",
+        )
+    installation = EventInstallation.objects.create(
+        event=locked_event,
+        user=session.user,
         installation_id=session.installation_id,
         label=_validated_label(label),
-        role=DeviceRole.LEAD.value,
-    )
-
-
-@transaction.atomic
-def create_invitation(
-    *,
-    session: DesktopSession,
-    event: Event,
-    request=None,
-) -> IssuedInvitation:
-    if session.user_id is None or not _active_membership(event.photographer, session.user):
-        raise DesktopAuthError("event_not_found", "The event is unavailable.")
-    locked_event = Event.objects.select_for_update().get(pk=event.pk)
-    if (
-        locked_event.photographer_id != session.photographer_id
-        or locked_event.intake_state != IntakeState.OPEN.value
-    ):
-        raise DesktopAuthError("intake_closed", "Uploader enrollment is closed for this event.")
-    token = _new_token("invite")
-    invitation = UploaderInvitation.objects.create(
-        event=locked_event,
-        token_hash=token_digest(token),
-        created_by=session.user,
-        expires_at=timezone.now() + timedelta(seconds=settings.UPLOADER_INVITATION_TTL_SECONDS),
-        max_redemptions=locked_event.max_contribution_devices,
     )
     record_audit(
         photographer=locked_event.photographer,
         event=locked_event,
         actor=session.user,
-        action=AuditAction.UPLOADER_INVITATION_CREATED,
+        event_installation=installation,
+        action=AuditAction.EVENT_INSTALLATION_REGISTERED,
         result=AuditResult.SUCCEEDED,
         request=request,
-        metadata={"invitation_id": str(invitation.id)},
+        metadata={"installation_id": str(installation.id)},
     )
-    return IssuedInvitation(invitation=invitation, token=token)
-
-
-@transaction.atomic
-def redeem_invitation(
-    *,
-    photographer: Photographer,
-    token: str,
-    installation_id: UUID,
-    label: str,
-    request=None,
-) -> tuple[Event, SessionTokens]:
-    now = timezone.now()
-    try:
-        invitation = (
-            UploaderInvitation.objects.select_for_update()
-            .select_related("event", "event__photographer")
-            .get(token_hash=token_digest(token), event__photographer=photographer)
-        )
-    except UploaderInvitation.DoesNotExist as exc:
-        raise DesktopAuthError(
-            "invalid_invitation", "The uploader invitation is unavailable."
-        ) from exc
-    event = Event.objects.select_for_update().get(pk=invitation.event_id)
-    if (
-        invitation.revoked_at is not None
-        or invitation.closed_at is not None
-        or invitation.expires_at <= now
-        or invitation.redemption_count >= invitation.max_redemptions
-        or event.intake_state != IntakeState.OPEN.value
-    ):
-        raise DesktopAuthError("invalid_invitation", "The uploader invitation is unavailable.")
-    existing = UploaderDevice.objects.filter(
-        event=event,
-        installation_id=installation_id,
-    ).first()
-    if existing is not None and existing.status == DeviceStatus.ACTIVE.value:
-        tokens = _issue_session(
-            photographer=photographer,
-            installation_id=installation_id,
-            device=existing,
-        )
-        return event, tokens
-    if existing is not None:
-        raise DesktopAuthError("device_revoked", "This workstation was revoked for the event.")
-    _require_available_device_slot(event)
-    device = UploaderDevice.objects.create(
-        event=event,
-        installation_id=installation_id,
-        label=_validated_label(label),
-        role=DeviceRole.UPLOADER.value,
-        invitation=invitation,
-    )
-    invitation.redemption_count += 1
-    invitation.save(update_fields=("redemption_count",))
-    tokens = _issue_session(
-        photographer=photographer,
-        installation_id=installation_id,
-        device=device,
-    )
-    record_audit(
-        photographer=photographer,
-        event=event,
-        uploader_device=device,
-        action=AuditAction.UPLOADER_INVITATION_REDEEMED,
-        result=AuditResult.SUCCEEDED,
-        request=request,
-        metadata={"invitation_id": str(invitation.id), "device_id": str(device.id)},
-    )
-    return event, tokens
+    return installation
 
 
 def _validated_label(label: str) -> str:
@@ -372,18 +262,6 @@ def _validated_label(label: str) -> str:
     if not value or len(value) > 100 or any(ord(character) < 32 for character in value):
         raise DesktopAuthError(
             "invalid_device_label",
-            "Use a device label containing 1 to 100 visible characters.",
+            "Use a workstation label containing 1 to 100 visible characters.",
         )
     return value
-
-
-def _require_available_device_slot(event: Event) -> None:
-    active_count = UploaderDevice.objects.filter(
-        event=event,
-        status=DeviceStatus.ACTIVE.value,
-    ).count()
-    if active_count >= event.max_contribution_devices:
-        raise DesktopAuthError(
-            "event_device_limit",
-            "This event already has the maximum number of active contribution devices.",
-        )

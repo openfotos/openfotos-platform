@@ -9,20 +9,20 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from openfotos_contracts import EventState, OriginalDownloadPolicy
+from openfotos_contracts import EventState
 
 from .audit import record_audit
 from .cookies import delete_visitor_cookie, has_valid_visitor_cookie, set_visitor_cookie
 from .forms import (
-    DownloadPolicyForm,
+    BatchReassignmentForm,
     EventPinForm,
     GalleryExclusionForm,
     PhotographerLoginForm,
+    SubEventForm,
 )
 from .gallery_services import (
     GALLERY_PAGE_SIZE,
     available_gallery_assets,
-    change_download_policy,
     exclude_from_gallery,
     gallery_page,
     gallery_photo,
@@ -33,14 +33,22 @@ from .models import (
     Asset,
     AuditAction,
     AuditResult,
+    ContributionBatch,
     Event,
     PhotographerMembership,
     PreviewPolicy,
     RateLimitPurpose,
+    SubEvent,
 )
 from .object_store import configured_object_store
 from .rate_limits import clear_failures, rate_limit_status, register_failure
 from .services import transition_event
+from .sub_event_services import (
+    create_sub_event,
+    reassign_contribution,
+    set_sub_event_archived,
+    update_sub_event,
+)
 
 GENERIC_LOGIN_ERROR = "We could not sign you in with those details."
 GENERIC_PIN_ERROR = "We could not unlock this event. Check the PIN and try again."
@@ -193,8 +201,22 @@ def _photographer_event(request: HttpRequest, event_id) -> Event:
         raise Http404 from exc
 
 
-def _gallery_listing(event: Event, request: HttpRequest) -> tuple[object, list]:
-    query = available_gallery_assets(event)
+def _sub_event(event: Event, sub_event_id, *, include_archived: bool = False) -> SubEvent | None:
+    if sub_event_id is None:
+        return None
+    query = event.sub_events.all()
+    if not include_archived:
+        query = query.filter(is_archived=False)
+    try:
+        return query.get(pk=sub_event_id)
+    except SubEvent.DoesNotExist as exc:
+        raise Http404 from exc
+
+
+def _gallery_listing(
+    event: Event, request: HttpRequest, *, sub_event: SubEvent | None = None
+) -> tuple[object, list]:
+    query = available_gallery_assets(event, sub_event=sub_event)
     if not query.exists():
         return Paginator(query, GALLERY_PAGE_SIZE).get_page(request.GET.get("page")), []
     try:
@@ -202,6 +224,7 @@ def _gallery_listing(event: Event, request: HttpRequest) -> tuple[object, list]:
             event=event,
             page_number=request.GET.get("page"),
             object_store=configured_object_store(),
+            sub_event=sub_event,
         )
     except (ImproperlyConfigured, IngestionError):
         messages.error(request, "Gallery media is temporarily unavailable. Please try again.")
@@ -209,15 +232,16 @@ def _gallery_listing(event: Event, request: HttpRequest) -> tuple[object, list]:
 
 
 @require_GET
-def photographer_event(request: HttpRequest, event_id) -> HttpResponse:
+def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> HttpResponse:
     event = _photographer_event(request, event_id)
-    page, images = _gallery_listing(event, request)
+    selected_sub_event = _sub_event(event, sub_event_id)
+    page, images = _gallery_listing(event, request, sub_event=selected_sub_event)
     excluded_assets = Asset.objects.filter(
-        batch__device__event=event,
+        batch__installation__event=event,
         gallery_excluded_at__isnull=False,
     ).order_by("original_filename", "id")
     failed_assets = Asset.objects.filter(
-        batch__device__event=event,
+        batch__installation__event=event,
         derivative_failure_code__gt="",
         gallery_excluded_at__isnull=True,
     ).order_by("original_filename", "id")
@@ -231,26 +255,104 @@ def photographer_event(request: HttpRequest, event_id) -> HttpResponse:
             "images": images,
             "excluded_assets": excluded_assets,
             "failed_assets": failed_assets,
-            "download_form": DownloadPolicyForm(initial={"policy": event.original_download_policy}),
+            "sub_events": event.sub_events.all(),
+            "active_sub_events": event.sub_events.filter(is_archived=False),
+            "selected_sub_event": selected_sub_event,
+            "sub_event_form": SubEventForm(
+                initial={"position": event.sub_events.count() + 1}
+            ),
+            "batches": ContributionBatch.objects.filter(
+                installation__event=event
+            ).select_related("sub_event", "installation"),
             "ready": event.derivatives_ready_generation == event.intake_generation,
         },
     )
 
 
 @require_POST
-def update_download_policy(request: HttpRequest, event_id) -> HttpResponse:
+def create_event_sub_event(request: HttpRequest, event_id) -> HttpResponse:
     event = _photographer_event(request, event_id)
-    form = DownloadPolicyForm(request.POST)
-    if not form.is_valid():
-        messages.error(request, "Choose a supported original-download policy.")
-    else:
-        change_download_policy(
+    form = SubEventForm(request.POST)
+    try:
+        if not form.is_valid():
+            raise IngestionError(
+                "invalid_sub_event", "Enter a name and a positive display position."
+            )
+        create_sub_event(
             event=event,
+            name=form.cleaned_data["name"],
+            position=form.cleaned_data["position"],
             actor=request.user,
-            policy=OriginalDownloadPolicy(form.cleaned_data["policy"]),
             request=request,
         )
-        messages.success(request, "Original-download policy updated.")
+    except IngestionError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "Sub-event created.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def update_event_sub_event(request: HttpRequest, event_id, sub_event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    sub_event = _sub_event(event, sub_event_id, include_archived=True)
+    form = SubEventForm(request.POST)
+    try:
+        if not form.is_valid():
+            raise IngestionError(
+                "invalid_sub_event", "Enter a name and a positive display position."
+            )
+        update_sub_event(
+            sub_event=sub_event,
+            name=form.cleaned_data["name"],
+            position=form.cleaned_data["position"],
+            actor=request.user,
+            request=request,
+        )
+    except IngestionError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "Sub-event updated.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def archive_event_sub_event(request: HttpRequest, event_id, sub_event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    sub_event = _sub_event(event, sub_event_id, include_archived=True)
+    archived = request.POST.get("action") == "archive"
+    try:
+        set_sub_event_archived(
+            sub_event=sub_event,
+            archived=archived,
+            actor=request.user,
+            request=request,
+        )
+    except IngestionError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "Sub-event archived." if archived else "Sub-event restored.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def reassign_event_batch(request: HttpRequest, event_id, batch_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    form = BatchReassignmentForm(request.POST)
+    try:
+        if not form.is_valid():
+            raise IngestionError("sub_event_not_found", "Select an active sub-event.")
+        reassign_contribution(
+            event=event,
+            batch_id=batch_id,
+            sub_event_id=form.cleaned_data["sub_event_id"],
+            actor=request.user,
+            request=request,
+        )
+    except IngestionError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "Contribution moved to the selected sub-event.")
     return redirect("events:photographer-event", event_id=event.id)
 
 
@@ -330,13 +432,17 @@ def restore_gallery_asset(request: HttpRequest, event_id, asset_id) -> HttpRespo
 
 
 @require_GET
-def photographer_photo(request: HttpRequest, event_id, asset_id) -> HttpResponse:
+def photographer_photo(
+    request: HttpRequest, event_id, asset_id, sub_event_id=None
+) -> HttpResponse:
     event = _photographer_event(request, event_id)
+    selected_sub_event = _sub_event(event, sub_event_id)
     try:
         image, previous_asset, next_asset = gallery_photo(
             event=event,
             asset_id=asset_id,
             object_store=configured_object_store(),
+            sub_event=selected_sub_event,
         )
     except IngestionError as exc:
         if exc.code == "asset_not_found":
@@ -357,6 +463,7 @@ def photographer_photo(request: HttpRequest, event_id, asset_id) -> HttpResponse
             "previous_asset": previous_asset,
             "next_asset": next_asset,
             "dashboard_mode": True,
+            "selected_sub_event": selected_sub_event,
         },
     )
 
@@ -394,14 +501,21 @@ def _available_event(request: HttpRequest, token: str) -> Event:
 
 
 @require_http_methods(["GET", "POST"])
-def event_access(request: HttpRequest, token: str) -> HttpResponse:
+def event_access(request: HttpRequest, token: str, sub_event_id=None) -> HttpResponse:
     event = _available_event(request, token)
+    selected_sub_event = _sub_event(event, sub_event_id)
     if request.method == "GET" and has_valid_visitor_cookie(request, event):
-        page, images = _gallery_listing(event, request)
+        page, images = _gallery_listing(event, request, sub_event=selected_sub_event)
         return _private_render(
             request,
             "openfotos_events/event.html",
-            {"event": event, "page": page, "images": images},
+            {
+                "event": event,
+                "page": page,
+                "images": images,
+                "sub_events": event.sub_events.filter(is_archived=False),
+                "selected_sub_event": selected_sub_event,
+            },
         )
 
     form = EventPinForm(request.POST or None)
@@ -446,7 +560,14 @@ def event_access(request: HttpRequest, token: str) -> HttpResponse:
             result=AuditResult.SUCCEEDED,
             request=request,
         )
-        response = redirect("events:event-access", token=event.public_token)
+        if selected_sub_event is None:
+            response = redirect("events:event-access", token=event.public_token)
+        else:
+            response = redirect(
+                "events:visitor-sub-event",
+                token=event.public_token,
+                sub_event_id=selected_sub_event.id,
+            )
         set_visitor_cookie(response, event)
         return response
 
@@ -475,8 +596,11 @@ def event_access(request: HttpRequest, token: str) -> HttpResponse:
 
 
 @require_GET
-def visitor_photo(request: HttpRequest, token: str, asset_id) -> HttpResponse:
+def visitor_photo(
+    request: HttpRequest, token: str, asset_id, sub_event_id=None
+) -> HttpResponse:
     event = _available_event(request, token)
+    selected_sub_event = _sub_event(event, sub_event_id)
     if not has_valid_visitor_cookie(request, event):
         raise Http404
     try:
@@ -484,6 +608,7 @@ def visitor_photo(request: HttpRequest, token: str, asset_id) -> HttpResponse:
             event=event,
             asset_id=asset_id,
             object_store=configured_object_store(),
+            sub_event=selected_sub_event,
         )
     except IngestionError as exc:
         if exc.code == "asset_not_found":
@@ -504,5 +629,6 @@ def visitor_photo(request: HttpRequest, token: str, asset_id) -> HttpResponse:
             "previous_asset": previous_asset,
             "next_asset": next_asset,
             "dashboard_mode": False,
+            "selected_sub_event": selected_sub_event,
         },
     )

@@ -32,6 +32,7 @@ from .models import (
     ScanSummary,
     SelectionKind,
     SourceSelection,
+    SubEventCache,
     UploadCheckpoint,
     ValidationResult,
 )
@@ -61,7 +62,6 @@ CREATE TABLE IF NOT EXISTS events (
     storage_limit_bytes INTEGER NOT NULL CHECK (storage_limit_bytes > 0),
     processing_profile_id TEXT NOT NULL,
     server_url TEXT NOT NULL DEFAULT '',
-    role TEXT NOT NULL DEFAULT 'uploader',
     reserved_original_bytes INTEGER NOT NULL DEFAULT 0 CHECK (reserved_original_bytes >= 0),
     verified_original_bytes INTEGER NOT NULL DEFAULT 0 CHECK (verified_original_bytes >= 0),
     intake_state TEXT NOT NULL DEFAULT 'open',
@@ -78,10 +78,20 @@ CREATE TABLE IF NOT EXISTS events (
     cached_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sub_events (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position > 0),
+    is_active INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+    UNIQUE (event_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS batches (
     id TEXT PRIMARY KEY,
     event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-    device_id TEXT NOT NULL,
+    installation_id TEXT NOT NULL,
+    sub_event_id TEXT NOT NULL REFERENCES sub_events(id) ON DELETE RESTRICT,
     state TEXT NOT NULL,
     label TEXT NOT NULL,
     scan_generation INTEGER NOT NULL DEFAULT 0,
@@ -161,7 +171,7 @@ CREATE TABLE IF NOT EXISTS derivative_checkpoints (
     PRIMARY KEY (item_id, variant)
 );
 """
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 def normalize_path(path: Path) -> str:
@@ -197,11 +207,16 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 elif schema_version == 1:
                     self._migrate_version_1()
                     self._migrate_version_3()
+                    self._migrate_version_4()
                 elif schema_version == 2:
                     self._migrate_version_2()
                     self._migrate_version_3()
+                    self._migrate_version_4()
                 elif schema_version == 3:
                     self._migrate_version_3()
+                    self._migrate_version_4()
+                elif schema_version == 4:
+                    self._migrate_version_4()
         except Exception:
             self._connection.close()
             raise
@@ -269,6 +284,24 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             """
         )
 
+    def _migrate_version_4(self) -> None:
+        self._connection.executescript(
+            """
+            ALTER TABLE events DROP COLUMN role;
+            ALTER TABLE batches RENAME COLUMN device_id TO installation_id;
+            ALTER TABLE batches ADD COLUMN sub_event_id TEXT;
+            CREATE TABLE sub_events (
+                id TEXT PRIMARY KEY,
+                event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+                name TEXT NOT NULL,
+                position INTEGER NOT NULL CHECK (position > 0),
+                is_active INTEGER NOT NULL CHECK (is_active IN (0, 1)),
+                UNIQUE (event_id, name)
+            );
+            PRAGMA user_version = 5;
+            """
+        )
+
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
@@ -301,19 +334,18 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             self._connection.execute(
                 """
                 INSERT INTO events(
-                    id, name, storage_limit_bytes, processing_profile_id, server_url, role,
+                    id, name, storage_limit_bytes, processing_profile_id, server_url,
                     reserved_original_bytes, verified_original_bytes, intake_state,
                     intake_generation, device_label, preview_policy_id,
                     preview_watermark_enabled, preview_template, preview_text,
                     preview_logo_kind, preview_renderer_id, derivative_profile_id,
                     preview_mark_sha256, cached_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     storage_limit_bytes = excluded.storage_limit_bytes,
                     processing_profile_id = excluded.processing_profile_id,
                     server_url = excluded.server_url,
-                    role = excluded.role,
                     reserved_original_bytes = excluded.reserved_original_bytes,
                     verified_original_bytes = excluded.verified_original_bytes,
                     intake_state = excluded.intake_state,
@@ -338,7 +370,6 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     event.storage_limit_bytes,
                     event.processing_profile_id.strip(),
                     event.server_url.strip(),
-                    event.role,
                     event.reserved_original_bytes,
                     event.verified_original_bytes,
                     event.intake_state,
@@ -355,6 +386,28 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     _now(),
                 ),
             )
+            self._connection.execute(
+                "UPDATE sub_events SET is_active = 0 WHERE event_id = ?",
+                (str(event.id),),
+            )
+            for sub_event in event.sub_events:
+                self._connection.execute(
+                    """
+                    INSERT INTO sub_events(id, event_id, name, position, is_active)
+                    VALUES (?, ?, ?, ?, 1)
+                    ON CONFLICT(id) DO UPDATE SET
+                        event_id = excluded.event_id,
+                        name = excluded.name,
+                        position = excluded.position,
+                        is_active = 1
+                    """,
+                    (
+                        str(sub_event.id),
+                        str(event.id),
+                        sub_event.name,
+                        sub_event.position,
+                    ),
+                )
 
     def get_event(self, event_id: UUID) -> EventCache:
         with self._lock:
@@ -370,8 +423,7 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             rows = self._connection.execute("SELECT * FROM events ORDER BY name, id").fetchall()
         return [self._event_from_row(row) for row in rows]
 
-    @staticmethod
-    def _event_from_row(row: sqlite3.Row) -> EventCache:
+    def _event_from_row(self, row: sqlite3.Row) -> EventCache:
         from .models import PreviewPolicyCache
 
         policy = None
@@ -392,13 +444,27 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             storage_limit_bytes=row["storage_limit_bytes"],
             processing_profile_id=row["processing_profile_id"],
             server_url=row["server_url"],
-            role=row["role"],
             reserved_original_bytes=row["reserved_original_bytes"],
             verified_original_bytes=row["verified_original_bytes"],
             intake_state=row["intake_state"],
             intake_generation=row["intake_generation"],
             device_label=row["device_label"],
+            sub_events=self._sub_events_for(UUID(row["id"])),
             preview_policy=policy,
+        )
+
+    def _sub_events_for(self, event_id: UUID) -> tuple[SubEventCache, ...]:
+        rows = self._connection.execute(
+            """
+            SELECT id, name, position FROM sub_events
+            WHERE event_id = ? AND is_active = 1
+            ORDER BY position, name, id
+            """,
+            (str(event_id),),
+        ).fetchall()
+        return tuple(
+            SubEventCache(id=UUID(row["id"]), name=row["name"], position=row["position"])
+            for row in rows
         )
 
     def delete_local_event(self, event_id: UUID) -> None:
@@ -410,21 +476,28 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
         for batch_id in batch_ids:
             self.cleanup_derivative_cache(batch_id)
 
-    def create_batch(self, event_id: UUID, *, label: str = "") -> UUID:
+    def create_batch(self, event_id: UUID, sub_event_id: UUID, *, label: str = "") -> UUID:
         self.get_event(event_id)
+        sub_event = self._connection.execute(
+            "SELECT id FROM sub_events WHERE id = ? AND event_id = ? AND is_active = 1",
+            (str(sub_event_id), str(event_id)),
+        ).fetchone()
+        if sub_event is None:
+            raise ValueError("Select an active sub-event before creating a contribution.")
         batch_id = uuid4()
         timestamp = _now()
         with self._lock, self._connection:
             self._connection.execute(
                 """
                 INSERT INTO batches(
-                    id, event_id, device_id, state, label, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, event_id, installation_id, sub_event_id, state, label, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(batch_id),
                     str(event_id),
                     str(self.installation_id),
+                    str(sub_event_id),
                     BatchState.DRAFT.value,
                     label.strip(),
                     timestamp,
@@ -455,7 +528,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
         return ContributionBatch(
             id=UUID(row["id"]),
             event_id=UUID(row["event_id"]),
-            device_id=UUID(row["device_id"]),
+            installation_id=UUID(row["installation_id"]),
+            sub_event_id=UUID(row["sub_event_id"]),
             state=BatchState(row["state"]),
             label=row["label"],
             scan_generation=row["scan_generation"],

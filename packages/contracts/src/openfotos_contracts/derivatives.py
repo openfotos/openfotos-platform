@@ -28,12 +28,6 @@ class WatermarkLogoKind(StrEnum):
     CUSTOM = "custom"
 
 
-class OriginalDownloadPolicy(StrEnum):
-    DISABLED = "disabled"
-    AUTHORIZED_VISITORS = "authorized-visitors"
-    EXPLICIT_SHARES = "explicit-shares"
-
-
 class AssetVariant(StrEnum):
     ORIGINAL = "originals"
     PREVIEW = "previews"

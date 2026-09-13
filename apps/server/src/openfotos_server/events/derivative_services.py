@@ -21,6 +21,7 @@ from openfotos_contracts import (
     AssetDerivativesInput,
     AssetVariant,
     EventState,
+    InstallationStatus,
     IngestionManifestState,
     PreviewPolicyInput,
     PreviewPolicySnapshot,
@@ -41,6 +42,7 @@ from .models import (
     AuditResult,
     DesktopSession,
     Event,
+    EventInstallation,
     PreviewPolicy,
 )
 
@@ -73,7 +75,7 @@ def confirm_preview_policy(
     object_store: S3ObjectStore | None,
     request=None,
 ) -> PreviewPolicy:
-    event = _lead_event(session, event_id)
+    event = _photographer_event(session, event_id)
     policy_id = uuid5(NAMESPACE_URL, f"openfotos:preview-policy:{event.id}")
     normalized_mark = b""
     mark_width = 0
@@ -106,7 +108,7 @@ def confirm_preview_policy(
                 "Preview settings must be confirmed before gallery review.",
             )
         if AssetObject.objects.filter(
-            asset__batch__device__event=locked_event,
+            asset__batch__installation__event=locked_event,
             variant__in=(AssetVariant.PREVIEW.value, AssetVariant.THUMBNAIL.value),
         ).exists():
             raise IngestionError(
@@ -244,7 +246,7 @@ def issue_policy_mark_url(
     policy = PreviewPolicy.objects.filter(event=event).first()
     if policy is None:
         raise IngestionError(
-            "preview_policy_not_confirmed", "The lead has not confirmed preview settings."
+            "preview_policy_not_confirmed", "The photographer has not confirmed preview settings."
         )
     if not policy.enabled:
         return {"policy_id": str(policy.id), "url": None, "expires_at": None}
@@ -275,7 +277,7 @@ def register_asset_derivatives(
     policy = PreviewPolicy.objects.filter(event=event).first()
     if policy is None:
         raise IngestionError(
-            "preview_policy_not_confirmed", "The lead has not confirmed preview settings."
+            "preview_policy_not_confirmed", "The photographer has not confirmed preview settings."
         )
     if value.policy_id != policy.id:
         raise IngestionError(
@@ -383,7 +385,7 @@ def report_derivative_failure(
         photographer=event.photographer,
         event=event,
         actor=session.user,
-        uploader_device=asset.batch.device,
+        event_installation=asset.batch.installation,
         action=AuditAction.DERIVATIVE_FAILED,
         result=AuditResult.SUCCEEDED,
         request=request,
@@ -521,7 +523,7 @@ def verify_derivative(
         photographer=event.photographer,
         event=event,
         actor=session.user,
-        uploader_device=asset.batch.device,
+        event_installation=asset.batch.installation,
         action=AuditAction.DERIVATIVE_UPLOAD_VERIFIED,
         result=AuditResult.SUCCEEDED,
         request=request,
@@ -547,7 +549,8 @@ def refresh_derivative_readiness(event_id: UUID) -> bool:
         return False
     assets = list(
         Asset.objects.filter(
-            batch__device__event=event,
+            batch__installation__event=event,
+            batch__sub_event__is_archived=False,
             variant_objects__variant=AssetVariant.ORIGINAL.value,
             variant_objects__state=UploadObjectState.VERIFIED.value,
             gallery_excluded_at__isnull=True,
@@ -606,11 +609,8 @@ def _record_automatic_transition(event: Event, previous_state: str) -> None:
     )
 
 
-def _lead_event(session: DesktopSession, event_id: UUID) -> Event:
-    event = event_for_session(session, event_id)
-    if session.user_id is None:
-        raise IngestionError("lead_required", "Only the event lead may perform this action.")
-    return event
+def _photographer_event(session: DesktopSession, event_id: UUID) -> Event:
+    return event_for_session(session, event_id)
 
 
 def _owned_asset(
@@ -620,17 +620,23 @@ def _owned_asset(
     asset_id: UUID,
     for_update: bool = False,
 ) -> Asset:
-    query = Asset.objects.select_related("batch__device")
+    query = Asset.objects.select_related("batch__installation", "batch__sub_event")
     if for_update:
         query = query.select_for_update()
     try:
-        asset = query.get(pk=asset_id, batch__device__event=event)
+        asset = query.get(pk=asset_id, batch__installation__event=event)
     except Asset.DoesNotExist as exc:
         raise IngestionError("asset_not_found", "The asset is unavailable.") from exc
-    if session.user_id is None and asset.batch.device_id != session.device_id:
+    installation = EventInstallation.objects.filter(
+        event=event,
+        user=session.user,
+        installation_id=session.installation_id,
+        status=InstallationStatus.ACTIVE.value,
+    ).first()
+    if installation is None or asset.batch.installation_id != installation.id:
         raise IngestionError("asset_not_found", "The asset is unavailable.")
-    if asset.batch.device.status != "active":
-        raise IngestionError("device_revoked", "This contribution device has been revoked.")
+    if asset.batch.sub_event.is_archived:
+        raise IngestionError("sub_event_archived", "The sub-event is archived.")
     return asset
 
 

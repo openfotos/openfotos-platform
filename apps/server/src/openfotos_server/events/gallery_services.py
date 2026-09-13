@@ -9,14 +9,14 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef, QuerySet
 from django.utils import timezone
 
-from openfotos_contracts import AssetVariant, EventState, OriginalDownloadPolicy, UploadObjectState
+from openfotos_contracts import AssetVariant, EventState, UploadObjectState
 from openfotos_storage.backend import ObjectStoreError, S3ObjectStore
 
 from .audit import record_audit
 from .derivative_services import refresh_derivative_readiness
 from .event_lifecycle import state_for_derivative_readiness
 from .ingestion_services import IngestionError
-from .models import Asset, AssetObject, AuditAction, AuditResult, Event
+from .models import Asset, AssetObject, AuditAction, AuditResult, Event, SubEvent
 
 GALLERY_PAGE_SIZE = 48
 
@@ -29,7 +29,9 @@ class GalleryImage:
     height: int
 
 
-def available_gallery_assets(event: Event) -> QuerySet[Asset]:
+def available_gallery_assets(
+    event: Event, *, sub_event: SubEvent | None = None
+) -> QuerySet[Asset]:
     original = AssetObject.objects.filter(
         asset_id=OuterRef("pk"),
         variant=AssetVariant.ORIGINAL.value,
@@ -45,9 +47,10 @@ def available_gallery_assets(event: Event) -> QuerySet[Asset]:
         variant=AssetVariant.THUMBNAIL.value,
         state=UploadObjectState.VERIFIED.value,
     )
-    return (
+    query = (
         Asset.objects.filter(
-            batch__device__event=event,
+            batch__installation__event=event,
+            batch__sub_event__is_archived=False,
             gallery_excluded_at__isnull=True,
         )
         .annotate(
@@ -58,12 +61,21 @@ def available_gallery_assets(event: Event) -> QuerySet[Asset]:
         .filter(has_original=True, has_preview=True, has_thumbnail=True)
         .order_by("gallery_position", "id")
     )
+    if sub_event is not None:
+        return query.filter(batch__sub_event=sub_event)
+    return query
 
 
 def gallery_page(
-    *, event: Event, page_number: object, object_store: S3ObjectStore
+    *,
+    event: Event,
+    page_number: object,
+    object_store: S3ObjectStore,
+    sub_event: SubEvent | None = None,
 ) -> tuple[Page, list[GalleryImage]]:
-    page = Paginator(available_gallery_assets(event), GALLERY_PAGE_SIZE).get_page(page_number)
+    page = Paginator(
+        available_gallery_assets(event, sub_event=sub_event), GALLERY_PAGE_SIZE
+    ).get_page(page_number)
     images = [
         _signed_image(asset=asset, variant=AssetVariant.THUMBNAIL, object_store=object_store)
         for asset in page.object_list
@@ -72,9 +84,13 @@ def gallery_page(
 
 
 def gallery_photo(
-    *, event: Event, asset_id: UUID, object_store: S3ObjectStore
+    *,
+    event: Event,
+    asset_id: UUID,
+    object_store: S3ObjectStore,
+    sub_event: SubEvent | None = None,
 ) -> tuple[GalleryImage, Asset | None, Asset | None]:
-    assets = available_gallery_assets(event)
+    assets = available_gallery_assets(event, sub_event=sub_event)
     try:
         asset = assets.get(pk=asset_id)
     except Asset.DoesNotExist as exc:
@@ -90,28 +106,6 @@ def gallery_photo(
         previous_asset,
         next_asset,
     )
-
-
-@transaction.atomic
-def change_download_policy(
-    *, event: Event, actor, policy: OriginalDownloadPolicy, request=None
-) -> Event:
-    locked = Event.objects.select_for_update().select_related("photographer").get(pk=event.pk)
-    if locked.original_download_policy == policy.value:
-        return locked
-    previous = locked.original_download_policy
-    locked.original_download_policy = policy.value
-    locked.save(update_fields=("original_download_policy", "updated_at"))
-    record_audit(
-        photographer=locked.photographer,
-        event=locked,
-        actor=actor,
-        action=AuditAction.DOWNLOAD_POLICY_CHANGED,
-        result=AuditResult.SUCCEEDED,
-        request=request,
-        metadata={"from": previous, "to": policy.value},
-    )
-    return locked
 
 
 def exclude_from_gallery(
@@ -131,10 +125,10 @@ def exclude_from_gallery(
         try:
             asset = (
                 Asset.objects.select_for_update()
-                .select_related("batch__device")
+                .select_related("batch__installation")
                 .get(
                     pk=asset_id,
-                    batch__device__event=locked_event,
+                    batch__installation__event=locked_event,
                 )
             )
         except Asset.DoesNotExist as exc:
@@ -191,7 +185,7 @@ def restore_to_gallery(*, event: Event, asset_id: UUID, actor, request=None) -> 
         try:
             asset = Asset.objects.select_for_update().get(
                 pk=asset_id,
-                batch__device__event=locked_event,
+                batch__installation__event=locked_event,
             )
         except Asset.DoesNotExist as exc:
             raise IngestionError("asset_not_found", "The gallery photo is unavailable.") from exc

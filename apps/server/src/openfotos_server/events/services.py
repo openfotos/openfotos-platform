@@ -54,6 +54,11 @@ def transition_event(
                 preview_policy_confirmed=(
                     hasattr(event, "preview_policy") if target is EventState.PUBLISHED else False
                 ),
+                has_active_sub_event=(
+                    event.sub_events.filter(is_archived=False).exists()
+                    if target is EventState.PUBLISHED
+                    else False
+                ),
             ),
         )
     except LifecycleViolation as exc:

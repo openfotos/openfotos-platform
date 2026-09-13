@@ -2,9 +2,17 @@
   <div class="gallery-grid">
     {% for image in images %}
       {% if dashboard_mode %}
-        <a class="gallery-tile" href="{% url 'events:photographer-photo' event_id=event.id asset_id=image.asset.id %}">
+        {% if selected_sub_event %}
+          <a class="gallery-tile" href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">
+        {% else %}
+          <a class="gallery-tile" href="{% url 'events:photographer-photo' event_id=event.id asset_id=image.asset.id %}">
+        {% endif %}
       {% else %}
-        <a class="gallery-tile" href="{% url 'events:visitor-photo' token=event.public_token asset_id=image.asset.id %}">
+        {% if selected_sub_event %}
+          <a class="gallery-tile" href="{% url 'events:visitor-sub-event-photo' token=event.public_token sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">
+        {% else %}
+          <a class="gallery-tile" href="{% url 'events:visitor-photo' token=event.public_token asset_id=image.asset.id %}">
+        {% endif %}
       {% endif %}
         <img src="{{ image.url }}" width="{{ image.width }}" height="{{ image.height }}" loading="lazy" alt="Photo {{ image.asset.gallery_position }} from {{ event.name }}">
       </a>

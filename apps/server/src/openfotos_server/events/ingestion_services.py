@@ -14,7 +14,7 @@ from openfotos_contracts import (
     AssetVariant,
     ContributionInput,
     ContributionState,
-    DeviceStatus,
+    InstallationStatus,
     EventState,
     IngestionManifestState,
     IntakeState,
@@ -24,7 +24,7 @@ from openfotos_storage import asset_key, ingestion_manifest_key
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectStoreError, S3ObjectStore
 
 from .audit import record_audit
-from .desktop_auth import DesktopAuthError, register_lead_device
+from .desktop_auth import DesktopAuthError, register_event_installation
 from .event_lifecycle import (
     LifecycleViolation,
     state_for_contribution,
@@ -39,10 +39,10 @@ from .models import (
     ContributionBatch,
     DesktopSession,
     Event,
+    EventInstallation,
     IngestionManifest,
     PhotographerMembership,
-    UploaderDevice,
-    UploaderInvitation,
+    SubEvent,
 )
 
 
@@ -54,17 +54,13 @@ class IngestionError(ValueError):
 
 
 def visible_events(session: DesktopSession) -> list[Event]:
-    if session.user_id is not None:
-        return list(
-            Event.objects.filter(
-                photographer=session.photographer,
-                photographer__memberships__user=session.user,
-                photographer__memberships__is_active=True,
-            ).distinct()
-        )
-    if session.device is None:
-        return []
-    return list(Event.objects.filter(pk=session.device.event_id))
+    return list(
+        Event.objects.filter(
+            photographer=session.photographer,
+            photographer__memberships__user=session.user,
+            photographer__memberships__is_active=True,
+        ).distinct()
+    )
 
 
 def event_for_session(session: DesktopSession, event_id: UUID) -> Event:
@@ -75,15 +71,12 @@ def event_for_session(session: DesktopSession, event_id: UUID) -> Event:
         )
     except Event.DoesNotExist as exc:
         raise IngestionError("event_not_found", "The event is unavailable.") from exc
-    if session.user_id is not None:
-        membership = PhotographerMembership.objects.filter(
-            photographer=event.photographer,
-            user=session.user,
-            is_active=True,
-        ).exists()
-        if not membership:
-            raise IngestionError("event_not_found", "The event is unavailable.")
-    elif session.device is None or session.device.event_id != event.id:
+    membership = PhotographerMembership.objects.filter(
+        photographer=event.photographer,
+        user=session.user,
+        is_active=True,
+    ).exists()
+    if not membership:
         raise IngestionError("event_not_found", "The event is unavailable.")
     return event
 
@@ -97,18 +90,30 @@ def reserve_contribution(
     request=None,
 ) -> ContributionBatch:
     event = event_for_session(session, event_id)
-    device = _contribution_device(
+    installation = _contribution_installation(
         session=session,
         event=event,
         label=contribution.device_label,
+        request=request,
     )
     locked_event = Event.objects.select_for_update().get(pk=event.pk)
+    try:
+        sub_event = SubEvent.objects.get(
+            pk=contribution.sub_event_id,
+            event=locked_event,
+            is_archived=False,
+        )
+    except SubEvent.DoesNotExist as exc:
+        raise IngestionError(
+            "sub_event_not_found", "Select an active sub-event in this event."
+        ) from exc
     manifest_sha256 = hashlib.sha256(contribution.canonical_bytes()).hexdigest()
     existing = ContributionBatch.objects.filter(pk=contribution.batch_id).first()
     if existing is not None:
         if (
-            existing.device_id == device.id
-            and existing.device.event_id == locked_event.id
+            existing.installation_id == installation.id
+            and existing.installation.event_id == locked_event.id
+            and existing.sub_event_id == sub_event.id
             and existing.manifest_sha256 == manifest_sha256
         ):
             return existing
@@ -137,7 +142,8 @@ def reserve_contribution(
 
     batch = ContributionBatch.objects.create(
         id=contribution.batch_id,
-        device=device,
+        installation=installation,
+        sub_event=sub_event,
         intake_generation=locked_event.intake_generation,
         label=contribution.label,
         processing_profile_id=contribution.processing_profile_id,
@@ -179,7 +185,7 @@ def reserve_contribution(
         photographer=locked_event.photographer,
         event=locked_event,
         actor=session.user,
-        uploader_device=device,
+        event_installation=installation,
         action=AuditAction.CONTRIBUTION_RESERVED,
         result=AuditResult.SUCCEEDED,
         request=request,
@@ -188,6 +194,7 @@ def reserve_contribution(
             "asset_count": batch.declared_asset_count,
             "original_bytes": batch.declared_original_bytes,
             "generation": batch.intake_generation,
+            "sub_event_id": str(sub_event.id),
         },
     )
     return batch
@@ -275,7 +282,6 @@ def verify_uploaded_object(
         session=session,
         event=event,
         asset_id=asset_id,
-        allow_lead=True,
     )
     if upload.state == UploadObjectState.VERIFIED.value:
         return upload
@@ -300,7 +306,10 @@ def verify_uploaded_object(
         locked = (
             AssetObject.objects.select_for_update()
             .select_related(
-                "asset", "asset__batch", "asset__batch__device", "asset__batch__device__event"
+                "asset",
+                "asset__batch",
+                "asset__batch__installation",
+                "asset__batch__installation__event",
             )
             .get(pk=upload.pk)
         )
@@ -336,7 +345,7 @@ def verify_uploaded_object(
         photographer=event.photographer,
         event=event,
         actor=session.user,
-        uploader_device=upload.asset.batch.device,
+        event_installation=upload.asset.batch.installation,
         action=AuditAction.ASSET_UPLOAD_VERIFIED,
         result=AuditResult.SUCCEEDED,
         request=request,
@@ -347,20 +356,14 @@ def verify_uploaded_object(
 
 @transaction.atomic
 def close_intake(*, session: DesktopSession, event_id: UUID, request=None) -> Event:
-    event = _lead_event(session, event_id)
+    event = _photographer_event(session, event_id)
     locked = Event.objects.select_for_update().get(pk=event.pk)
     if locked.intake_state == IntakeState.CLOSED.value:
         return locked
     if locked.state not in {EventState.DRAFT.value, EventState.UPLOADING.value}:
         raise IngestionError("event_not_uploading", "The event intake cannot be closed now.")
-    now = timezone.now()
     locked.intake_state = IntakeState.CLOSED.value
     locked.save(update_fields=("intake_state", "updated_at"))
-    UploaderInvitation.objects.filter(
-        event=locked,
-        revoked_at__isnull=True,
-        closed_at__isnull=True,
-    ).update(closed_at=now)
     record_audit(
         photographer=locked.photographer,
         event=locked,
@@ -374,60 +377,35 @@ def close_intake(*, session: DesktopSession, event_id: UUID, request=None) -> Ev
 
 
 @transaction.atomic
-def revoke_invitation(
-    *, session: DesktopSession, event_id: UUID, invitation_id: UUID, request=None
-) -> UploaderInvitation:
-    event = _lead_event(session, event_id)
+def revoke_installation(
+    *, session: DesktopSession, event_id: UUID, installation_id: UUID, request=None
+) -> EventInstallation:
+    event = _photographer_event(session, event_id)
     try:
-        invitation = UploaderInvitation.objects.select_for_update().get(
-            pk=invitation_id,
-            event=event,
+        installation = EventInstallation.objects.select_for_update().get(
+            pk=installation_id, event=event
         )
-    except UploaderInvitation.DoesNotExist as exc:
-        raise IngestionError("invitation_not_found", "The invitation is unavailable.") from exc
-    if invitation.revoked_at is not None:
-        return invitation
-    invitation.revoked_at = timezone.now()
-    invitation.save(update_fields=("revoked_at",))
-    record_audit(
-        photographer=event.photographer,
-        event=event,
-        actor=session.user,
-        action=AuditAction.UPLOADER_INVITATION_REVOKED,
-        result=AuditResult.SUCCEEDED,
-        request=request,
-        metadata={"invitation_id": str(invitation.id)},
-    )
-    return invitation
-
-
-@transaction.atomic
-def revoke_device(
-    *, session: DesktopSession, event_id: UUID, device_id: UUID, request=None
-) -> UploaderDevice:
-    event = _lead_event(session, event_id)
-    try:
-        device = UploaderDevice.objects.select_for_update().get(pk=device_id, event=event)
-    except UploaderDevice.DoesNotExist as exc:
-        raise IngestionError("device_not_found", "The device is unavailable.") from exc
-    if device.status == DeviceStatus.REVOKED.value:
-        return device
+    except EventInstallation.DoesNotExist as exc:
+        raise IngestionError(
+            "installation_not_found", "The workstation is unavailable."
+        ) from exc
+    if installation.status == InstallationStatus.REVOKED.value:
+        return installation
     now = timezone.now()
-    device.status = DeviceStatus.REVOKED.value
-    device.revoked_at = now
-    device.save(update_fields=("status", "revoked_at"))
-    device.sessions.filter(revoked_at__isnull=True).update(revoked_at=now)
+    installation.status = InstallationStatus.REVOKED.value
+    installation.revoked_at = now
+    installation.save(update_fields=("status", "revoked_at"))
     record_audit(
         photographer=event.photographer,
         event=event,
         actor=session.user,
-        uploader_device=device,
-        action=AuditAction.UPLOADER_DEVICE_REVOKED,
+        event_installation=installation,
+        action=AuditAction.EVENT_INSTALLATION_REVOKED,
         result=AuditResult.SUCCEEDED,
         request=request,
-        metadata={"device_id": str(device.id)},
+        metadata={"installation_id": str(installation.id)},
     )
-    return device
+    return installation
 
 
 def cancel_batch(
@@ -438,14 +416,14 @@ def cancel_batch(
     object_store: S3ObjectStore,
     request=None,
 ) -> ContributionBatch:
-    event = _lead_event(session, event_id)
+    event = _photographer_event(session, event_id)
     with transaction.atomic():
         locked_event = Event.objects.select_for_update().get(pk=event.pk)
         try:
             locked = (
                 ContributionBatch.objects.select_for_update()
-                .select_related("device")
-                .get(pk=batch_id, device__event=locked_event)
+                .select_related("installation")
+                .get(pk=batch_id, installation__event=locked_event)
             )
         except ContributionBatch.DoesNotExist as exc:
             raise IngestionError("batch_not_found", "The contribution is unavailable.") from exc
@@ -480,7 +458,7 @@ def cancel_batch(
             state=UploadObjectState.EXCLUDED.value
         ).update(
             state=UploadObjectState.EXCLUDED.value,
-            excluded_reason="Contribution cancelled by the event lead.",
+            excluded_reason="Contribution cancelled by the photographer.",
             excluded_by=session.user,
             failure_code="",
             updated_at=now,
@@ -494,7 +472,7 @@ def cancel_batch(
         photographer=event.photographer,
         event=event,
         actor=session.user,
-        uploader_device=locked.device,
+        event_installation=locked.installation,
         action=AuditAction.CONTRIBUTION_CANCELLED,
         result=AuditResult.SUCCEEDED,
         request=request,
@@ -505,7 +483,7 @@ def cancel_batch(
 
 @transaction.atomic
 def reopen_intake(*, session: DesktopSession, event_id: UUID, request=None) -> Event:
-    event = _lead_event(session, event_id)
+    event = _photographer_event(session, event_id)
     locked = Event.objects.select_for_update().get(pk=event.pk)
     if locked.intake_state == IntakeState.OPEN.value:
         return locked
@@ -553,7 +531,7 @@ def exclude_asset(
     object_store: S3ObjectStore,
     request=None,
 ) -> AssetObject:
-    event = _lead_event(session, event_id)
+    event = _photographer_event(session, event_id)
     normalized_reason = reason.strip()
     if not 1 <= len(normalized_reason) <= 240 or any(
         ord(character) < 32 for character in normalized_reason
@@ -566,7 +544,7 @@ def exclude_asset(
                 Asset.objects.only("batch_id")
                 .get(
                     pk=asset_id,
-                    batch__device__event=locked_event,
+                    batch__installation__event=locked_event,
                 )
                 .batch_id
             )
@@ -612,7 +590,7 @@ def exclude_asset(
         photographer=event.photographer,
         event=event,
         actor=session.user,
-        uploader_device=locked.asset.batch.device,
+        event_installation=locked.asset.batch.installation,
         action=AuditAction.ASSET_EXCLUDED,
         result=AuditResult.SUCCEEDED,
         request=request,
@@ -630,7 +608,7 @@ def finalize_ingestion(
 ) -> IngestionManifest:
     from .derivative_services import refresh_derivative_readiness
 
-    event = _lead_event(session, event_id)
+    event = _photographer_event(session, event_id)
     with transaction.atomic():
         locked_event = Event.objects.select_for_update().get(pk=event.pk)
         if locked_event.intake_state != IntakeState.CLOSED.value:
@@ -645,7 +623,7 @@ def finalize_ingestion(
         except LifecycleViolation as exc:
             raise IngestionError(exc.code, str(exc)) from exc
         nonterminal = AssetObject.objects.filter(
-            asset__batch__device__event=locked_event,
+            asset__batch__installation__event=locked_event,
             variant=AssetVariant.ORIGINAL.value,
         ).exclude(state__in=(UploadObjectState.VERIFIED.value, UploadObjectState.EXCLUDED.value))
         if nonterminal.exists():
@@ -654,7 +632,7 @@ def finalize_ingestion(
                 "Every reserved original must be verified or explicitly excluded.",
             )
         if not AssetObject.objects.filter(
-            asset__batch__device__event=locked_event,
+            asset__batch__installation__event=locked_event,
             variant=AssetVariant.ORIGINAL.value,
             state=UploadObjectState.VERIFIED.value,
         ).exists():
@@ -750,29 +728,22 @@ def finalize_ingestion(
     return locked_manifest
 
 
-def _contribution_device(*, session: DesktopSession, event: Event, label: str) -> UploaderDevice:
-    if session.user_id is not None:
-        try:
-            return register_lead_device(session=session, event=event, label=label)
-        except DesktopAuthError as exc:
-            raise IngestionError(exc.code, str(exc)) from exc
-    if session.device_id is None:
-        raise IngestionError("event_not_found", "The event is unavailable.")
-    device = UploaderDevice.objects.filter(
-        pk=session.device_id,
-        event=event,
-        status=DeviceStatus.ACTIVE.value,
-    ).first()
-    if device is None:
-        raise IngestionError("event_not_found", "The event is unavailable.")
-    return device
+def _contribution_installation(
+    *, session: DesktopSession, event: Event, label: str, request=None
+) -> EventInstallation:
+    try:
+        return register_event_installation(
+            session=session,
+            event=event,
+            label=label,
+            request=request,
+        )
+    except DesktopAuthError as exc:
+        raise IngestionError(exc.code, str(exc)) from exc
 
 
-def _lead_event(session: DesktopSession, event_id: UUID) -> Event:
-    event = event_for_session(session, event_id)
-    if session.user_id is None:
-        raise IngestionError("lead_required", "Only the event lead may perform this action.")
-    return event
+def _photographer_event(session: DesktopSession, event_id: UUID) -> Event:
+    return event_for_session(session, event_id)
 
 
 def _owned_batch(
@@ -782,19 +753,21 @@ def _owned_batch(
     batch_id: UUID,
     for_update: bool = False,
 ) -> ContributionBatch:
-    query = ContributionBatch.objects.select_related("device")
+    query = ContributionBatch.objects.select_related("installation", "sub_event")
     if for_update:
         query = query.select_for_update()
     try:
         batch = query.get(
             pk=batch_id,
-            device__event=event,
+            installation__event=event,
         )
     except ContributionBatch.DoesNotExist as exc:
         raise IngestionError("batch_not_found", "The contribution is unavailable.") from exc
-    device = _existing_contribution_device(session=session, event=event)
-    if batch.device_id != device.id:
+    installation = _existing_contribution_installation(session=session, event=event)
+    if batch.installation_id != installation.id:
         raise IngestionError("batch_not_found", "The contribution is unavailable.")
+    if batch.sub_event.is_archived:
+        raise IngestionError("sub_event_archived", "The sub-event is archived.")
     return batch
 
 
@@ -803,44 +776,37 @@ def _owned_upload(
     session: DesktopSession,
     event: Event,
     asset_id: UUID,
-    allow_lead: bool = False,
 ) -> AssetObject:
     try:
-        upload = AssetObject.objects.select_related("asset__batch__device").get(
+        upload = AssetObject.objects.select_related(
+            "asset__batch__installation", "asset__batch__sub_event"
+        ).get(
             asset_id=asset_id,
-            asset__batch__device__event=event,
+            asset__batch__installation__event=event,
             variant=AssetVariant.ORIGINAL.value,
         )
     except AssetObject.DoesNotExist as exc:
         raise IngestionError("asset_not_found", "The asset is unavailable.") from exc
-    if allow_lead and session.user_id is not None:
-        return upload
-    device = _existing_contribution_device(session=session, event=event)
-    if upload.asset.batch.device_id != device.id:
+    installation = _existing_contribution_installation(session=session, event=event)
+    if upload.asset.batch.installation_id != installation.id:
         raise IngestionError("asset_not_found", "The asset is unavailable.")
+    if upload.asset.batch.sub_event.is_archived:
+        raise IngestionError("sub_event_archived", "The sub-event is archived.")
     return upload
 
 
-def _existing_contribution_device(*, session: DesktopSession, event: Event) -> UploaderDevice:
-    if session.user_id is not None:
-        device = UploaderDevice.objects.filter(
-            event=event,
-            installation_id=session.installation_id,
-            status=DeviceStatus.ACTIVE.value,
-        ).first()
-        if device is None:
-            raise IngestionError("batch_not_found", "The contribution is unavailable.")
-        return device
-    if session.device_id is None:
-        raise IngestionError("event_not_found", "The event is unavailable.")
-    device = UploaderDevice.objects.filter(
-        pk=session.device_id,
+def _existing_contribution_installation(
+    *, session: DesktopSession, event: Event
+) -> EventInstallation:
+    installation = EventInstallation.objects.filter(
         event=event,
-        status=DeviceStatus.ACTIVE.value,
+        user=session.user,
+        installation_id=session.installation_id,
+        status=InstallationStatus.ACTIVE.value,
     ).first()
-    if device is None:
-        raise IngestionError("event_not_found", "The event is unavailable.")
-    return device
+    if installation is None:
+        raise IngestionError("batch_not_found", "The contribution is unavailable.")
+    return installation
 
 
 def _delete_unverified_object(object_store: S3ObjectStore, key: str) -> None:
@@ -880,11 +846,15 @@ def _complete_batch_if_terminal(batch: ContributionBatch, *, now) -> None:
 
 
 def _aggregate_manifest_document(event: Event) -> dict:
-    batches = ContributionBatch.objects.filter(device__event=event).order_by("created_at", "id")
+    batches = ContributionBatch.objects.select_related("sub_event").filter(
+        installation__event=event
+    ).order_by("created_at", "id")
     contributions = [
         {
             "batch_id": str(batch.id),
-            "device_id": str(batch.device_id),
+            "installation_id": str(batch.installation_id),
+            "sub_event_id": str(batch.sub_event_id),
+            "sub_event_name": batch.sub_event.name,
             "generation": batch.intake_generation,
             "state": batch.state,
             "asset_count": batch.declared_asset_count,
@@ -896,7 +866,7 @@ def _aggregate_manifest_document(event: Event) -> dict:
     objects = (
         AssetObject.objects.select_related("asset", "asset__batch")
         .filter(
-            asset__batch__device__event=event,
+            asset__batch__installation__event=event,
             variant=AssetVariant.ORIGINAL.value,
         )
         .order_by("asset_id")

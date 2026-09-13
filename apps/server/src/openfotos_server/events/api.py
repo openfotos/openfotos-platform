@@ -21,12 +21,12 @@ from openfotos_contracts import (
     AssetVariant,
     ContractError,
     ContributionInput,
-    DeviceRole,
-    DeviceStatus,
     EventSnapshot,
     EventState,
+    InstallationStatus,
     IntakeState,
     PreviewPolicyInput,
+    SubEventSnapshot,
 )
 
 from .derivative_services import (
@@ -42,9 +42,7 @@ from .derivative_services import (
 from .desktop_auth import (
     DesktopAuthError,
     authenticate_access_token,
-    authenticate_lead,
-    create_invitation,
-    redeem_invitation,
+    authenticate_photographer,
     refresh_session,
 )
 from .ingestion_services import (
@@ -57,18 +55,17 @@ from .ingestion_services import (
     issue_upload_leases,
     reopen_intake,
     reserve_contribution,
-    revoke_device,
-    revoke_invitation,
+    revoke_installation,
     verify_uploaded_object,
     visible_events,
 )
 from .models import (
     AssetObject,
     ContributionBatch,
+    EventInstallation,
     IdempotencyRecord,
     PreviewPolicy,
     RateLimitPurpose,
-    UploaderDevice,
 )
 from .object_store import configured_object_store
 from .rate_limits import clear_failures, rate_limit_status, register_failure
@@ -101,7 +98,7 @@ def _domain_error(exc: DesktopAuthError | ContractError | IngestionError) -> Jso
         "asset_not_found",
     }:
         status = 404
-    elif exc.code in {"lead_required", "device_revoked"}:
+    elif exc.code in {"photographer_required", "installation_revoked"}:
         status = 403
     else:
         status = 409
@@ -289,17 +286,21 @@ def _bearer_session(request: HttpRequest):
 
 
 def _event_data(event, *, session) -> dict:
-    active_devices = UploaderDevice.objects.filter(
+    active_devices = EventInstallation.objects.filter(
         event=event,
-        status=DeviceStatus.ACTIVE.value,
+        status=InstallationStatus.ACTIVE.value,
     ).count()
-    role = DeviceRole.LEAD if session.user_id else DeviceRole.UPLOADER
+    installation = EventInstallation.objects.filter(
+        event=event,
+        user=session.user,
+        installation_id=session.installation_id,
+        status=InstallationStatus.ACTIVE.value,
+    ).first()
     policy = PreviewPolicy.objects.filter(event=event).first()
     return EventSnapshot(
         id=event.id,
         name=event.name,
         state=EventState(event.state),
-        role=role,
         storage_limit_bytes=event.storage_limit_bytes,
         reserved_original_bytes=event.reserved_original_bytes,
         verified_original_bytes=event.verified_original_bytes,
@@ -309,7 +310,13 @@ def _event_data(event, *, session) -> dict:
         processing_profile_id=event.processing_profile_id,
         max_contribution_devices=event.max_contribution_devices,
         active_contribution_devices=active_devices,
-        device_label=session.device.label if session.device_id else "",
+        device_label=installation.label if installation else "",
+        sub_events=tuple(
+            SubEventSnapshot(id=item.id, name=item.name, position=item.position)
+            for item in event.sub_events.filter(is_archived=False).order_by(
+                "position", "name", "id"
+            )
+        ),
         preview_policy=preview_policy_snapshot(policy),
     ).as_dict()
 
@@ -351,7 +358,7 @@ def login(request: HttpRequest) -> JsonResponse:
         response.headers["Retry-After"] = str(current.retry_after_seconds)
         return response
     try:
-        tokens = authenticate_lead(
+        tokens = authenticate_photographer(
             photographer=photographer,
             username=str(body["username"]),
             password=str(body["password"]),
@@ -406,29 +413,6 @@ def refresh(request: HttpRequest) -> JsonResponse:
     return JsonResponse(_tokens_data(tokens))
 
 
-@csrf_exempt
-@require_POST
-def redeem(request: HttpRequest) -> JsonResponse:
-    photographer = _tenant(request)
-    try:
-        body = _json_body(
-            request,
-            fields={"invitation_token", "installation_id", "device_label"},
-        )
-        event, tokens = redeem_invitation(
-            photographer=photographer,
-            token=str(body["invitation_token"]),
-            installation_id=_uuid(body["installation_id"], field="installation_id"),
-            label=str(body["device_label"]),
-            request=request,
-        )
-    except (ContractError, DesktopAuthError) as exc:
-        return _domain_error(exc)
-    return JsonResponse(
-        {**_tokens_data(tokens), "event": _event_data(event, session=tokens.session)}
-    )
-
-
 @require_GET
 def events(request: HttpRequest) -> JsonResponse:
     try:
@@ -442,58 +426,6 @@ def events(request: HttpRequest) -> JsonResponse:
 
 @csrf_exempt
 @require_POST
-def invitations(request: HttpRequest, event_id: UUID) -> JsonResponse:
-    try:
-        session = _bearer_session(request)
-        body = _json_body(request, fields=set())
-        del body
-        event = event_for_session(session, event_id)
-        issued = create_invitation(session=session, event=event, request=request)
-    except (ContractError, DesktopAuthError, IngestionError) as exc:
-        return _domain_error(exc)
-    origin = request.build_absolute_uri("/").rstrip("/")
-    enrollment_url = f"{origin}/desktop/#invite={issued.token}"
-    return JsonResponse(
-        {
-            "invitation_id": str(issued.invitation.id),
-            "enrollment_url": enrollment_url,
-            "expires_at": issued.invitation.expires_at.isoformat(),
-            "max_redemptions": issued.invitation.max_redemptions,
-        },
-        status=201,
-    )
-
-
-@csrf_exempt
-@require_POST
-def revoke_invitation_view(
-    request: HttpRequest, event_id: UUID, invitation_id: UUID
-) -> JsonResponse:
-    try:
-        session = _bearer_session(request)
-
-        def command() -> tuple[dict, int]:
-            _json_body(request, fields=set())
-            invitation = revoke_invitation(
-                session=session,
-                event_id=event_id,
-                invitation_id=invitation_id,
-                request=request,
-            )
-            return {"invitation_id": str(invitation.id), "status": "revoked"}, 200
-
-        return _execute_mutation(
-            request,
-            session=session,
-            operation="revoke_invitation",
-            command=command,
-        )
-    except (ContractError, DesktopAuthError, IngestionError) as exc:
-        return _domain_error(exc)
-
-
-@csrf_exempt
-@require_POST
 def reserve_batch(request: HttpRequest, event_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
@@ -503,6 +435,7 @@ def reserve_batch(request: HttpRequest, event_id: UUID) -> JsonResponse:
                 request,
                 fields={
                     "batch_id",
+                    "sub_event_id",
                     "label",
                     "processing_profile_id",
                     "device_label",
@@ -533,12 +466,10 @@ def batch_detail(request: HttpRequest, event_id: UUID, batch_id: UUID) -> JsonRe
     try:
         session = _bearer_session(request)
         event = event_for_session(session, event_id)
-        query = ContributionBatch.objects.select_related("device").filter(
+        query = ContributionBatch.objects.select_related("installation", "sub_event").filter(
             pk=batch_id,
-            device__event=event,
+            installation__event=event,
         )
-        if session.user_id is None:
-            query = query.filter(device=session.device)
         batch = query.get()
     except ContributionBatch.DoesNotExist:
         return _error("batch_not_found", "The contribution is unavailable.", status=404)
@@ -1002,24 +933,29 @@ def cancel_batch_view(request: HttpRequest, event_id: UUID, batch_id: UUID) -> J
 
 @csrf_exempt
 @require_POST
-def revoke_device_view(request: HttpRequest, event_id: UUID, device_id: UUID) -> JsonResponse:
+def revoke_installation_view(
+    request: HttpRequest, event_id: UUID, installation_id: UUID
+) -> JsonResponse:
     try:
         session = _bearer_session(request)
 
         def command() -> tuple[dict, int]:
             _json_body(request, fields=set())
-            device = revoke_device(
+            installation = revoke_installation(
                 session=session,
                 event_id=event_id,
-                device_id=device_id,
+                installation_id=installation_id,
                 request=request,
             )
-            return {"device_id": str(device.id), "status": device.status}, 200
+            return {
+                "installation_id": str(installation.id),
+                "status": installation.status,
+            }, 200
 
         return _execute_mutation(
             request,
             session=session,
-            operation="revoke_device",
+            operation="revoke_installation",
             command=command,
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
@@ -1031,6 +967,7 @@ def _batch_data(batch: ContributionBatch, *, session) -> dict:
     originals = objects.filter(variant=AssetVariant.ORIGINAL.value)
     data = {
         "id": str(batch.id),
+        "sub_event_id": str(batch.sub_event_id),
         "state": batch.state,
         "generation": batch.intake_generation,
         "asset_count": batch.declared_asset_count,
@@ -1042,18 +979,17 @@ def _batch_data(batch: ContributionBatch, *, session) -> dict:
         .filter(state="verified")
         .count(),
     }
-    if session.user_id is not None or batch.device_id == session.device_id:
-        data["assets"] = list(
-            objects.order_by("asset_id").values(
-                "asset_id",
-                "variant",
-                "expected_bytes",
-                "state",
-                "failure_code",
-                "asset__gallery_excluded_at",
-            )
+    data["assets"] = list(
+        objects.order_by("asset_id").values(
+            "asset_id",
+            "variant",
+            "expected_bytes",
+            "state",
+            "failure_code",
+            "asset__gallery_excluded_at",
         )
-        for item in data["assets"]:
-            item["asset_id"] = str(item["asset_id"])
-            item["gallery_excluded"] = item.pop("asset__gallery_excluded_at") is not None
+    )
+    for item in data["assets"]:
+        item["asset_id"] = str(item["asset_id"])
+        item["gallery_excluded"] = item.pop("asset__gallery_excluded_at") is not None
     return data

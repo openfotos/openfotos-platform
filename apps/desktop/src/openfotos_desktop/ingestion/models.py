@@ -82,18 +82,25 @@ class PreviewPolicyCache:
 
 
 @dataclass(frozen=True)
+class SubEventCache:
+    id: UUID
+    name: str
+    position: int
+
+
+@dataclass(frozen=True)
 class EventCache:
     id: UUID
     name: str
     storage_limit_bytes: int
     processing_profile_id: str
     server_url: str = ""
-    role: str = "uploader"
     reserved_original_bytes: int = 0
     verified_original_bytes: int = 0
     intake_state: str = "open"
     intake_generation: int = 1
     device_label: str = ""
+    sub_events: tuple[SubEventCache, ...] = ()
     preview_policy: PreviewPolicyCache | None = None
 
 
@@ -101,7 +108,8 @@ class EventCache:
 class ContributionBatch:
     id: UUID
     event_id: UUID
-    device_id: UUID
+    installation_id: UUID
+    sub_event_id: UUID
     state: BatchState
     label: str
     scan_generation: int

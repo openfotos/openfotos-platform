@@ -2,9 +2,6 @@
 
 from django import forms
 
-from openfotos_contracts import OriginalDownloadPolicy
-
-
 class PhotographerLoginForm(forms.Form):
     username = forms.CharField(
         max_length=150,
@@ -19,27 +16,27 @@ class PhotographerLoginForm(forms.Form):
 
 class EventPinForm(forms.Form):
     pin = forms.RegexField(
-        regex=r"^[0-9]{6}$",
-        max_length=6,
-        min_length=6,
-        error_messages={"invalid": "Enter the six-digit event PIN."},
+        regex=r"^[0-9]{4}$",
+        max_length=4,
+        min_length=4,
+        error_messages={"invalid": "Enter the four-digit event PIN."},
         widget=forms.PasswordInput(
             attrs={
                 "autocomplete": "one-time-code",
                 "inputmode": "numeric",
-                "pattern": "[0-9]{6}",
+                "pattern": "[0-9]{4}",
             }
         ),
     )
 
 
-class DownloadPolicyForm(forms.Form):
-    policy = forms.ChoiceField(
-        choices=tuple(
-            (policy.value, policy.value.replace("-", " ").title())
-            for policy in OriginalDownloadPolicy
-        )
-    )
+class SubEventForm(forms.Form):
+    name = forms.CharField(max_length=120, strip=True)
+    position = forms.IntegerField(min_value=1, max_value=32_767)
+
+
+class BatchReassignmentForm(forms.Form):
+    sub_event_id = forms.UUIDField()
 
 
 class GalleryExclusionForm(forms.Form):

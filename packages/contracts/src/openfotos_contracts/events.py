@@ -11,7 +11,7 @@ from .derivatives import (
     WatermarkTemplate,
 )
 from .ingestion import ContractError, _positive_integer, _strict_fields, _uuid
-from .states import DeviceRole, EventState, IntakeState
+from .states import EventState, IntakeState
 
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -110,11 +110,33 @@ class PreviewPolicySnapshot:
 
 
 @dataclass(frozen=True)
+class SubEventSnapshot:
+    id: UUID
+    name: str
+    position: int
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "SubEventSnapshot":
+        value = _strict_fields(
+            raw,
+            {"id", "name", "position"},
+            context="Sub-event response",
+        )
+        return cls(
+            id=_uuid(value["id"], field="sub-event id"),
+            name=_text(value["name"], field="sub-event name", maximum_length=120),
+            position=_positive_integer(value["position"], field="sub-event position"),
+        )
+
+    def as_dict(self) -> dict:
+        return {"id": str(self.id), "name": self.name, "position": self.position}
+
+
+@dataclass(frozen=True)
 class EventSnapshot:
     id: UUID
     name: str
     state: EventState
-    role: DeviceRole
     storage_limit_bytes: int
     reserved_original_bytes: int
     verified_original_bytes: int
@@ -125,6 +147,7 @@ class EventSnapshot:
     max_contribution_devices: int
     active_contribution_devices: int
     device_label: str
+    sub_events: tuple[SubEventSnapshot, ...]
     preview_policy: PreviewPolicySnapshot | None
 
     @classmethod
@@ -135,7 +158,6 @@ class EventSnapshot:
                 "id",
                 "name",
                 "state",
-                "role",
                 "storage_limit_bytes",
                 "reserved_original_bytes",
                 "verified_original_bytes",
@@ -146,13 +168,13 @@ class EventSnapshot:
                 "max_contribution_devices",
                 "active_contribution_devices",
                 "device_label",
+                "sub_events",
                 "preview_policy",
             },
             context="Event response",
         )
         try:
             state = EventState(value["state"])
-            role = DeviceRole(value["role"])
             intake_state = IntakeState(value["intake_state"])
         except (TypeError, ValueError) as exc:
             raise ContractError(
@@ -188,11 +210,18 @@ class EventSnapshot:
             if value["preview_policy"] is not None
             else None
         )
+        sub_events_value = value["sub_events"]
+        if not isinstance(sub_events_value, list):
+            raise ContractError("invalid_response", "sub_events must be a list.")
+        sub_events = tuple(SubEventSnapshot.from_dict(item) for item in sub_events_value)
+        if len({item.id for item in sub_events}) != len(sub_events):
+            raise ContractError("invalid_response", "Sub-event identifiers must be unique.")
+        if tuple(sorted(sub_events, key=lambda item: (item.position, item.name, str(item.id)))) != sub_events:
+            raise ContractError("invalid_response", "Sub-events are not in canonical order.")
         return cls(
             id=_uuid(value["id"], field="event id"),
             name=_text(value["name"], field="name", maximum_length=200),
             state=state,
-            role=role,
             storage_limit_bytes=storage_limit_bytes,
             reserved_original_bytes=reserved_original_bytes,
             verified_original_bytes=verified_original_bytes,
@@ -211,6 +240,7 @@ class EventSnapshot:
             device_label=_text(
                 value["device_label"], field="device_label", maximum_length=100, required=False
             ),
+            sub_events=sub_events,
             preview_policy=policy,
         )
 
@@ -219,7 +249,6 @@ class EventSnapshot:
             "id": str(self.id),
             "name": self.name,
             "state": self.state.value,
-            "role": self.role.value,
             "storage_limit_bytes": self.storage_limit_bytes,
             "reserved_original_bytes": self.reserved_original_bytes,
             "verified_original_bytes": self.verified_original_bytes,
@@ -230,5 +259,6 @@ class EventSnapshot:
             "max_contribution_devices": self.max_contribution_devices,
             "active_contribution_devices": self.active_contribution_devices,
             "device_label": self.device_label,
+            "sub_events": [sub_event.as_dict() for sub_event in self.sub_events],
             "preview_policy": self.preview_policy.as_dict() if self.preview_policy else None,
         }

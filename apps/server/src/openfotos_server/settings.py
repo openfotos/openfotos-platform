@@ -10,6 +10,13 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parents[4]
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "unsafe-development-key")
+EVENT_PIN_PEPPER = os.environ.get("EVENT_PIN_PEPPER", "").strip()
+if not EVENT_PIN_PEPPER:
+    if SECRET_KEY != "unsafe-development-key":
+        raise ImproperlyConfigured("EVENT_PIN_PEPPER is required outside local development.")
+    EVENT_PIN_PEPPER = "unsafe-development-event-pin-pepper"
+if len(EVENT_PIN_PEPPER) < 32:
+    raise ImproperlyConfigured("EVENT_PIN_PEPPER must contain at least 32 characters.")
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [
     host.strip()
@@ -120,9 +127,6 @@ DESKTOP_ACCESS_TTL_SECONDS = positive_integer_setting("DESKTOP_ACCESS_TTL_SECOND
 DESKTOP_REFRESH_TTL_SECONDS = positive_integer_setting("DESKTOP_REFRESH_TTL_SECONDS", 14 * 86_400)
 DESKTOP_REFRESH_RETRY_GRACE_SECONDS = positive_integer_setting(
     "DESKTOP_REFRESH_RETRY_GRACE_SECONDS", 60
-)
-UPLOADER_INVITATION_TTL_SECONDS = positive_integer_setting(
-    "UPLOADER_INVITATION_TTL_SECONDS", 72 * 3_600
 )
 UPLOAD_LEASE_TTL_SECONDS = positive_integer_setting("UPLOAD_LEASE_TTL_SECONDS", 300)
 UPLOAD_LEASE_PAGE_SIZE = positive_integer_setting("UPLOAD_LEASE_PAGE_SIZE", 8)

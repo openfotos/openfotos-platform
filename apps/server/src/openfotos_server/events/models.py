@@ -17,12 +17,10 @@ from openfotos_contracts import (
     WATERMARK_RENDERER_ID,
     AssetVariant,
     ContributionState,
-    DeviceRole,
-    DeviceStatus,
+    InstallationStatus,
     EventState,
     IngestionManifestState,
     IntakeState,
-    OriginalDownloadPolicy,
     UploadObjectState,
     WatermarkLogoKind,
     WatermarkTemplate,
@@ -30,7 +28,7 @@ from openfotos_contracts import (
 
 PILOT_STORAGE_LIMIT_BYTES = 25_000_000_000
 RESERVED_PHOTOGRAPHER_SLUGS = frozenset({"admin", "api", "media", "static", "www"})
-PIN_PATTERN = re.compile(r"[0-9]{6}\Z")
+PIN_PATTERN = re.compile(r"[0-9]{4}\Z")
 SHA256_VALIDATOR = RegexValidator(r"^[0-9a-f]{64}$", "Enter a lowercase SHA-256 digest.")
 MD5_VALIDATOR = RegexValidator(r"^[A-Za-z0-9+/]{22}==$", "Enter a base64-encoded MD5 digest.")
 
@@ -38,6 +36,11 @@ MD5_VALIDATOR = RegexValidator(r"^[A-Za-z0-9+/]{22}==$", "Enter a base64-encoded
 def generate_event_token() -> str:
     """Generate a durable, unguessable public event locator."""
     return secrets.token_urlsafe(32)
+
+
+def generate_event_pin() -> str:
+    """Generate a zero-padded four-digit event PIN."""
+    return f"{secrets.randbelow(10_000):04d}"
 
 
 class PhotographerStatus(models.TextChoices):
@@ -65,20 +68,20 @@ class AuditAction(models.TextChoices):
     EVENT_PIN_UNLOCK = "event.pin_unlock", "Event PIN unlock"
     DESKTOP_LOGIN = "desktop.login", "Desktop login"
     DESKTOP_TOKEN_REFRESH = "desktop.token_refresh", "Desktop token refresh"
-    UPLOADER_INVITATION_CREATED = (
-        "uploader_invitation.created",
-        "Uploader invitation created",
+    SUB_EVENT_CREATED = "sub_event.created", "Sub-event created"
+    SUB_EVENT_CHANGED = "sub_event.changed", "Sub-event changed"
+    SUB_EVENT_ARCHIVED = "sub_event.archived", "Sub-event archived"
+    SUB_EVENT_RESTORED = "sub_event.restored", "Sub-event restored"
+    EVENT_INSTALLATION_REGISTERED = (
+        "event_installation.registered",
+        "Event installation registered",
     )
-    UPLOADER_INVITATION_REDEEMED = (
-        "uploader_invitation.redeemed",
-        "Uploader invitation redeemed",
+    EVENT_INSTALLATION_REVOKED = (
+        "event_installation.revoked",
+        "Event installation revoked",
     )
-    UPLOADER_INVITATION_REVOKED = (
-        "uploader_invitation.revoked",
-        "Uploader invitation revoked",
-    )
-    UPLOADER_DEVICE_REVOKED = "uploader_device.revoked", "Uploader device revoked"
     CONTRIBUTION_RESERVED = "contribution.reserved", "Contribution reserved"
+    CONTRIBUTION_REASSIGNED = "contribution.reassigned", "Contribution reassigned"
     CONTRIBUTION_CANCELLED = "contribution.cancelled", "Contribution cancelled"
     ASSET_UPLOAD_VERIFIED = "asset_upload.verified", "Asset upload verified"
     ASSET_EXCLUDED = "asset.excluded", "Asset excluded"
@@ -90,7 +93,6 @@ class AuditAction(models.TextChoices):
     DERIVATIVE_FAILED = "derivative.failed", "Derivative failed"
     ASSET_GALLERY_EXCLUDED = "asset.gallery_excluded", "Asset excluded from gallery"
     ASSET_GALLERY_RESTORED = "asset.gallery_restored", "Asset restored to gallery"
-    DOWNLOAD_POLICY_CHANGED = "event.download_policy_changed", "Download policy changed"
 
 
 class AuditResult(models.TextChoices):
@@ -211,14 +213,6 @@ class Event(models.Model):
     )
     intake_generation = models.PositiveIntegerField(default=1, editable=False)
     processing_profile_id = models.CharField(max_length=100, default="pilot-profile-v1")
-    original_download_policy = models.CharField(
-        max_length=24,
-        choices=tuple(
-            (policy.value, policy.value.replace("-", " ").title())
-            for policy in OriginalDownloadPolicy
-        ),
-        default=OriginalDownloadPolicy.DISABLED.value,
-    )
     derivatives_ready_generation = models.PositiveIntegerField(
         blank=True, null=True, editable=False
     )
@@ -260,11 +254,15 @@ class Event(models.Model):
 
     def set_pin(self, raw_pin: str) -> None:
         if not PIN_PATTERN.fullmatch(raw_pin):
-            raise ValidationError({"pin": "Enter exactly six ASCII digits."})
-        self.pin_hash = make_password(raw_pin, hasher="argon2")
+            raise ValidationError({"pin": "Enter exactly four ASCII digits."})
+        self.pin_hash = make_password(self._peppered_pin(raw_pin), hasher="argon2")
 
     def check_pin(self, raw_pin: str) -> bool:
-        return bool(self.pin_hash) and check_password(raw_pin, self.pin_hash)
+        return bool(self.pin_hash) and check_password(self._peppered_pin(raw_pin), self.pin_hash)
+
+    @staticmethod
+    def _peppered_pin(raw_pin: str) -> str:
+        return f"{settings.EVENT_PIN_PEPPER}:{raw_pin}"
 
     def is_publicly_available(self, *, at=None) -> bool:
         checked_at = at or timezone.now()
@@ -276,59 +274,44 @@ class Event(models.Model):
         )
 
 
-class UploaderInvitation(models.Model):
+class SubEvent(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    event = models.ForeignKey(Event, on_delete=models.PROTECT, related_name="uploader_invitations")
-    token_hash = models.CharField(max_length=64, unique=True, editable=False)
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name="created_uploader_invitations",
-    )
-    expires_at = models.DateTimeField()
-    max_redemptions = models.PositiveSmallIntegerField(
-        default=10,
-        validators=[MinValueValidator(1), MaxValueValidator(10)],
-    )
-    redemption_count = models.PositiveSmallIntegerField(default=0, editable=False)
-    revoked_at = models.DateTimeField(blank=True, null=True, editable=False)
-    closed_at = models.DateTimeField(blank=True, null=True, editable=False)
+    event = models.ForeignKey(Event, on_delete=models.PROTECT, related_name="sub_events")
+    name = models.CharField(max_length=120)
+    position = models.PositiveSmallIntegerField(default=1, validators=[MinValueValidator(1)])
+    is_archived = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        indexes = [models.Index(fields=("event", "expires_at"), name="invite_event_expiry_idx")]
         constraints = [
-            models.CheckConstraint(
-                condition=Q(max_redemptions__gte=1) & Q(max_redemptions__lte=10),
-                name="invitation_redemptions_between_1_and_10",
-            ),
-            models.CheckConstraint(
-                condition=Q(redemption_count__lte=F("max_redemptions")),
-                name="invitation_redemptions_within_limit",
-            ),
+            models.UniqueConstraint(
+                fields=("event", "name"),
+                name="unique_event_sub_event_name",
+            )
         ]
+        ordering = ("position", "name", "id")
+
+    def __str__(self) -> str:
+        return f"{self.event}: {self.name}"
 
 
-class UploaderDevice(models.Model):
+class EventInstallation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    event = models.ForeignKey(Event, on_delete=models.PROTECT, related_name="uploader_devices")
-    installation_id = models.UUIDField()
-    label = models.CharField(max_length=100)
-    role = models.CharField(
-        max_length=16,
-        choices=tuple((role.value, role.value.title()) for role in DeviceRole),
-    )
-    status = models.CharField(
-        max_length=16,
-        choices=tuple((status.value, status.value.title()) for status in DeviceStatus),
-        default=DeviceStatus.ACTIVE.value,
-    )
-    invitation = models.ForeignKey(
-        UploaderInvitation,
+    event = models.ForeignKey(Event, on_delete=models.PROTECT, related_name="installations")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
         blank=True,
         null=True,
         on_delete=models.PROTECT,
-        related_name="devices",
+        related_name="openfotos_event_installations",
+    )
+    installation_id = models.UUIDField()
+    label = models.CharField(max_length=100)
+    status = models.CharField(
+        max_length=16,
+        choices=tuple((status.value, status.value.title()) for status in InstallationStatus),
+        default=InstallationStatus.ACTIVE.value,
     )
     revoked_at = models.DateTimeField(blank=True, null=True, editable=False)
     last_active_at = models.DateTimeField(default=timezone.now)
@@ -339,9 +322,13 @@ class UploaderDevice(models.Model):
             models.UniqueConstraint(
                 fields=("event", "installation_id"),
                 name="unique_event_installation",
-            )
+            ),
+            models.CheckConstraint(
+                condition=Q(user__isnull=False) | Q(status=InstallationStatus.REVOKED.value),
+                name="active_event_installation_has_user",
+            ),
         ]
-        indexes = [models.Index(fields=("event", "status"), name="device_event_status_idx")]
+        indexes = [models.Index(fields=("event", "status"), name="install_event_status_idx")]
 
 
 class DesktopSession(models.Model):
@@ -353,17 +340,8 @@ class DesktopSession(models.Model):
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
-        blank=True,
-        null=True,
         on_delete=models.PROTECT,
         related_name="openfotos_desktop_sessions",
-    )
-    device = models.ForeignKey(
-        UploaderDevice,
-        blank=True,
-        null=True,
-        on_delete=models.PROTECT,
-        related_name="sessions",
     )
     installation_id = models.UUIDField()
     access_token_hash = models.CharField(max_length=64, unique=True, editable=False)
@@ -375,20 +353,15 @@ class DesktopSession(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
-    class Meta:
-        constraints = [
-            models.CheckConstraint(
-                condition=(Q(user__isnull=False) & Q(device__isnull=True))
-                | (Q(user__isnull=True) & Q(device__isnull=False)),
-                name="desktop_session_has_one_actor",
-            )
-        ]
-
-
 class ContributionBatch(models.Model):
     id = models.UUIDField(primary_key=True, editable=False)
-    device = models.ForeignKey(
-        UploaderDevice,
+    installation = models.ForeignKey(
+        EventInstallation,
+        on_delete=models.PROTECT,
+        related_name="contribution_batches",
+    )
+    sub_event = models.ForeignKey(
+        SubEvent,
         on_delete=models.PROTECT,
         related_name="contribution_batches",
     )
@@ -411,7 +384,8 @@ class ContributionBatch(models.Model):
     class Meta:
         indexes = [
             models.Index(
-                fields=("device", "intake_generation", "state"), name="batch_device_gen_idx"
+                fields=("installation", "intake_generation", "state"),
+                name="batch_install_gen_idx",
             )
         ]
 
@@ -614,8 +588,8 @@ class AuditEvent(models.Model):
         on_delete=models.SET_NULL,
         related_name="openfotos_audit_events",
     )
-    uploader_device = models.ForeignKey(
-        UploaderDevice,
+    event_installation = models.ForeignKey(
+        EventInstallation,
         blank=True,
         null=True,
         on_delete=models.SET_NULL,

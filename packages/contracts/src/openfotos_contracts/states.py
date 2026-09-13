@@ -19,12 +19,7 @@ class IntakeState(StrEnum):
     CLOSED = "closed"
 
 
-class DeviceRole(StrEnum):
-    LEAD = "lead"
-    UPLOADER = "uploader"
-
-
-class DeviceStatus(StrEnum):
+class InstallationStatus(StrEnum):
     ACTIVE = "active"
     REVOKED = "revoked"
 

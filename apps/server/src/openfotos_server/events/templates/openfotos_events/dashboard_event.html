@@ -18,22 +18,60 @@
     <h2>Preview policy</h2>
     {% if policy %}
       <p>{% if policy.enabled %}Watermark enabled · {{ policy.get_template_display }}{% else %}Clean previews confirmed{% endif %}</p>
-      <p class="muted">Configured in the lead desktop app. This policy is locked.</p>
+      <p class="muted">Configured in the photographer desktop app. This policy is locked.</p>
     {% else %}
-      <p>Waiting for lead confirmation in the desktop app.</p>
+      <p>Waiting for photographer confirmation in the desktop app.</p>
     {% endif %}
   </section>
   <section class="card compact-card">
-    <h2>Original downloads</h2>
-    <form method="post" action="{% url 'events:update-download-policy' event_id=event.id %}">
+    <h2>Create a sub-event</h2>
+    <form method="post" action="{% url 'events:create-sub-event' event_id=event.id %}">
       {% csrf_token %}
-      {{ download_form.policy.label_tag }}
-      {{ download_form.policy }}
-      <button type="submit">Save policy</button>
+      {{ sub_event_form.name.label_tag }} {{ sub_event_form.name }}
+      {{ sub_event_form.position.label_tag }} {{ sub_event_form.position }}
+      <button type="submit">Create sub-event</button>
     </form>
-    <p class="muted">This controls exact originals. Displayed previews can still be saved or captured.</p>
+    <p class="muted">Every desktop contribution must target one active sub-event.</p>
   </section>
 </div>
+
+<section class="card compact-card">
+  <h2>Sub-events</h2>
+  {% for sub_event in sub_events %}
+    <div class="failure-row">
+      <form method="post" action="{% url 'events:update-sub-event' event_id=event.id sub_event_id=sub_event.id %}">
+        {% csrf_token %}
+        <input name="name" value="{{ sub_event.name }}" maxlength="120" required aria-label="Sub-event name">
+        <input name="position" type="number" min="1" max="32767" value="{{ sub_event.position }}" required aria-label="Display position">
+        <button type="submit">Save</button>
+      </form>
+      <form method="post" action="{% url 'events:archive-sub-event' event_id=event.id sub_event_id=sub_event.id %}">
+        {% csrf_token %}
+        <input type="hidden" name="action" value="{% if sub_event.is_archived %}restore{% else %}archive{% endif %}">
+        <button type="submit" class="button-secondary">{% if sub_event.is_archived %}Restore{% else %}Archive{% endif %}</button>
+      </form>
+      {% if sub_event.is_archived %}<span class="muted">Hidden from gallery and uploads</span>{% endif %}
+    </div>
+  {% empty %}
+    <p class="muted">Create at least one sub-event before uploading photos.</p>
+  {% endfor %}
+</section>
+
+{% if batches %}
+<section class="card compact-card">
+  <h2>Contribution assignments</h2>
+  {% for batch in batches %}
+    <form class="failure-row" method="post" action="{% url 'events:reassign-batch' event_id=event.id batch_id=batch.id %}">
+      {% csrf_token %}
+      <span>{{ batch.label|default:"Contribution" }} · {{ batch.sub_event.name }} · {{ batch.declared_asset_count }} photo{{ batch.declared_asset_count|pluralize }}</span>
+      <select name="sub_event_id" aria-label="Sub-event for contribution">
+        {% for option in active_sub_events %}<option value="{{ option.id }}" {% if option.id == batch.sub_event_id %}selected{% endif %}>{{ option.name }}</option>{% endfor %}
+      </select>
+      <button type="submit">Move batch</button>
+    </form>
+  {% endfor %}
+</section>
+{% endif %}
 
 <section class="card compact-card publication-card">
   <div>
@@ -87,5 +125,11 @@
 {% endif %}
 
 <h2>Gallery preview</h2>
+<nav class="sub-event-filters" aria-label="Gallery sub-events">
+  <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:photographer-event' event_id=event.id %}">All</a>
+  {% for sub_event in active_sub_events %}
+    <a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>
+  {% endfor %}
+</nav>
 {% include "openfotos_events/gallery_grid.html" with dashboard_mode=True %}
 {% endblock %}

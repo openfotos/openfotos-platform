@@ -37,7 +37,7 @@ def record_audit(
     request: HttpRequest | None = None,
     event: Event | None = None,
     actor=None,
-    uploader_device=None,
+    event_installation=None,
     metadata: dict[str, Any] | None = None,
 ) -> AuditEvent:
     """Persist a deliberately small audit record; callers must not pass secrets."""
@@ -45,7 +45,7 @@ def record_audit(
         photographer=photographer,
         event=event,
         actor=actor,
-        uploader_device=uploader_device,
+        event_installation=event_installation,
         action=action,
         result=result,
         client_hash=request_client_hash(request) if request is not None else "",

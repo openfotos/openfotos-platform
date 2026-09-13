@@ -11,5 +11,12 @@
   <p class="muted">Private gallery</p>
 </div>
 
+<nav class="sub-event-filters" aria-label="Gallery sub-events">
+  <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:event-access' token=event.public_token %}">All</a>
+  {% for sub_event in sub_events %}
+    <a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:visitor-sub-event' token=event.public_token sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>
+  {% endfor %}
+</nav>
+
 {% include "openfotos_events/gallery_grid.html" %}
 {% endblock %}

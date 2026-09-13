@@ -27,6 +27,7 @@ class TransitionFacts:
     expiry_is_future: bool
     derivatives_ready_generation: int | None
     preview_policy_confirmed: bool
+    has_active_sub_event: bool
 
     @property
     def current_manifest_is_committed(self) -> bool:
@@ -93,6 +94,11 @@ def state_for_manual_transition(
             "Finalize the current ingestion manifest before Processing.",
         )
     if target is EventState.PUBLISHED:
+        if not facts.has_active_sub_event:
+            raise LifecycleViolation(
+                "sub_event_required",
+                "Create and retain at least one active sub-event before publication.",
+            )
         if not facts.pin_configured:
             raise LifecycleViolation("pin_required", "Set an event PIN before publication.")
         if not facts.expiry_is_future:

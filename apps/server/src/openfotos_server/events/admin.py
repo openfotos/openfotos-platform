@@ -6,7 +6,7 @@ from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.utils.html import format_html
 
-from openfotos_contracts import DeviceStatus, EventState
+from openfotos_contracts import EventState, InstallationStatus
 
 from .audit import record_audit
 from .models import (
@@ -17,12 +17,13 @@ from .models import (
     AuditResult,
     ContributionBatch,
     Event,
+    EventInstallation,
     IngestionManifest,
     Photographer,
     PhotographerMembership,
     PreviewPolicy,
-    UploaderDevice,
-    UploaderInvitation,
+    SubEvent,
+    generate_event_pin,
 )
 from .services import (
     change_event_pin,
@@ -33,13 +34,6 @@ from .services import (
 
 
 class EventAdminForm(forms.ModelForm):
-    pin = forms.RegexField(
-        regex=r"^[0-9]{6}$",
-        required=False,
-        help_text="Required when creating an event. Enter a new value only to rotate the PIN.",
-        widget=forms.PasswordInput(render_value=False),
-    )
-
     class Meta:
         model = Event
         fields = (
@@ -49,17 +43,14 @@ class EventAdminForm(forms.ModelForm):
             "max_contribution_devices",
             "processing_profile_id",
             "expires_at",
-            "pin",
         )
 
     def clean(self):
         cleaned_data = super().clean()
-        if self.instance._state.adding and not cleaned_data.get("pin"):
-            self.add_error("pin", "Set a six-digit PIN when creating an event.")
         device_limit = cleaned_data.get("max_contribution_devices")
         if self.instance.pk and device_limit is not None:
-            active_devices = self.instance.uploader_devices.filter(
-                status=DeviceStatus.ACTIVE.value
+            active_devices = self.instance.installations.filter(
+                status=InstallationStatus.ACTIVE.value
             ).count()
             if device_limit < active_devices:
                 self.add_error(
@@ -159,6 +150,7 @@ class EventAdmin(admin.ModelAdmin):
         "move_to_cancelled",
         "revoke_visitor_sessions",
         "rotate_public_token",
+        "rotate_event_pin",
     )
 
     def get_readonly_fields(self, request, obj=None):
@@ -182,8 +174,8 @@ class EventAdmin(admin.ModelAdmin):
         return False
 
     def save_model(self, request, obj, form, change):
-        raw_pin = form.cleaned_data.get("pin")
         if not change:
+            raw_pin = generate_event_pin()
             obj.set_pin(raw_pin)
             super().save_model(request, obj, form, change)
             record_audit(
@@ -193,6 +185,10 @@ class EventAdmin(admin.ModelAdmin):
                 action=AuditAction.EVENT_CREATED,
                 result=AuditResult.SUCCEEDED,
                 request=request,
+            )
+            self.message_user(
+                request,
+                f"Generated PIN for {obj.name}: {raw_pin}. Copy it now; it is not stored.",
             )
             return
 
@@ -205,13 +201,6 @@ class EventAdmin(admin.ModelAdmin):
             result=AuditResult.SUCCEEDED,
             request=request,
         )
-        if raw_pin:
-            change_event_pin(
-                event_id=obj.id,
-                raw_pin=raw_pin,
-                actor=request.user,
-                request=request,
-            )
 
     @admin.action(description="Move selected events to Uploading")
     def move_to_uploading(self, request, queryset):
@@ -257,6 +246,21 @@ class EventAdmin(admin.ModelAdmin):
             changed += 1
         self.message_user(request, f"Rotated the public token for {changed} event(s).")
 
+    @admin.action(description="Generate new four-digit PINs and revoke visitor sessions")
+    def rotate_event_pin(self, request, queryset):
+        for event in queryset:
+            raw_pin = generate_event_pin()
+            change_event_pin(
+                event_id=event.id,
+                raw_pin=raw_pin,
+                actor=request.user,
+                request=request,
+            )
+            self.message_user(
+                request,
+                f"Generated PIN for {event.name}: {raw_pin}. Copy it now; it is not stored.",
+            )
+
     def _transition(self, request, queryset, target):
         changed = 0
         for event in queryset:
@@ -289,7 +293,7 @@ class AuditEventAdmin(admin.ModelAdmin):
         "photographer",
         "event",
         "actor",
-        "uploader_device",
+        "event_installation",
     )
     list_filter = ("action", "result", "photographer")
     search_fields = ("request_id", "event__name", "photographer__display_name")
@@ -297,7 +301,7 @@ class AuditEventAdmin(admin.ModelAdmin):
         "photographer",
         "event",
         "actor",
-        "uploader_device",
+        "event_installation",
         "action",
         "result",
         "client_hash",
@@ -332,53 +336,46 @@ class _IngestionRecordAdmin(admin.ModelAdmin):
         return False
 
 
-@admin.register(UploaderInvitation)
-class UploaderInvitationAdmin(_IngestionRecordAdmin):
-    list_display = (
-        "event",
-        "created_by",
-        "redemption_count",
-        "max_redemptions",
-        "expires_at",
-        "revoked_at",
-        "closed_at",
-    )
-    list_filter = ("event__photographer",)
-    exclude = ("token_hash",)
-
-
-@admin.register(UploaderDevice)
-class UploaderDeviceAdmin(_IngestionRecordAdmin):
-    list_display = ("label", "event", "role", "status", "last_active_at", "created_at")
-    list_filter = ("status", "role", "event__photographer")
+@admin.register(EventInstallation)
+class EventInstallationAdmin(_IngestionRecordAdmin):
+    list_display = ("label", "event", "user", "status", "last_active_at", "created_at")
+    list_filter = ("status", "event__photographer")
     search_fields = ("label", "event__name")
+
+
+@admin.register(SubEvent)
+class SubEventAdmin(_IngestionRecordAdmin):
+    list_display = ("name", "event", "position", "is_archived", "updated_at")
+    list_filter = ("is_archived", "event__photographer")
+    search_fields = ("name", "event__name")
 
 
 @admin.register(ContributionBatch)
 class ContributionBatchAdmin(_IngestionRecordAdmin):
     list_display = (
         "id",
-        "device",
+        "installation",
+        "sub_event",
         "intake_generation",
         "state",
         "declared_asset_count",
         "declared_original_bytes",
         "created_at",
     )
-    list_filter = ("state", "device__event__photographer")
+    list_filter = ("state", "installation__event__photographer")
 
 
 @admin.register(Asset)
 class AssetAdmin(_IngestionRecordAdmin):
     list_display = ("id", "original_filename", "batch", "width", "height", "created_at")
-    list_filter = ("batch__device__event__photographer",)
+    list_filter = ("batch__installation__event__photographer",)
     search_fields = ("id", "original_filename")
 
 
 @admin.register(AssetObject)
 class AssetObjectAdmin(_IngestionRecordAdmin):
     list_display = ("asset", "variant", "state", "expected_bytes", "verified_at")
-    list_filter = ("state", "variant", "asset__batch__device__event__photographer")
+    list_filter = ("state", "variant", "asset__batch__installation__event__photographer")
     search_fields = ("asset__id", "object_key")
 
 
