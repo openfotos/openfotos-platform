@@ -9,12 +9,12 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef, QuerySet
 from django.utils import timezone
 
-from openfotos_contracts import EventState, OriginalDownloadPolicy, UploadObjectState
-from openfotos_storage import AssetVariant
+from openfotos_contracts import AssetVariant, EventState, OriginalDownloadPolicy, UploadObjectState
 from openfotos_storage.backend import ObjectStoreError, S3ObjectStore
 
 from .audit import record_audit
 from .derivative_services import refresh_derivative_readiness
+from .event_lifecycle import state_for_derivative_readiness
 from .ingestion_services import IngestionError
 from .models import Asset, AssetObject, AuditAction, AuditResult, Event
 
@@ -210,8 +210,9 @@ def restore_to_gallery(*, event: Event, asset_id: UUID, actor, request=None) -> 
             )
         )
         locked_event.derivatives_ready_generation = None
-        if locked_event.state == EventState.REVIEW.value:
-            locked_event.state = EventState.PROCESSING.value
+        locked_event.state = state_for_derivative_readiness(
+            EventState(locked_event.state), ready=False
+        ).value
         locked_event.save(update_fields=("derivatives_ready_generation", "state", "updated_at"))
     record_audit(
         photographer=event.photographer,

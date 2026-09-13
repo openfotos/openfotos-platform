@@ -5,7 +5,7 @@ from uuid import uuid4
 import pytest
 from PIL import Image
 
-from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+from openfotos_contracts import AssetVariant, WatermarkLogoKind, WatermarkTemplate
 from openfotos_desktop.ingestion import (
     BatchState,
     CheckpointStore,
@@ -127,12 +127,14 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
         item_id = store.list_items(batch_id)[0].id
         assert len(store.list_derivative_checkpoints(batch_id)) == 2
         store.mark_derivative_started(item_id, "previews")
-        store.mark_derivative_verified(item_id, "previews")
+        store.mark_derivative_verified(item_id, AssetVariant.PREVIEW)
 
     with CheckpointStore(database) as reopened:
         assert reopened.get_event(event_id).preview_policy == policy
-        preview = reopened.get_derivative_checkpoint(item_id, "previews")
+        preview = reopened.get_derivative_checkpoint(item_id, AssetVariant.PREVIEW)
         thumbnail = reopened.get_derivative_checkpoint(item_id, "thumbnails")
+        assert preview.variant is AssetVariant.PREVIEW
+        assert thumbnail.variant is AssetVariant.THUMBNAIL
         assert preview.state is LocalUploadState.VERIFIED
         assert preview.attempt_count == 1
         assert thumbnail.state is LocalUploadState.PENDING

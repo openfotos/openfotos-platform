@@ -1,21 +1,26 @@
 """Contracts shared by the desktop, server, and vision code."""
 
 from .derivatives import (
+    DERIVATIVE_PROFILE,
     DERIVATIVE_PROFILE_ID,
+    DERIVATIVE_VARIANTS,
     MAX_WATERMARK_TEXT_LENGTH,
     WATERMARK_RENDERER_ID,
     AssetDerivativesInput,
+    AssetVariant,
     DerivativeObjectInput,
+    DerivativeProfile,
     DerivativeVariant,
+    DerivativeVariantProfile,
     OriginalDownloadPolicy,
     PreviewPolicyInput,
     WatermarkLogoKind,
     WatermarkTemplate,
     normalized_watermark_text,
 )
+from .events import EventSnapshot, PreviewPolicySnapshot
 from .ingestion import ContractError, ContributionInput, OriginalAssetInput
 from .states import (
-    AssetState,
     ContributionState,
     DeviceRole,
     DeviceStatus,
@@ -23,33 +28,37 @@ from .states import (
     IngestionManifestState,
     IntakeState,
     UploadObjectState,
-    can_transition_asset,
     can_transition_event,
 )
 
 __all__ = [
     "AssetDerivativesInput",
-    "AssetState",
+    "AssetVariant",
+    "DERIVATIVE_PROFILE",
     "DERIVATIVE_PROFILE_ID",
+    "DERIVATIVE_VARIANTS",
+    "DerivativeProfile",
     "DerivativeObjectInput",
     "DerivativeVariant",
+    "DerivativeVariantProfile",
     "ContributionState",
     "ContributionInput",
     "ContractError",
     "DeviceRole",
     "DeviceStatus",
     "EventState",
+    "EventSnapshot",
     "IngestionManifestState",
     "IntakeState",
     "MAX_WATERMARK_TEXT_LENGTH",
     "OriginalAssetInput",
     "OriginalDownloadPolicy",
     "PreviewPolicyInput",
+    "PreviewPolicySnapshot",
     "UploadObjectState",
     "WATERMARK_RENDERER_ID",
     "WatermarkLogoKind",
     "WatermarkTemplate",
-    "can_transition_asset",
     "can_transition_event",
     "normalized_watermark_text",
 ]

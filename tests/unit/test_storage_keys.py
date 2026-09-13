@@ -2,10 +2,16 @@ from uuid import UUID
 
 import pytest
 
-from openfotos_storage import AssetVariant, asset_key, event_manifest_key
+from openfotos_contracts import AssetVariant
+from openfotos_storage import AssetVariant as StorageAssetVariant
+from openfotos_storage import asset_key, event_manifest_key
 
 EVENT_ID = UUID("12345678-1234-5678-1234-567812345678")
 ASSET_ID = UUID("87654321-4321-8765-4321-876543218765")
+
+
+def test_storage_reexports_the_canonical_asset_variant() -> None:
+    assert StorageAssetVariant is AssetVariant
 
 
 def test_asset_key_is_event_scoped_and_uses_uuid_not_filename() -> None:

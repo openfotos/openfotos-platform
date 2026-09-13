@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
 
 from openfotos_contracts import (
     MAX_WATERMARK_TEXT_LENGTH,
+    AssetVariant,
     WatermarkLogoKind,
     WatermarkTemplate,
 )
@@ -1288,7 +1289,7 @@ class ApprovedPage(QWidget):
 
     @Slot(str, int, int)
     def stage_progressed(self, stage: str, completed: int, total: int) -> None:
-        if stage == "originals":
+        if stage == AssetVariant.ORIGINAL.value:
             self.upload_progressed(completed, total)
             return
         self.derivative_progress.setRange(0, max(total, 1))

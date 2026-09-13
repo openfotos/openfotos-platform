@@ -1,8 +1,9 @@
 """Private object-storage boundaries shared by OpenFotos components."""
 
+from openfotos_contracts import AssetVariant
+
 from .backend import PresignedGet
 from .keys import (
-    AssetVariant,
     asset_key,
     event_manifest_key,
     ingestion_manifest_key,

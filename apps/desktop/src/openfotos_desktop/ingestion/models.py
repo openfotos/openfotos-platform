@@ -5,7 +5,7 @@ from enum import StrEnum
 from pathlib import Path
 from uuid import UUID
 
-from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+from openfotos_contracts import AssetVariant, WatermarkLogoKind, WatermarkTemplate
 
 
 class BatchState(StrEnum):
@@ -203,7 +203,7 @@ class UploadCheckpoint:
 @dataclass(frozen=True)
 class DerivativeCheckpoint:
     item_id: UUID
-    variant: str
+    variant: AssetVariant
     state: LocalUploadState
     attempt_count: int
     last_error_code: str | None

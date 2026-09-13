@@ -11,7 +11,13 @@ from django.urls import reverse
 from django.utils import timezone
 
 from openfotos_server.events import api
-from openfotos_server.events.models import Event, Photographer, PhotographerMembership
+from openfotos_server.events.models import (
+    DesktopSession,
+    Event,
+    IdempotencyRecord,
+    Photographer,
+    PhotographerMembership,
+)
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectHead, PresignedPut
 
 pytestmark = pytest.mark.django_db
@@ -245,6 +251,72 @@ def test_uploader_cannot_read_another_device_batch_and_idempotency_conflicts(ten
     )
     assert private.status_code == 404
     assert "photo.jpg" not in private.content.decode()
+
+
+def test_pending_idempotency_claim_blocks_a_duplicate_before_mutation(tenant) -> None:
+    _, user, event = tenant
+    client = Client()
+    lead = login(client)
+    session = DesktopSession.objects.get(user=user)
+    idempotency_key = uuid4()
+    IdempotencyRecord.objects.create(
+        actor_key=str(session.id),
+        key=idempotency_key,
+        operation="close_intake",
+        request_sha256=hashlib.sha256(b"{}").hexdigest(),
+        response_status=0,
+        response_body={},
+        expires_at=timezone.now() + timedelta(minutes=5),
+    )
+
+    response = client.post(
+        f"/api/v1/events/{event.id}/intake/close/",
+        data=b"{}",
+        content_type="application/json",
+        headers={
+            "host": "alpha.localhost",
+            "authorization": f"Bearer {lead['access_token']}",
+            "idempotency-key": str(idempotency_key),
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["error"] == {
+        "code": "idempotency_in_progress",
+        "message": "The matching request is still in progress; retry it shortly.",
+        "retryable": True,
+    }
+    event.refresh_from_db()
+    assert event.intake_state == "open"
+
+
+def test_failed_mutation_releases_its_idempotency_claim(tenant) -> None:
+    _, user, event = tenant
+    client = Client()
+    lead = login(client)
+    session = DesktopSession.objects.get(user=user)
+    idempotency_key = uuid4()
+
+    invalid = post_json(
+        client,
+        reverse("desktop-api:reserve-batch", args=(event.id,)),
+        {"unexpected": True},
+        token=lead["access_token"],
+        idempotency_key=idempotency_key,
+    )
+    assert invalid.status_code == 400
+    assert not IdempotencyRecord.objects.filter(
+        actor_key=str(session.id), key=idempotency_key
+    ).exists()
+
+    reserved = post_json(
+        client,
+        reverse("desktop-api:reserve-batch", args=(event.id,)),
+        manifest(b"synthetic jpeg"),
+        token=lead["access_token"],
+        idempotency_key=idempotency_key,
+    )
+    assert reserved.status_code == 201, reserved.json()
 
 
 def test_api_upload_recovery_close_and_finalize(monkeypatch, tenant) -> None:

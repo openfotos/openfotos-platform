@@ -1,13 +1,8 @@
 """Generate server-owned object keys from validated UUIDs."""
 
-from enum import StrEnum
 from uuid import UUID
 
-
-class AssetVariant(StrEnum):
-    ORIGINAL = "originals"
-    PREVIEW = "previews"
-    THUMBNAIL = "thumbnails"
+from openfotos_contracts import AssetVariant
 
 
 def _canonical_uuid(value: UUID | str) -> str:

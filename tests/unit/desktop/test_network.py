@@ -78,13 +78,17 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
         return {
             "id": str(event_id),
             "name": "Reception",
+            "state": "uploading",
             "storage_limit_bytes": 25_000_000_000,
             "processing_profile_id": "pilot-profile-v1",
             "role": "lead",
             "reserved_original_bytes": 0,
             "verified_original_bytes": 0,
+            "remaining_original_bytes": 25_000_000_000,
             "intake_state": "open",
             "intake_generation": 1,
+            "max_contribution_devices": 10,
+            "active_contribution_devices": 1,
             "device_label": "",
             "preview_policy": state.get("policy"),
         }

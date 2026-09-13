@@ -14,8 +14,8 @@ from PIL import Image
 from openfotos_contracts import (
     DERIVATIVE_PROFILE_ID,
     AssetDerivativesInput,
+    AssetVariant,
     ContributionInput,
-    DerivativeVariant,
     EventState,
     PreviewPolicyInput,
 )
@@ -214,7 +214,7 @@ def _derivative_input(asset, policy):
                 ],
             }
         ),
-        {DerivativeVariant.PREVIEW: preview, DerivativeVariant.THUMBNAIL: thumbnail},
+        {AssetVariant.PREVIEW: preview, AssetVariant.THUMBNAIL: thumbnail},
     )
 
 

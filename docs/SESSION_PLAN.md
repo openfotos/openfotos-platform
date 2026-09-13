@@ -143,6 +143,8 @@ lead-only, requires closed intake, and rejects nonterminal contributions.
 **Status (2026-09-12):** Complete. ADR 0006 records the immutable optional preview policy,
 desktop-owned derivative profile, exact private GET authorization, retry/exclusion workflow,
 gallery presentation, publication gate, and accepted screenshot/residual-URL risks.
+ADR 0007 records the 2026-09-13 behavior-preserving simplicity pass over the completed Sessions
+1-5 code.
 
 **Goal:** Publish fast, authorized browsing assets while preserving uploaded originals.
 

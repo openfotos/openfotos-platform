@@ -11,6 +11,7 @@ from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
 from openfotos_contracts import (
+    AssetVariant,
     ContributionInput,
     ContributionState,
     DeviceStatus,
@@ -19,11 +20,17 @@ from openfotos_contracts import (
     IntakeState,
     UploadObjectState,
 )
-from openfotos_storage import AssetVariant, asset_key, ingestion_manifest_key
+from openfotos_storage import asset_key, ingestion_manifest_key
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectStoreError, S3ObjectStore
 
 from .audit import record_audit
 from .desktop_auth import DesktopAuthError, register_lead_device
+from .event_lifecycle import (
+    LifecycleViolation,
+    state_for_contribution,
+    state_for_finalized_ingestion,
+    state_for_reopened_intake,
+)
 from .models import (
     Asset,
     AssetObject,
@@ -108,8 +115,10 @@ def reserve_contribution(
         raise IngestionError("idempotency_conflict", "The contribution ID is already in use.")
     if locked_event.intake_state != IntakeState.OPEN.value:
         raise IngestionError("intake_closed", "The event is not accepting new contributions.")
-    if locked_event.state not in {EventState.DRAFT.value, EventState.UPLOADING.value}:
-        raise IngestionError("event_not_uploading", "The event is not accepting uploads.")
+    try:
+        contribution_state = state_for_contribution(EventState(locked_event.state))
+    except LifecycleViolation as exc:
+        raise IngestionError(exc.code, str(exc)) from exc
     if contribution.processing_profile_id != locked_event.processing_profile_id:
         raise IngestionError(
             "processing_profile_mismatch",
@@ -164,8 +173,7 @@ def reserve_contribution(
         ]
     )
     locked_event.reserved_original_bytes += contribution.original_bytes
-    if locked_event.state == EventState.DRAFT.value:
-        locked_event.state = EventState.UPLOADING.value
+    locked_event.state = contribution_state.value
     locked_event.save(update_fields=("reserved_original_bytes", "state", "updated_at"))
     record_audit(
         photographer=locked_event.photographer,
@@ -501,18 +509,16 @@ def reopen_intake(*, session: DesktopSession, event_id: UUID, request=None) -> E
     locked = Event.objects.select_for_update().get(pk=event.pk)
     if locked.intake_state == IntakeState.OPEN.value:
         return locked
-    if locked.state in {
-        EventState.PUBLISHED.value,
-        EventState.ARCHIVED.value,
-        EventState.CANCELLED.value,
-    }:
-        raise IngestionError("event_not_reopenable", "Published or closed events cannot reopen.")
+    try:
+        reopened_state = state_for_reopened_intake(EventState(locked.state))
+    except LifecycleViolation as exc:
+        raise IngestionError(exc.code, str(exc)) from exc
     previous_generation = locked.intake_generation
     locked.intake_generation += 1
     locked.intake_state = IntakeState.OPEN.value
     locked.current_ingestion_manifest = None
     locked.derivatives_ready_generation = None
-    locked.state = EventState.UPLOADING.value
+    locked.state = reopened_state.value
     locked.save(
         update_fields=(
             "intake_generation",
@@ -634,8 +640,10 @@ def finalize_ingestion(
             if current and current.generation == locked_event.intake_generation:
                 transaction.on_commit(lambda: refresh_derivative_readiness(locked_event.id))
                 return current
-        if locked_event.state != EventState.UPLOADING.value:
-            raise IngestionError("event_not_uploading", "The event cannot be finalized now.")
+        try:
+            finalized_state = state_for_finalized_ingestion(EventState(locked_event.state))
+        except LifecycleViolation as exc:
+            raise IngestionError(exc.code, str(exc)) from exc
         nonterminal = AssetObject.objects.filter(
             asset__batch__device__event=locked_event,
             variant=AssetVariant.ORIGINAL.value,
@@ -721,7 +729,7 @@ def finalize_ingestion(
         locked_manifest.committed_at = now
         locked_manifest.save(update_fields=("state", "committed_at"))
         locked_event.current_ingestion_manifest = locked_manifest
-        locked_event.state = EventState.PROCESSING.value
+        locked_event.state = finalized_state.value
         locked_event.save(update_fields=("current_ingestion_manifest", "state", "updated_at"))
     record_audit(
         photographer=event.photographer,

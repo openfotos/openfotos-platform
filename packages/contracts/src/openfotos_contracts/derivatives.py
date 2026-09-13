@@ -10,11 +10,8 @@ from uuid import UUID
 
 from .ingestion import ContractError, _positive_integer, _strict_fields, _uuid
 
-DERIVATIVE_PROFILE_ID = "gallery-jpeg-v1"
 WATERMARK_RENDERER_ID = "watermark-raster-v1"
 MAX_WATERMARK_TEXT_LENGTH = 60
-MAX_PREVIEW_BYTES = 20 * 1024 * 1024
-MAX_THUMBNAIL_BYTES = 5 * 1024 * 1024
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -37,9 +34,63 @@ class OriginalDownloadPolicy(StrEnum):
     EXPLICIT_SHARES = "explicit-shares"
 
 
-class DerivativeVariant(StrEnum):
+class AssetVariant(StrEnum):
+    ORIGINAL = "originals"
     PREVIEW = "previews"
     THUMBNAIL = "thumbnails"
+
+
+# Preserve the Session 5 import while making both names resolve to one value set.
+DerivativeVariant = AssetVariant
+
+
+DERIVATIVE_VARIANTS = (AssetVariant.PREVIEW, AssetVariant.THUMBNAIL)
+
+
+@dataclass(frozen=True)
+class DerivativeVariantProfile:
+    variant: AssetVariant
+    maximum_long_edge: int
+    jpeg_quality: int
+    maximum_bytes: int
+
+
+@dataclass(frozen=True)
+class DerivativeProfile:
+    id: str
+    preview: DerivativeVariantProfile
+    thumbnail: DerivativeVariantProfile
+    optimize: bool
+    progressive: bool
+    subsampling: str
+
+    def for_variant(self, variant: AssetVariant) -> DerivativeVariantProfile:
+        if variant is AssetVariant.PREVIEW:
+            return self.preview
+        if variant is AssetVariant.THUMBNAIL:
+            return self.thumbnail
+        raise ValueError("The original does not use the derivative profile.")
+
+
+DERIVATIVE_PROFILE = DerivativeProfile(
+    id="gallery-jpeg-v1",
+    preview=DerivativeVariantProfile(
+        variant=AssetVariant.PREVIEW,
+        maximum_long_edge=2048,
+        jpeg_quality=85,
+        maximum_bytes=20 * 1024 * 1024,
+    ),
+    thumbnail=DerivativeVariantProfile(
+        variant=AssetVariant.THUMBNAIL,
+        maximum_long_edge=512,
+        jpeg_quality=78,
+        maximum_bytes=5 * 1024 * 1024,
+    ),
+    optimize=True,
+    progressive=True,
+    subsampling="4:2:0",
+)
+DERIVATIVE_PROFILE_ID = DERIVATIVE_PROFILE.id
 
 
 def normalized_watermark_text(value: object) -> str:
@@ -121,7 +172,7 @@ class PreviewPolicyInput:
 
 @dataclass(frozen=True)
 class DerivativeObjectInput:
-    variant: DerivativeVariant
+    variant: AssetVariant
     size_bytes: int
     sha256: str
     content_md5: str
@@ -136,14 +187,15 @@ class DerivativeObjectInput:
             context="Each derivative object",
         )
         try:
-            variant = DerivativeVariant(str(value["variant"]))
+            variant = AssetVariant(str(value["variant"]))
         except ValueError as exc:
             raise ContractError(
                 "invalid_derivative_variant", "Unknown derivative variant."
             ) from exc
+        if variant not in DERIVATIVE_VARIANTS:
+            raise ContractError("invalid_derivative_variant", "Unknown derivative variant.")
         size_bytes = _positive_integer(value["size_bytes"], field="size_bytes")
-        maximum = MAX_PREVIEW_BYTES if variant is DerivativeVariant.PREVIEW else MAX_THUMBNAIL_BYTES
-        if size_bytes > maximum:
+        if size_bytes > DERIVATIVE_PROFILE.for_variant(variant).maximum_bytes:
             raise ContractError("derivative_too_large", "The derivative exceeds its byte limit.")
         sha256 = str(value["sha256"])
         if not _SHA256_PATTERN.fullmatch(sha256):
@@ -194,7 +246,7 @@ class AssetDerivativesInput:
                 "invalid_derivative_count", "Each asset requires one preview and one thumbnail."
             )
         parsed_objects = tuple(DerivativeObjectInput.from_dict(item) for item in objects_raw)
-        if {item.variant for item in parsed_objects} != set(DerivativeVariant):
+        if {item.variant for item in parsed_objects} != set(DERIVATIVE_VARIANTS):
             raise ContractError(
                 "invalid_derivative_count", "Each asset requires one preview and one thumbnail."
             )

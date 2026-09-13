@@ -11,10 +11,10 @@ from openfotos_contracts import (
     EventState,
     IngestionManifestState,
     IntakeState,
-    can_transition_event,
 )
 
 from .audit import record_audit
+from .event_lifecycle import LifecycleViolation, TransitionFacts, state_for_manual_transition
 from .models import AuditAction, AuditResult, Event, generate_event_token
 
 
@@ -29,44 +29,39 @@ def transition_event(
     """Move one event through an allowed transition and audit the change atomically."""
     event = Event.objects.select_for_update().select_related("photographer").get(pk=event_id)
     current = EventState(event.state)
-    if target == current:
+    if target is current:
         return event
-    if not can_transition_event(current, target):
-        raise ValidationError(f"Cannot transition an event from {current} to {target}.")
-    if target is EventState.UPLOADING and (
-        current in {EventState.PROCESSING, EventState.REVIEW}
-        or event.current_ingestion_manifest_id is not None
-    ):
-        raise ValidationError(
-            "Reopen intake to create a new ingestion generation before returning to Uploading."
+    manifest = (
+        event.current_ingestion_manifest
+        if target in {EventState.PROCESSING, EventState.PUBLISHED}
+        else None
+    )
+    try:
+        next_state = state_for_manual_transition(
+            current,
+            target,
+            facts=TransitionFacts(
+                intake_state=IntakeState(event.intake_state),
+                intake_generation=event.intake_generation,
+                manifest_exists=event.current_ingestion_manifest_id is not None,
+                manifest_state=(
+                    IngestionManifestState(manifest.state) if manifest is not None else None
+                ),
+                manifest_generation=manifest.generation if manifest is not None else None,
+                pin_configured=bool(event.pin_hash),
+                expiry_is_future=event.expires_at is not None and event.expires_at > timezone.now(),
+                derivatives_ready_generation=event.derivatives_ready_generation,
+                preview_policy_confirmed=(
+                    hasattr(event, "preview_policy") if target is EventState.PUBLISHED else False
+                ),
+            ),
         )
-    if target is EventState.PROCESSING:
-        manifest = event.current_ingestion_manifest
-        if (
-            event.intake_state != IntakeState.CLOSED.value
-            or manifest is None
-            or manifest.state != IngestionManifestState.COMMITTED.value
-            or manifest.generation != event.intake_generation
-        ):
-            raise ValidationError("Finalize the current ingestion manifest before Processing.")
-    if target is EventState.PUBLISHED:
-        if not event.pin_hash:
-            raise ValidationError("Set an event PIN before publication.")
-        if event.expires_at is None or event.expires_at <= timezone.now():
-            raise ValidationError("Set a future event expiry before publication.")
-        manifest = event.current_ingestion_manifest
-        if (
-            manifest is None
-            or manifest.state != IngestionManifestState.COMMITTED.value
-            or manifest.generation != event.intake_generation
-        ):
-            raise ValidationError("Finalize the current ingestion manifest before publication.")
-        if event.derivatives_ready_generation != event.intake_generation:
-            raise ValidationError("Complete private gallery derivatives before publication.")
-        if not hasattr(event, "preview_policy"):
-            raise ValidationError("Confirm the event preview settings before publication.")
+    except LifecycleViolation as exc:
+        raise ValidationError(str(exc)) from exc
+    if next_state is current:
+        return event
 
-    event.state = target
+    event.state = next_state
     update_fields = ["state", "updated_at"]
     if current is EventState.PUBLISHED and target is EventState.REVIEW:
         event.visitor_access_version = uuid4()
@@ -79,7 +74,7 @@ def transition_event(
         action=AuditAction.EVENT_STATE_CHANGED,
         result=AuditResult.SUCCEEDED,
         request=request,
-        metadata={"from": current.value, "to": target.value},
+        metadata={"from": current.value, "to": next_state.value},
     )
     return event
 

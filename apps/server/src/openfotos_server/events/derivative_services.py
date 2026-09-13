@@ -14,19 +14,25 @@ from django.utils import timezone
 from PIL import Image, UnidentifiedImageError
 
 from openfotos_contracts import (
+    DERIVATIVE_PROFILE,
     DERIVATIVE_PROFILE_ID,
+    DERIVATIVE_VARIANTS,
     WATERMARK_RENDERER_ID,
     AssetDerivativesInput,
-    DerivativeVariant,
+    AssetVariant,
     EventState,
     IngestionManifestState,
     PreviewPolicyInput,
+    PreviewPolicySnapshot,
     UploadObjectState,
+    WatermarkLogoKind,
+    WatermarkTemplate,
 )
-from openfotos_storage import AssetVariant, asset_key, preview_policy_mark_key
+from openfotos_storage import asset_key, preview_policy_mark_key
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectStoreError, S3ObjectStore
 
 from .audit import record_audit
+from .event_lifecycle import state_for_derivative_readiness
 from .ingestion_services import IngestionError, event_for_session
 from .models import (
     Asset,
@@ -44,19 +50,19 @@ MAX_MARK_EDGE = 2048
 _NATURAL_PART = re.compile(r"(\d+)")
 
 
-def preview_policy_data(policy: PreviewPolicy | None) -> dict | None:
+def preview_policy_snapshot(policy: PreviewPolicy | None) -> PreviewPolicySnapshot | None:
     if policy is None:
         return None
-    return {
-        "id": str(policy.id),
-        "enabled": policy.enabled,
-        "template": policy.template,
-        "text": policy.text,
-        "logo_kind": policy.logo_kind,
-        "renderer_id": policy.renderer_id,
-        "derivative_profile_id": policy.derivative_profile_id,
-        "mark_sha256": policy.mark_sha256,
-    }
+    return PreviewPolicySnapshot(
+        id=policy.id,
+        enabled=policy.enabled,
+        template=WatermarkTemplate(policy.template),
+        text=policy.text,
+        logo_kind=WatermarkLogoKind(policy.logo_kind),
+        renderer_id=policy.renderer_id,
+        derivative_profile_id=policy.derivative_profile_id,
+        mark_sha256=policy.mark_sha256,
+    )
 
 
 def confirm_preview_policy(
@@ -391,7 +397,7 @@ def issue_derivative_leases(
     session: DesktopSession,
     event_id: UUID,
     asset_id: UUID,
-    variants: tuple[DerivativeVariant, ...],
+    variants: tuple[AssetVariant, ...],
     object_store: S3ObjectStore,
 ) -> list[dict]:
     event = event_for_session(session, event_id)
@@ -465,7 +471,7 @@ def verify_derivative(
     session: DesktopSession,
     event_id: UUID,
     asset_id: UUID,
-    variant: DerivativeVariant,
+    variant: AssetVariant,
     object_store: S3ObjectStore,
     request=None,
 ) -> AssetObject:
@@ -559,9 +565,10 @@ def refresh_derivative_readiness(event_id: UUID) -> bool:
     ).count()
     if verified_pairs != len(assets) * 2:
         event.derivatives_ready_generation = None
-        if event.state == EventState.REVIEW.value:
+        next_state = state_for_derivative_readiness(EventState(event.state), ready=False)
+        if next_state.value != event.state:
             previous_state = event.state
-            event.state = EventState.PROCESSING.value
+            event.state = next_state.value
             event.save(update_fields=("derivatives_ready_generation", "state", "updated_at"))
             _record_automatic_transition(event, previous_state)
         else:
@@ -573,9 +580,10 @@ def refresh_derivative_readiness(event_id: UUID) -> bool:
         asset.gallery_position = position
     Asset.objects.bulk_update(ordered, ("gallery_position",))
     event.derivatives_ready_generation = event.intake_generation
-    if event.state == EventState.PROCESSING.value:
+    next_state = state_for_derivative_readiness(EventState(event.state), ready=True)
+    if next_state.value != event.state:
         previous_state = event.state
-        event.state = EventState.REVIEW.value
+        event.state = next_state.value
     else:
         previous_state = event.state
     event.save(update_fields=("derivatives_ready_generation", "state", "updated_at"))
@@ -626,9 +634,11 @@ def _owned_asset(
     return asset
 
 
-def _validate_dimensions(asset: Asset, variant: DerivativeVariant, width: int, height: int) -> None:
-    limit = 2048 if variant is DerivativeVariant.PREVIEW else 512
-    expected_long_edge = min(limit, max(asset.width, asset.height))
+def _validate_dimensions(asset: Asset, variant: AssetVariant, width: int, height: int) -> None:
+    if variant not in DERIVATIVE_VARIANTS:
+        raise IngestionError("invalid_derivative_variant", "Unknown derivative variant.")
+    profile = DERIVATIVE_PROFILE.for_variant(variant)
+    expected_long_edge = min(profile.maximum_long_edge, max(asset.width, asset.height))
     if max(width, height) != expected_long_edge:
         raise IngestionError(
             "derivative_dimensions_mismatch", "The derivative dimensions do not match the profile."

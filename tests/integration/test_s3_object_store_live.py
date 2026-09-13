@@ -6,7 +6,8 @@ from uuid import uuid4
 import httpx
 import pytest
 
-from openfotos_storage import AssetVariant, asset_key, ingestion_manifest_key
+from openfotos_contracts import AssetVariant
+from openfotos_storage import asset_key, ingestion_manifest_key
 from openfotos_storage.backend import ObjectAlreadyExists, S3ObjectStore
 
 pytestmark = pytest.mark.skipif(

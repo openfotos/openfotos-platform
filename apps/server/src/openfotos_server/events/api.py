@@ -2,25 +2,30 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from uuid import UUID
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.http import Http404, HttpRequest, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_POST
 
 from openfotos_contracts import (
+    DERIVATIVE_VARIANTS,
     AssetDerivativesInput,
+    AssetVariant,
     ContractError,
     ContributionInput,
-    DerivativeVariant,
     DeviceRole,
     DeviceStatus,
+    EventSnapshot,
+    EventState,
+    IntakeState,
     PreviewPolicyInput,
 )
 
@@ -29,7 +34,7 @@ from .derivative_services import (
     issue_derivative_leases,
     issue_owned_original_url,
     issue_policy_mark_url,
-    preview_policy_data,
+    preview_policy_snapshot,
     register_asset_derivatives,
     report_derivative_failure,
     verify_derivative,
@@ -104,16 +109,21 @@ def _domain_error(exc: DesktopAuthError | ContractError | IngestionError) -> Jso
 
 
 @dataclass(frozen=True)
-class _MutationContext:
+class _MutationClaim:
+    record_id: int
     actor_key: str
     key: UUID
     operation: str
     request_sha256: str
 
 
-def _mutation_context(
+_IDEMPOTENCY_PENDING_STATUS = 0
+_IDEMPOTENCY_PENDING_TTL_SECONDS = 15 * 60
+
+
+def _claim_mutation(
     request: HttpRequest, *, session, operation: str
-) -> _MutationContext | JsonResponse:
+) -> _MutationClaim | JsonResponse:
     raw_key = request.headers.get("Idempotency-Key", "")
     try:
         key = UUID(raw_key)
@@ -123,55 +133,127 @@ def _mutation_context(
             "Send a UUID Idempotency-Key for this mutation.",
             status=400,
         )
-    context = _MutationContext(
-        actor_key=str(session.id),
+    actor_key = str(session.id)
+    request_sha256 = hashlib.sha256(request.body).hexdigest()
+    now = timezone.now()
+    with transaction.atomic():
+        existing = (
+            IdempotencyRecord.objects.select_for_update()
+            .filter(actor_key=actor_key, key=key)
+            .first()
+        )
+        if existing is not None and existing.expires_at <= now:
+            existing.delete()
+            existing = None
+        if existing is not None:
+            return _replay_or_reject(
+                existing,
+                operation=operation,
+                request_sha256=request_sha256,
+            )
+        try:
+            with transaction.atomic():
+                record = IdempotencyRecord.objects.create(
+                    actor_key=actor_key,
+                    key=key,
+                    operation=operation,
+                    request_sha256=request_sha256,
+                    response_status=_IDEMPOTENCY_PENDING_STATUS,
+                    response_body={},
+                    expires_at=now
+                    + timedelta(
+                        seconds=min(
+                            settings.IDEMPOTENCY_TTL_SECONDS,
+                            _IDEMPOTENCY_PENDING_TTL_SECONDS,
+                        )
+                    ),
+                )
+        except IntegrityError:
+            existing = IdempotencyRecord.objects.select_for_update().get(
+                actor_key=actor_key,
+                key=key,
+            )
+            return _replay_or_reject(
+                existing,
+                operation=operation,
+                request_sha256=request_sha256,
+            )
+    return _MutationClaim(
+        record_id=record.id,
+        actor_key=actor_key,
         key=key,
         operation=operation,
-        request_sha256=hashlib.sha256(request.body).hexdigest(),
+        request_sha256=request_sha256,
     )
-    existing = IdempotencyRecord.objects.filter(
-        actor_key=context.actor_key,
-        key=context.key,
-        expires_at__gt=timezone.now(),
-    ).first()
-    if existing is None:
-        return context
-    if existing.operation != context.operation or existing.request_sha256 != context.request_sha256:
+
+
+def _replay_or_reject(
+    record: IdempotencyRecord,
+    *,
+    operation: str,
+    request_sha256: str,
+) -> JsonResponse:
+    if record.operation != operation or record.request_sha256 != request_sha256:
         return _error(
             "idempotency_conflict",
             "The idempotency key was already used for a different request.",
             status=409,
         )
-    return JsonResponse(existing.response_body, status=existing.response_status)
+    if record.response_status == _IDEMPOTENCY_PENDING_STATUS:
+        return _error(
+            "idempotency_in_progress",
+            "The matching request is still in progress; retry it shortly.",
+            status=409,
+            retryable=True,
+        )
+    return JsonResponse(record.response_body, status=record.response_status)
 
 
-def _remember(context: _MutationContext, data: dict, *, status: int = 200) -> JsonResponse:
-    try:
-        IdempotencyRecord.objects.create(
-            actor_key=context.actor_key,
-            key=context.key,
-            operation=context.operation,
-            request_sha256=context.request_sha256,
-            response_status=status,
-            response_body=data,
-            expires_at=timezone.now() + timedelta(seconds=settings.IDEMPOTENCY_TTL_SECONDS),
-        )
-    except IntegrityError:
-        existing = IdempotencyRecord.objects.get(
-            actor_key=context.actor_key,
-            key=context.key,
-        )
+def _complete_mutation(claim: _MutationClaim, data: dict, *, status: int) -> JsonResponse:
+    with transaction.atomic():
+        record = IdempotencyRecord.objects.select_for_update().get(pk=claim.record_id)
         if (
-            existing.operation != context.operation
-            or existing.request_sha256 != context.request_sha256
+            record.actor_key != claim.actor_key
+            or record.key != claim.key
+            or record.operation != claim.operation
+            or record.request_sha256 != claim.request_sha256
+            or record.response_status != _IDEMPOTENCY_PENDING_STATUS
         ):
-            return _error(
-                "idempotency_conflict",
-                "The idempotency key was already used for a different request.",
-                status=409,
-            )
-        return JsonResponse(existing.response_body, status=existing.response_status)
+            raise RuntimeError("The idempotency claim changed before completion.")
+        record.response_status = status
+        record.response_body = data
+        record.expires_at = timezone.now() + timedelta(seconds=settings.IDEMPOTENCY_TTL_SECONDS)
+        record.save(update_fields=("response_status", "response_body", "expires_at"))
     return JsonResponse(data, status=status)
+
+
+def _release_mutation(claim: _MutationClaim) -> None:
+    IdempotencyRecord.objects.filter(
+        pk=claim.record_id,
+        actor_key=claim.actor_key,
+        key=claim.key,
+        operation=claim.operation,
+        request_sha256=claim.request_sha256,
+        response_status=_IDEMPOTENCY_PENDING_STATUS,
+    ).delete()
+
+
+def _execute_mutation(
+    request: HttpRequest,
+    *,
+    session,
+    operation: str,
+    command: Callable[[], tuple[dict, int]],
+) -> JsonResponse:
+    claim = _claim_mutation(request, session=session, operation=operation)
+    if isinstance(claim, JsonResponse):
+        return claim
+    try:
+        data, status = command()
+    except Exception:
+        _release_mutation(claim)
+        raise
+    return _complete_mutation(claim, data, status=status)
 
 
 def _json_body(request: HttpRequest, *, fields: set[str]) -> dict:
@@ -211,25 +293,25 @@ def _event_data(event, *, session) -> dict:
         event=event,
         status=DeviceStatus.ACTIVE.value,
     ).count()
-    role = DeviceRole.LEAD.value if session.user_id else DeviceRole.UPLOADER.value
+    role = DeviceRole.LEAD if session.user_id else DeviceRole.UPLOADER
     policy = PreviewPolicy.objects.filter(event=event).first()
-    return {
-        "id": str(event.id),
-        "name": event.name,
-        "state": event.state,
-        "role": role,
-        "storage_limit_bytes": event.storage_limit_bytes,
-        "reserved_original_bytes": event.reserved_original_bytes,
-        "verified_original_bytes": event.verified_original_bytes,
-        "remaining_original_bytes": event.storage_limit_bytes - event.reserved_original_bytes,
-        "intake_state": event.intake_state,
-        "intake_generation": event.intake_generation,
-        "processing_profile_id": event.processing_profile_id,
-        "max_contribution_devices": event.max_contribution_devices,
-        "active_contribution_devices": active_devices,
-        "device_label": session.device.label if session.device_id else "",
-        "preview_policy": preview_policy_data(policy),
-    }
+    return EventSnapshot(
+        id=event.id,
+        name=event.name,
+        state=EventState(event.state),
+        role=role,
+        storage_limit_bytes=event.storage_limit_bytes,
+        reserved_original_bytes=event.reserved_original_bytes,
+        verified_original_bytes=event.verified_original_bytes,
+        remaining_original_bytes=event.storage_limit_bytes - event.reserved_original_bytes,
+        intake_state=IntakeState(event.intake_state),
+        intake_generation=event.intake_generation,
+        processing_profile_id=event.processing_profile_id,
+        max_contribution_devices=event.max_contribution_devices,
+        active_contribution_devices=active_devices,
+        device_label=session.device.label if session.device_id else "",
+        preview_policy=preview_policy_snapshot(policy),
+    ).as_dict()
 
 
 def _tokens_data(tokens) -> dict:
@@ -389,22 +471,25 @@ def revoke_invitation_view(
 ) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="revoke_invitation")
-        if isinstance(context, JsonResponse):
-            return context
-        _json_body(request, fields=set())
-        invitation = revoke_invitation(
+
+        def command() -> tuple[dict, int]:
+            _json_body(request, fields=set())
+            invitation = revoke_invitation(
+                session=session,
+                event_id=event_id,
+                invitation_id=invitation_id,
+                request=request,
+            )
+            return {"invitation_id": str(invitation.id), "status": "revoked"}, 200
+
+        return _execute_mutation(
+            request,
             session=session,
-            event_id=event_id,
-            invitation_id=invitation_id,
-            request=request,
+            operation="revoke_invitation",
+            command=command,
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(
-        context,
-        {"invitation_id": str(invitation.id), "status": "revoked"},
-    )
 
 
 @csrf_exempt
@@ -412,23 +497,35 @@ def revoke_invitation_view(
 def reserve_batch(request: HttpRequest, event_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="reserve_batch")
-        if isinstance(context, JsonResponse):
-            return context
-        body = _json_body(
+
+        def command() -> tuple[dict, int]:
+            body = _json_body(
+                request,
+                fields={
+                    "batch_id",
+                    "label",
+                    "processing_profile_id",
+                    "device_label",
+                    "assets",
+                },
+            )
+            contribution = ContributionInput.from_dict(body)
+            batch = reserve_contribution(
+                session=session,
+                event_id=event_id,
+                contribution=contribution,
+                request=request,
+            )
+            return _batch_data(batch, session=session), 201
+
+        return _execute_mutation(
             request,
-            fields={"batch_id", "label", "processing_profile_id", "device_label", "assets"},
-        )
-        contribution = ContributionInput.from_dict(body)
-        batch = reserve_contribution(
             session=session,
-            event_id=event_id,
-            contribution=contribution,
-            request=request,
+            operation="reserve_batch",
+            command=command,
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(context, _batch_data(batch, session=session), status=201)
 
 
 @require_GET
@@ -492,20 +589,28 @@ def upload_leases(request: HttpRequest, event_id: UUID, batch_id: UUID) -> JsonR
 def confirm_preview_policy_view(request: HttpRequest, event_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="confirm_preview_policy")
-        if isinstance(context, JsonResponse):
-            return context
-        body = _json_body(
+
+        def command() -> tuple[dict, int]:
+            body = _json_body(
+                request,
+                fields={"enabled", "template", "text", "logo_kind", "mark_png_base64"},
+            )
+            value = PreviewPolicyInput.from_dict(body)
+            policy = confirm_preview_policy(
+                session=session,
+                event_id=event_id,
+                value=value,
+                object_store=configured_object_store() if value.enabled else None,
+                request=request,
+            )
+            policy_data = preview_policy_snapshot(policy)
+            return {"preview_policy": policy_data.as_dict() if policy_data else None}, 201
+
+        return _execute_mutation(
             request,
-            fields={"enabled", "template", "text", "logo_kind", "mark_png_base64"},
-        )
-        value = PreviewPolicyInput.from_dict(body)
-        policy = confirm_preview_policy(
             session=session,
-            event_id=event_id,
-            value=value,
-            object_store=configured_object_store() if value.enabled else None,
-            request=request,
+            operation="confirm_preview_policy",
+            command=command,
         )
     except ImproperlyConfigured:
         return _error(
@@ -516,7 +621,6 @@ def confirm_preview_policy_view(request: HttpRequest, event_id: UUID) -> JsonRes
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(context, {"preview_policy": preview_policy_data(policy)}, status=201)
 
 
 @require_GET
@@ -545,41 +649,47 @@ def preview_policy_mark(request: HttpRequest, event_id: UUID) -> JsonResponse:
 def register_derivatives(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="register_derivatives")
-        if isinstance(context, JsonResponse):
-            return context
-        body = _json_body(
+
+        def command() -> tuple[dict, int]:
+            body = _json_body(
+                request,
+                fields={
+                    "asset_id",
+                    "source_sha256",
+                    "policy_id",
+                    "profile_id",
+                    "captured_at",
+                    "objects",
+                },
+            )
+            value = AssetDerivativesInput.from_dict(body)
+            if value.asset_id != asset_id:
+                raise ContractError("invalid_request", "The body asset ID must match the route.")
+            objects = register_asset_derivatives(
+                session=session,
+                event_id=event_id,
+                value=value,
+            )
+            return {
+                "asset_id": str(asset_id),
+                "objects": [
+                    {
+                        "variant": item.variant,
+                        "state": item.state,
+                        "failure_code": item.failure_code,
+                    }
+                    for item in objects
+                ],
+            }, 201
+
+        return _execute_mutation(
             request,
-            fields={
-                "asset_id",
-                "source_sha256",
-                "policy_id",
-                "profile_id",
-                "captured_at",
-                "objects",
-            },
+            session=session,
+            operation="register_derivatives",
+            command=command,
         )
-        value = AssetDerivativesInput.from_dict(body)
-        if value.asset_id != asset_id:
-            raise ContractError("invalid_request", "The body asset ID must match the route.")
-        objects = register_asset_derivatives(session=session, event_id=event_id, value=value)
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(
-        context,
-        {
-            "asset_id": str(asset_id),
-            "objects": [
-                {
-                    "variant": item.variant,
-                    "state": item.state,
-                    "failure_code": item.failure_code,
-                }
-                for item in objects
-            ],
-        },
-        status=201,
-    )
 
 
 @csrf_exempt
@@ -591,11 +701,13 @@ def derivative_leases(request: HttpRequest, event_id: UUID, asset_id: UUID) -> J
         if not isinstance(body["variants"], list) or not 1 <= len(body["variants"]) <= 2:
             raise ContractError("invalid_request", "Choose one or two derivative variants.")
         try:
-            variants = tuple(DerivativeVariant(str(value)) for value in body["variants"])
+            variants = tuple(AssetVariant(str(value)) for value in body["variants"])
         except ValueError as exc:
             raise ContractError(
                 "invalid_derivative_variant", "Unknown derivative variant."
             ) from exc
+        if any(variant not in DERIVATIVE_VARIANTS for variant in variants):
+            raise ContractError("invalid_derivative_variant", "Unknown derivative variant.")
         leases = issue_derivative_leases(
             session=session,
             event_id=event_id,
@@ -623,26 +735,35 @@ def complete_derivative(
     try:
         session = _bearer_session(request)
         try:
-            parsed_variant = DerivativeVariant(variant)
+            parsed_variant = AssetVariant(variant)
         except ValueError as exc:
             raise ContractError(
                 "invalid_derivative_variant", "Unknown derivative variant."
             ) from exc
-        context = _mutation_context(
+        if parsed_variant not in DERIVATIVE_VARIANTS:
+            raise ContractError("invalid_derivative_variant", "Unknown derivative variant.")
+
+        def command() -> tuple[dict, int]:
+            _json_body(request, fields=set())
+            upload = verify_derivative(
+                session=session,
+                event_id=event_id,
+                asset_id=asset_id,
+                variant=parsed_variant,
+                object_store=configured_object_store(),
+                request=request,
+            )
+            return {
+                "asset_id": str(asset_id),
+                "variant": upload.variant,
+                "state": upload.state,
+            }, 200
+
+        return _execute_mutation(
             request,
             session=session,
             operation=f"complete_derivative_{parsed_variant.value}",
-        )
-        if isinstance(context, JsonResponse):
-            return context
-        _json_body(request, fields=set())
-        upload = verify_derivative(
-            session=session,
-            event_id=event_id,
-            asset_id=asset_id,
-            variant=parsed_variant,
-            object_store=configured_object_store(),
-            request=request,
+            command=command,
         )
     except ImproperlyConfigured:
         return _error(
@@ -653,10 +774,6 @@ def complete_derivative(
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(
-        context,
-        {"asset_id": str(asset_id), "variant": upload.variant, "state": upload.state},
-    )
 
 
 @csrf_exempt
@@ -688,27 +805,30 @@ def owned_original_url(request: HttpRequest, event_id: UUID, asset_id: UUID) -> 
 def derivative_failure(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="derivative_failure")
-        if isinstance(context, JsonResponse):
-            return context
-        body = _json_body(request, fields={"code"})
-        asset = report_derivative_failure(
+
+        def command() -> tuple[dict, int]:
+            body = _json_body(request, fields={"code"})
+            asset = report_derivative_failure(
+                session=session,
+                event_id=event_id,
+                asset_id=asset_id,
+                code=str(body["code"]),
+                request=request,
+            )
+            return {
+                "asset_id": str(asset.id),
+                "failure_code": asset.derivative_failure_code,
+                "attempt_count": asset.derivative_attempt_count,
+            }, 200
+
+        return _execute_mutation(
+            request,
             session=session,
-            event_id=event_id,
-            asset_id=asset_id,
-            code=str(body["code"]),
-            request=request,
+            operation="derivative_failure",
+            command=command,
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(
-        context,
-        {
-            "asset_id": str(asset.id),
-            "failure_code": asset.derivative_failure_code,
-            "attempt_count": asset.derivative_attempt_count,
-        },
-    )
 
 
 @csrf_exempt
@@ -716,16 +836,23 @@ def derivative_failure(request: HttpRequest, event_id: UUID, asset_id: UUID) -> 
 def complete_asset(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="complete_asset")
-        if isinstance(context, JsonResponse):
-            return context
-        _json_body(request, fields=set())
-        upload = verify_uploaded_object(
+
+        def command() -> tuple[dict, int]:
+            _json_body(request, fields=set())
+            upload = verify_uploaded_object(
+                session=session,
+                event_id=event_id,
+                asset_id=asset_id,
+                object_store=configured_object_store(),
+                request=request,
+            )
+            return {"asset_id": str(upload.asset_id), "state": upload.state}, 200
+
+        return _execute_mutation(
+            request,
             session=session,
-            event_id=event_id,
-            asset_id=asset_id,
-            object_store=configured_object_store(),
-            request=request,
+            operation="complete_asset",
+            command=command,
         )
     except ImproperlyConfigured:
         return _error(
@@ -736,7 +863,6 @@ def complete_asset(request: HttpRequest, event_id: UUID, asset_id: UUID) -> Json
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(context, {"asset_id": str(upload.asset_id), "state": upload.state})
 
 
 @csrf_exempt
@@ -744,19 +870,25 @@ def complete_asset(request: HttpRequest, event_id: UUID, asset_id: UUID) -> Json
 def intake_action(request: HttpRequest, event_id: UUID, action: str) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation=f"{action}_intake")
-        if isinstance(context, JsonResponse):
-            return context
-        _json_body(request, fields=set())
-        if action == "close":
-            event = close_intake(session=session, event_id=event_id, request=request)
-        elif action == "reopen":
-            event = reopen_intake(session=session, event_id=event_id, request=request)
-        else:
-            raise Http404
+
+        def command() -> tuple[dict, int]:
+            _json_body(request, fields=set())
+            if action == "close":
+                event = close_intake(session=session, event_id=event_id, request=request)
+            elif action == "reopen":
+                event = reopen_intake(session=session, event_id=event_id, request=request)
+            else:
+                raise Http404
+            return _event_data(event, session=session), 200
+
+        return _execute_mutation(
+            request,
+            session=session,
+            operation=f"{action}_intake",
+            command=command,
+        )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(context, _event_data(event, session=session))
 
 
 @csrf_exempt
@@ -764,15 +896,29 @@ def intake_action(request: HttpRequest, event_id: UUID, action: str) -> JsonResp
 def finalize(request: HttpRequest, event_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="finalize_ingestion")
-        if isinstance(context, JsonResponse):
-            return context
-        _json_body(request, fields=set())
-        manifest = finalize_ingestion(
+
+        def command() -> tuple[dict, int]:
+            _json_body(request, fields=set())
+            manifest = finalize_ingestion(
+                session=session,
+                event_id=event_id,
+                object_store=configured_object_store(),
+                request=request,
+            )
+            return {
+                "manifest_id": str(manifest.id),
+                "generation": manifest.generation,
+                "state": manifest.state,
+                "asset_count": manifest.asset_count,
+                "original_bytes": manifest.original_bytes,
+                "excluded_asset_count": manifest.excluded_asset_count,
+            }, 200
+
+        return _execute_mutation(
+            request,
             session=session,
-            event_id=event_id,
-            object_store=configured_object_store(),
-            request=request,
+            operation="finalize_ingestion",
+            command=command,
         )
     except ImproperlyConfigured:
         return _error(
@@ -783,17 +929,6 @@ def finalize(request: HttpRequest, event_id: UUID) -> JsonResponse:
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(
-        context,
-        {
-            "manifest_id": str(manifest.id),
-            "generation": manifest.generation,
-            "state": manifest.state,
-            "asset_count": manifest.asset_count,
-            "original_bytes": manifest.original_bytes,
-            "excluded_asset_count": manifest.excluded_asset_count,
-        },
-    )
 
 
 @csrf_exempt
@@ -801,17 +936,24 @@ def finalize(request: HttpRequest, event_id: UUID) -> JsonResponse:
 def exclude_asset_view(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="exclude_asset")
-        if isinstance(context, JsonResponse):
-            return context
-        body = _json_body(request, fields={"reason"})
-        upload = exclude_asset(
+
+        def command() -> tuple[dict, int]:
+            body = _json_body(request, fields={"reason"})
+            upload = exclude_asset(
+                session=session,
+                event_id=event_id,
+                asset_id=asset_id,
+                reason=str(body["reason"]),
+                object_store=configured_object_store(),
+                request=request,
+            )
+            return {"asset_id": str(upload.asset_id), "state": upload.state}, 200
+
+        return _execute_mutation(
+            request,
             session=session,
-            event_id=event_id,
-            asset_id=asset_id,
-            reason=str(body["reason"]),
-            object_store=configured_object_store(),
-            request=request,
+            operation="exclude_asset",
+            command=command,
         )
     except ImproperlyConfigured:
         return _error(
@@ -822,7 +964,6 @@ def exclude_asset_view(request: HttpRequest, event_id: UUID, asset_id: UUID) -> 
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(context, {"asset_id": str(upload.asset_id), "state": upload.state})
 
 
 @csrf_exempt
@@ -830,16 +971,23 @@ def exclude_asset_view(request: HttpRequest, event_id: UUID, asset_id: UUID) -> 
 def cancel_batch_view(request: HttpRequest, event_id: UUID, batch_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="cancel_batch")
-        if isinstance(context, JsonResponse):
-            return context
-        _json_body(request, fields=set())
-        batch = cancel_batch(
+
+        def command() -> tuple[dict, int]:
+            _json_body(request, fields=set())
+            batch = cancel_batch(
+                session=session,
+                event_id=event_id,
+                batch_id=batch_id,
+                object_store=configured_object_store(),
+                request=request,
+            )
+            return {"batch_id": str(batch.id), "state": batch.state}, 200
+
+        return _execute_mutation(
+            request,
             session=session,
-            event_id=event_id,
-            batch_id=batch_id,
-            object_store=configured_object_store(),
-            request=request,
+            operation="cancel_batch",
+            command=command,
         )
     except ImproperlyConfigured:
         return _error(
@@ -850,7 +998,6 @@ def cancel_batch_view(request: HttpRequest, event_id: UUID, batch_id: UUID) -> J
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(context, {"batch_id": str(batch.id), "state": batch.state})
 
 
 @csrf_exempt
@@ -858,24 +1005,30 @@ def cancel_batch_view(request: HttpRequest, event_id: UUID, batch_id: UUID) -> J
 def revoke_device_view(request: HttpRequest, event_id: UUID, device_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
-        context = _mutation_context(request, session=session, operation="revoke_device")
-        if isinstance(context, JsonResponse):
-            return context
-        _json_body(request, fields=set())
-        device = revoke_device(
+
+        def command() -> tuple[dict, int]:
+            _json_body(request, fields=set())
+            device = revoke_device(
+                session=session,
+                event_id=event_id,
+                device_id=device_id,
+                request=request,
+            )
+            return {"device_id": str(device.id), "status": device.status}, 200
+
+        return _execute_mutation(
+            request,
             session=session,
-            event_id=event_id,
-            device_id=device_id,
-            request=request,
+            operation="revoke_device",
+            command=command,
         )
     except (ContractError, DesktopAuthError, IngestionError) as exc:
         return _domain_error(exc)
-    return _remember(context, {"device_id": str(device.id), "status": device.status})
 
 
 def _batch_data(batch: ContributionBatch, *, session) -> dict:
     objects = AssetObject.objects.filter(asset__batch=batch)
-    originals = objects.filter(variant="originals")
+    originals = objects.filter(variant=AssetVariant.ORIGINAL.value)
     data = {
         "id": str(batch.id),
         "state": batch.state,
@@ -885,7 +1038,7 @@ def _batch_data(batch: ContributionBatch, *, session) -> dict:
         "verified_asset_count": originals.filter(state="verified").count(),
         "failed_asset_count": originals.filter(state="failed").count(),
         "excluded_asset_count": originals.filter(state="excluded").count(),
-        "verified_derivative_count": objects.exclude(variant="originals")
+        "verified_derivative_count": objects.exclude(variant=AssetVariant.ORIGINAL.value)
         .filter(state="verified")
         .count(),
     }

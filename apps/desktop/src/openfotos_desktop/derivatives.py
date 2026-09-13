@@ -10,12 +10,7 @@ from pathlib import Path
 
 from PIL import Image, ImageCms, ImageDraw, ImageOps, UnidentifiedImageError
 
-from openfotos_contracts import DERIVATIVE_PROFILE_ID, DerivativeVariant, WatermarkTemplate
-
-PREVIEW_LONG_EDGE = 2048
-PREVIEW_QUALITY = 85
-THUMBNAIL_LONG_EDGE = 512
-THUMBNAIL_QUALITY = 78
+from openfotos_contracts import DERIVATIVE_PROFILE, AssetVariant, WatermarkTemplate
 
 
 class DerivativeError(RuntimeError):
@@ -33,7 +28,7 @@ class RenderPolicy:
 
 @dataclass(frozen=True)
 class RenderedObject:
-    variant: DerivativeVariant
+    variant: AssetVariant
     path: Path
     size_bytes: int
     sha256: str
@@ -61,7 +56,7 @@ class RenderedAsset:
 
 
 class DerivativeRenderer:
-    profile_id = DERIVATIVE_PROFILE_ID
+    profile_id = DERIVATIVE_PROFILE.id
 
     def render(
         self,
@@ -93,25 +88,25 @@ class DerivativeRenderer:
         cache_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         if os.name != "nt":
             cache_directory.chmod(0o700)
-        preview_image = _resize_copy(source, PREVIEW_LONG_EDGE)
+        preview_image = _resize_copy(source, DERIVATIVE_PROFILE.preview.maximum_long_edge)
         if policy.enabled:
             if not policy.mark_png:
                 raise DerivativeError(
                     "watermark_mark_missing", "The confirmed watermark is unavailable."
                 )
             preview_image = apply_watermark(preview_image, policy.mark_png, policy.template)
-        thumbnail_image = _resize_copy(source, THUMBNAIL_LONG_EDGE)
+        thumbnail_image = _resize_copy(source, DERIVATIVE_PROFILE.thumbnail.maximum_long_edge)
         preview = _write_jpeg(
             preview_image,
             cache_directory / f"{asset_stem}-preview.jpg",
-            variant=DerivativeVariant.PREVIEW,
-            quality=PREVIEW_QUALITY,
+            variant=AssetVariant.PREVIEW,
+            quality=DERIVATIVE_PROFILE.preview.jpeg_quality,
         )
         thumbnail = _write_jpeg(
             thumbnail_image,
             cache_directory / f"{asset_stem}-thumbnail.jpg",
-            variant=DerivativeVariant.THUMBNAIL,
-            quality=THUMBNAIL_QUALITY,
+            variant=AssetVariant.THUMBNAIL,
+            quality=DERIVATIVE_PROFILE.thumbnail.jpeg_quality,
         )
         return RenderedAsset(
             source_sha256=source_sha256,
@@ -123,7 +118,7 @@ class DerivativeRenderer:
 
 def render_for_review(image: Image.Image, policy: RenderPolicy) -> Image.Image:
     source = _to_srgb(image)
-    preview = _resize_copy(source, PREVIEW_LONG_EDGE)
+    preview = _resize_copy(source, DERIVATIVE_PROFILE.preview.maximum_long_edge)
     if policy.enabled:
         if not policy.mark_png:
             raise DerivativeError("watermark_mark_missing", "Choose a logo, text, or both.")
@@ -270,7 +265,7 @@ def _write_jpeg(
     image: Image.Image,
     path: Path,
     *,
-    variant: DerivativeVariant,
+    variant: AssetVariant,
     quality: int,
 ) -> RenderedObject:
     partial = path.with_suffix(".part")
@@ -278,9 +273,9 @@ def _write_jpeg(
         partial,
         format="JPEG",
         quality=quality,
-        optimize=True,
-        progressive=True,
-        subsampling="4:2:0",
+        optimize=DERIVATIVE_PROFILE.optimize,
+        progressive=DERIVATIVE_PROFILE.progressive,
+        subsampling=DERIVATIVE_PROFILE.subsampling,
     )
     partial.replace(path)
     if os.name != "nt":

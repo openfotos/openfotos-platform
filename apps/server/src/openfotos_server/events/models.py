@@ -15,6 +15,7 @@ from django.utils import timezone
 from openfotos_contracts import (
     DERIVATIVE_PROFILE_ID,
     WATERMARK_RENDERER_ID,
+    AssetVariant,
     ContributionState,
     DeviceRole,
     DeviceStatus,
@@ -26,7 +27,6 @@ from openfotos_contracts import (
     WatermarkLogoKind,
     WatermarkTemplate,
 )
-from openfotos_storage import AssetVariant
 
 PILOT_STORAGE_LIMIT_BYTES = 25_000_000_000
 RESERVED_PHOTOGRAPHER_SLUGS = frozenset({"admin", "api", "media", "static", "www"})

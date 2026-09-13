@@ -7,7 +7,9 @@ import pytest
 from openfotos_contracts import (
     DERIVATIVE_PROFILE_ID,
     AssetDerivativesInput,
+    AssetVariant,
     ContractError,
+    DerivativeVariant,
     PreviewPolicyInput,
 )
 
@@ -94,3 +96,7 @@ def test_derivative_contract_requires_exactly_preview_and_thumbnail() -> None:
             }
         )
     assert raised.value.code == "invalid_derivative_count"
+
+
+def test_legacy_derivative_variant_name_is_the_canonical_asset_variant() -> None:
+    assert DerivativeVariant is AssetVariant

@@ -10,7 +10,12 @@ from pathlib import Path
 from threading import RLock
 from uuid import UUID, uuid4
 
-from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+from openfotos_contracts import (
+    DERIVATIVE_VARIANTS,
+    AssetVariant,
+    WatermarkLogoKind,
+    WatermarkTemplate,
+)
 
 from .models import (
     BatchState,
@@ -31,7 +36,20 @@ from .models import (
     ValidationResult,
 )
 
-_SCHEMA = """
+_DERIVATIVE_VARIANT_SQL = ", ".join(f"'{variant.value}'" for variant in DERIVATIVE_VARIANTS)
+
+
+def _derivative_variant(value: AssetVariant | str) -> AssetVariant:
+    try:
+        variant = AssetVariant(value)
+    except ValueError as exc:
+        raise ValueError("Derivative variants are previews or thumbnails.") from exc
+    if variant not in DERIVATIVE_VARIANTS:
+        raise ValueError("Derivative variants are previews or thumbnails.")
+    return variant
+
+
+_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -134,7 +152,7 @@ CREATE TABLE IF NOT EXISTS upload_checkpoints (
 
 CREATE TABLE IF NOT EXISTS derivative_checkpoints (
     item_id TEXT NOT NULL REFERENCES inventory_items(id) ON DELETE CASCADE,
-    variant TEXT NOT NULL CHECK (variant IN ('previews', 'thumbnails')),
+    variant TEXT NOT NULL CHECK (variant IN ({_DERIVATIVE_VARIANT_SQL})),
     state TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
     last_error_code TEXT,
@@ -729,13 +747,16 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 )
                 SELECT id, variants.variant, ?, 0, ? FROM inventory_items
                 CROSS JOIN (
-                    SELECT 'previews' AS variant UNION ALL SELECT 'thumbnails'
+                    SELECT ? AS variant
+                    UNION ALL SELECT ?
                 ) AS variants
                 WHERE batch_id = ? AND status = ?
                 """,
                 (
                     LocalUploadState.PENDING.value,
                     timestamp,
+                    AssetVariant.PREVIEW.value,
+                    AssetVariant.THUMBNAIL.value,
                     str(batch_id),
                     InventoryStatus.ACCEPTED.value,
                 ),
@@ -890,13 +911,16 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 )
                 SELECT id, variants.variant, ?, 0, ? FROM inventory_items
                 CROSS JOIN (
-                    SELECT 'previews' AS variant UNION ALL SELECT 'thumbnails'
+                    SELECT ? AS variant
+                    UNION ALL SELECT ?
                 ) AS variants
                 WHERE batch_id = ? AND status = ?
                 """,
                 (
                     LocalUploadState.PENDING.value,
                     _now(),
+                    AssetVariant.PREVIEW.value,
+                    AssetVariant.THUMBNAIL.value,
                     str(batch_id),
                     InventoryStatus.ACCEPTED.value,
                 ),
@@ -915,61 +939,70 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             ).fetchall()
         return [self._derivative_from_row(row) for row in rows]
 
-    def get_derivative_checkpoint(self, item_id: UUID, variant: str) -> DerivativeCheckpoint:
+    def get_derivative_checkpoint(
+        self, item_id: UUID, variant: AssetVariant | str
+    ) -> DerivativeCheckpoint:
+        parsed_variant = _derivative_variant(variant)
         with self._lock:
             row = self._connection.execute(
                 """
                 SELECT * FROM derivative_checkpoints WHERE item_id = ? AND variant = ?
                 """,
-                (str(item_id), variant),
+                (str(item_id), parsed_variant.value),
             ).fetchone()
         if row is None:
-            raise KeyError(f"Unknown derivative checkpoint {item_id}/{variant}.")
+            raise KeyError(f"Unknown derivative checkpoint {item_id}/{parsed_variant.value}.")
         return self._derivative_from_row(row)
 
     @staticmethod
     def _derivative_from_row(row: sqlite3.Row) -> DerivativeCheckpoint:
         return DerivativeCheckpoint(
             item_id=UUID(row["item_id"]),
-            variant=row["variant"],
+            variant=AssetVariant(row["variant"]),
             state=LocalUploadState(row["state"]),
             attempt_count=row["attempt_count"],
             last_error_code=row["last_error_code"],
         )
 
-    def mark_derivative_started(self, item_id: UUID, variant: str) -> None:
+    def mark_derivative_started(self, item_id: UUID, variant: AssetVariant | str) -> None:
         self._update_derivative(
             item_id,
-            variant,
+            _derivative_variant(variant),
             state=LocalUploadState.UPLOADING,
             increment_attempt=True,
         )
 
-    def mark_derivative_failed(self, item_id: UUID, variant: str, error_code: str) -> None:
+    def mark_derivative_failed(
+        self, item_id: UUID, variant: AssetVariant | str, error_code: str
+    ) -> None:
         self._update_derivative(
             item_id,
-            variant,
+            _derivative_variant(variant),
             state=LocalUploadState.FAILED,
             error_code=error_code,
         )
 
-    def mark_derivative_verified(self, item_id: UUID, variant: str) -> None:
-        self._update_derivative(item_id, variant, state=LocalUploadState.VERIFIED)
+    def mark_derivative_verified(self, item_id: UUID, variant: AssetVariant | str) -> None:
+        self._update_derivative(
+            item_id,
+            _derivative_variant(variant),
+            state=LocalUploadState.VERIFIED,
+        )
 
     def mark_derivatives_excluded(self, item_id: UUID) -> None:
-        for variant in ("previews", "thumbnails"):
+        for variant in DERIVATIVE_VARIANTS:
             self._update_derivative(item_id, variant, state=LocalUploadState.EXCLUDED)
 
     def _update_derivative(
         self,
         item_id: UUID,
-        variant: str,
+        variant: AssetVariant,
         *,
         state: LocalUploadState,
         error_code: str | None = None,
         increment_attempt: bool = False,
     ) -> None:
-        if variant not in {"previews", "thumbnails"}:
+        if variant not in DERIVATIVE_VARIANTS:
             raise ValueError("Derivative variants are previews or thumbnails.")
         timestamp = _now()
         with self._lock, self._connection:
@@ -991,11 +1024,11 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     timestamp,
                     timestamp,
                     str(item_id),
-                    variant,
+                    variant.value,
                 ),
             )
         if cursor.rowcount == 0:
-            raise KeyError(f"Unknown derivative checkpoint {item_id}/{variant}.")
+            raise KeyError(f"Unknown derivative checkpoint {item_id}/{variant.value}.")
 
     def derivatives_complete(self, batch_id: UUID) -> bool:
         checkpoints = self.list_derivative_checkpoints(batch_id)
