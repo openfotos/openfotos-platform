@@ -17,9 +17,9 @@ from openfotos_contracts import (
     WATERMARK_RENDERER_ID,
     AssetVariant,
     ContributionState,
-    InstallationStatus,
     EventState,
     IngestionManifestState,
+    InstallationStatus,
     IntakeState,
     UploadObjectState,
     WatermarkLogoKind,
@@ -352,6 +352,7 @@ class DesktopSession(models.Model):
     revoked_at = models.DateTimeField(blank=True, null=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
 
 class ContributionBatch(models.Model):
     id = models.UUIDField(primary_key=True, editable=False)

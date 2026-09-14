@@ -21,9 +21,9 @@ from .events import EventSnapshot, PreviewPolicySnapshot, SubEventSnapshot
 from .ingestion import ContractError, ContributionInput, OriginalAssetInput
 from .states import (
     ContributionState,
-    InstallationStatus,
     EventState,
     IngestionManifestState,
+    InstallationStatus,
     IntakeState,
     UploadObjectState,
     can_transition_event,

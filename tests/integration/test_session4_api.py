@@ -1,7 +1,7 @@
 import base64
 import hashlib
 from datetime import UTC, datetime, timedelta
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
@@ -17,6 +17,7 @@ from openfotos_server.events.models import (
     IdempotencyRecord,
     Photographer,
     PhotographerMembership,
+    SubEvent,
 )
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectHead, PresignedPut
 
@@ -90,13 +91,14 @@ class MemoryObjectStore:
 @pytest.fixture
 def tenant():
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
-    user = get_user_model().objects.create_user(username="lead", password="correct-password")
+    user = get_user_model().objects.create_user(username="primary", password="correct-password")
     PhotographerMembership.objects.create(photographer=photographer, user=user)
     event = Event.objects.create(
         photographer=photographer,
         name="Reception",
         expires_at=timezone.now() + timedelta(days=30),
     )
+    SubEvent.objects.create(event=event, name="Reception", position=1)
     return photographer, user, event
 
 
@@ -114,7 +116,7 @@ def login(client, *, installation_id=None):
         client,
         reverse("desktop-api:login"),
         {
-            "username": "lead",
+            "username": "primary",
             "password": "correct-password",
             "installation_id": str(installation_id or uuid4()),
         },
@@ -124,11 +126,13 @@ def login(client, *, installation_id=None):
 
 
 def manifest(content: bytes, *, batch_id=None, asset_id=None):
+    sub_event = SubEvent.objects.get(is_archived=False)
     return {
         "batch_id": str(batch_id or uuid4()),
+        "sub_event_id": str(sub_event.id),
         "label": "Editor export",
         "processing_profile_id": "pilot-profile-v1",
-        "device_label": "Uploader workstation",
+        "device_label": "Installation workstation",
         "assets": [
             {
                 "id": str(asset_id or uuid4()),
@@ -143,30 +147,6 @@ def manifest(content: bytes, *, batch_id=None, asset_id=None):
             }
         ],
     }
-
-
-def enroll_uploader(client, lead_token, event):
-    invitation = post_json(
-        client,
-        reverse("desktop-api:invitations", args=(event.id,)),
-        {},
-        token=lead_token,
-    )
-    assert invitation.status_code == 201
-    fragment = parse_qs(urlparse(invitation.json()["enrollment_url"]).fragment)
-    invitation_token = fragment["invite"][0]
-    enrolled = post_json(
-        client,
-        reverse("desktop-api:redeem"),
-        {
-            "invitation_token": invitation_token,
-            "installation_id": str(uuid4()),
-            "device_label": "Uploader workstation",
-        },
-    )
-    assert enrolled.status_code == 200, enrolled.json()
-    assert enrolled.json()["event"]["device_label"] == "Uploader workstation"
-    return enrolled.json()["access_token"]
 
 
 def test_desktop_login_is_tenant_scoped_and_contract_is_strict(tenant) -> None:
@@ -185,7 +165,7 @@ def test_desktop_login_is_tenant_scoped_and_contract_is_strict(tenant) -> None:
         client,
         reverse("desktop-api:login"),
         {
-            "username": "lead",
+            "username": "primary",
             "password": "correct-password",
             "installation_id": str(uuid4()),
             "unexpected": True,
@@ -207,12 +187,13 @@ def test_desktop_login_is_tenant_scoped_and_contract_is_strict(tenant) -> None:
     assert chosen_key.json()["error"]["code"] == "invalid_request"
 
 
-def test_uploader_cannot_read_another_device_batch_and_idempotency_conflicts(tenant) -> None:
+def test_photographer_installations_share_event_visibility_and_idempotency_is_strict(
+    tenant,
+) -> None:
     _, _, event = tenant
     client = Client()
-    lead = login(client)
-    first_token = enroll_uploader(client, lead["access_token"], event)
-    second_token = enroll_uploader(client, lead["access_token"], event)
+    first_token = login(client)["access_token"]
+    second_token = login(client)["access_token"]
     content = b"synthetic jpeg"
     payload = manifest(content)
     idempotency_key = uuid4()
@@ -249,14 +230,14 @@ def test_uploader_cannot_read_another_device_batch_and_idempotency_conflicts(ten
         reverse("desktop-api:batch-detail", args=(event.id, payload["batch_id"])),
         headers={"host": "alpha.localhost", "authorization": f"Bearer {second_token}"},
     )
-    assert private.status_code == 404
-    assert "photo.jpg" not in private.content.decode()
+    assert private.status_code == 200
+    assert private.json()["id"] == payload["batch_id"]
 
 
 def test_pending_idempotency_claim_blocks_a_duplicate_before_mutation(tenant) -> None:
     _, user, event = tenant
     client = Client()
-    lead = login(client)
+    primary = login(client)
     session = DesktopSession.objects.get(user=user)
     idempotency_key = uuid4()
     IdempotencyRecord.objects.create(
@@ -275,7 +256,7 @@ def test_pending_idempotency_claim_blocks_a_duplicate_before_mutation(tenant) ->
         content_type="application/json",
         headers={
             "host": "alpha.localhost",
-            "authorization": f"Bearer {lead['access_token']}",
+            "authorization": f"Bearer {primary['access_token']}",
             "idempotency-key": str(idempotency_key),
         },
     )
@@ -293,7 +274,7 @@ def test_pending_idempotency_claim_blocks_a_duplicate_before_mutation(tenant) ->
 def test_failed_mutation_releases_its_idempotency_claim(tenant) -> None:
     _, user, event = tenant
     client = Client()
-    lead = login(client)
+    primary = login(client)
     session = DesktopSession.objects.get(user=user)
     idempotency_key = uuid4()
 
@@ -301,7 +282,7 @@ def test_failed_mutation_releases_its_idempotency_claim(tenant) -> None:
         client,
         reverse("desktop-api:reserve-batch", args=(event.id,)),
         {"unexpected": True},
-        token=lead["access_token"],
+        token=primary["access_token"],
         idempotency_key=idempotency_key,
     )
     assert invalid.status_code == 400
@@ -313,7 +294,7 @@ def test_failed_mutation_releases_its_idempotency_claim(tenant) -> None:
         client,
         reverse("desktop-api:reserve-batch", args=(event.id,)),
         manifest(b"synthetic jpeg"),
-        token=lead["access_token"],
+        token=primary["access_token"],
         idempotency_key=idempotency_key,
     )
     assert reserved.status_code == 201, reserved.json()
@@ -324,15 +305,15 @@ def test_api_upload_recovery_close_and_finalize(monkeypatch, tenant) -> None:
     client = Client()
     storage = MemoryObjectStore()
     monkeypatch.setattr(api, "configured_object_store", lambda: storage)
-    lead = login(client)
-    uploader_token = enroll_uploader(client, lead["access_token"], event)
+    photographer = login(client)
+    installation_token = photographer["access_token"]
     content = b"synthetic jpeg bytes"
     payload = manifest(content)
     reserve = post_json(
         client,
         reverse("desktop-api:reserve-batch", args=(event.id,)),
         payload,
-        token=uploader_token,
+        token=installation_token,
         idempotency_key=uuid4(),
     )
     assert reserve.status_code == 201, reserve.json()
@@ -340,7 +321,7 @@ def test_api_upload_recovery_close_and_finalize(monkeypatch, tenant) -> None:
         client,
         reverse("desktop-api:upload-leases", args=(event.id, payload["batch_id"])),
         {"asset_ids": [payload["assets"][0]["id"]]},
-        token=uploader_token,
+        token=installation_token,
     )
     [lease] = lease_response.json()["leases"]
     key = urlparse(lease["url"]).path.lstrip("/")
@@ -350,24 +331,15 @@ def test_api_upload_recovery_close_and_finalize(monkeypatch, tenant) -> None:
         client,
         reverse("desktop-api:complete-asset", args=(event.id, payload["assets"][0]["id"])),
         {},
-        token=uploader_token,
+        token=installation_token,
         idempotency_key=uuid4(),
     )
     assert completed.status_code == 200, completed.json()
-    forbidden_close = post_json(
-        client,
-        f"/api/v1/events/{event.id}/intake/close/",
-        {},
-        token=uploader_token,
-        idempotency_key=uuid4(),
-    )
-    assert forbidden_close.status_code == 403
-
     closed = post_json(
         client,
         f"/api/v1/events/{event.id}/intake/close/",
         {},
-        token=lead["access_token"],
+        token=installation_token,
         idempotency_key=uuid4(),
     )
     assert closed.status_code == 200
@@ -375,7 +347,7 @@ def test_api_upload_recovery_close_and_finalize(monkeypatch, tenant) -> None:
         client,
         reverse("desktop-api:finalize", args=(event.id,)),
         {},
-        token=lead["access_token"],
+        token=photographer["access_token"],
         idempotency_key=uuid4(),
     )
     assert finalized.status_code == 200, finalized.json()

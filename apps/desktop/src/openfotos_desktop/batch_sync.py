@@ -90,6 +90,7 @@ class BatchSyncService:
                 )
             contribution = {
                 "batch_id": str(batch.id),
+                "sub_event_id": str(batch.sub_event_id),
                 "label": batch.label,
                 "processing_profile_id": event.processing_profile_id,
                 "device_label": event.device_label,
@@ -134,7 +135,7 @@ class BatchSyncService:
         if event.preview_policy is None:
             raise DesktopApiError(
                 "preview_policy_not_confirmed",
-                "The event lead must confirm preview settings before gallery processing.",
+                "Confirm preview settings before gallery processing.",
             )
         self.store.ensure_derivative_checkpoints(batch.id)
         self._sync_batch(event.id, batch.id)
@@ -184,7 +185,7 @@ class BatchSyncService:
                     return
                 raise DesktopApiError(
                     "upload_attempts_exhausted",
-                    "One or more originals need an explicit retry or lead exclusion.",
+                    "One or more originals need an explicit retry or photographer exclusion.",
                 )
             if is_cancelled and is_cancelled():
                 return
@@ -313,7 +314,7 @@ class BatchSyncService:
                     if attempts >= _MAX_UPLOAD_ATTEMPTS:
                         raise DesktopApiError(
                             "derivative_attempts_exhausted",
-                            "A gallery derivative failed five times and now needs lead review.",
+                            "A gallery derivative failed five times and needs photographer review.",
                         )
                     try:
                         self._process_asset_derivatives(
@@ -346,7 +347,8 @@ class BatchSyncService:
                         if max(value.attempt_count for value in checkpoints.values()) >= 5:
                             raise DesktopApiError(
                                 "derivative_attempts_exhausted",
-                                "A gallery derivative failed five times and now needs lead review.",
+                                "A gallery derivative failed five times and needs "
+                                "photographer review.",
                             ) from exc
                         if isinstance(exc, DesktopApiError) and exc.retryable:
                             self._derivative_backoff(checkpoints)

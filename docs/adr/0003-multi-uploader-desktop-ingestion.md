@@ -1,6 +1,6 @@
 # ADR 0003: Multi-uploader desktop ingestion
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR 0008
 - **Date:** 2026-09-10
 
 ## Context

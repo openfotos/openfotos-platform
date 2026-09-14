@@ -36,7 +36,6 @@ from PySide6.QtWidgets import (
     QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
-    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -62,6 +61,7 @@ from .ingestion import (
     ScanCancelled,
     ScanProgress,
     ScanSummary,
+    SubEventCache,
 )
 from .ports import DesktopGateway
 from .theme import apply_corporate_theme, asset_path
@@ -241,8 +241,7 @@ class UploadWorker(QObject):
 
 
 class LoginPage(QWidget):
-    lead_requested = Signal(str, str, str, str)
-    uploader_requested = Signal(str, str, str)
+    photographer_requested = Signal(str, str, str, str)
     resume_requested = Signal(str)
 
     def __init__(self) -> None:
@@ -254,7 +253,7 @@ class LoginPage(QWidget):
             PageHeading(
                 "Workspace access",
                 "Sign in to OpenFotos",
-                "Authenticate as an event lead or enroll an authorized upload workstation.",
+                "Use the photographer account assigned to the event workspace.",
                 "Secure access",
             )
         )
@@ -296,55 +295,30 @@ class LoginPage(QWidget):
         access_title = QLabel("Workspace access")
         access_title.setObjectName("SectionTitle")
         access_layout.addWidget(access_title)
-        tabs = QTabWidget()
-        access_layout.addWidget(tabs, 1)
-
-        lead = QWidget()
-        lead_form = QFormLayout(lead)
-        lead_form.setContentsMargins(20, 22, 20, 20)
-        lead_form.setHorizontalSpacing(18)
-        lead_form.setVerticalSpacing(14)
-        self.lead_server = QLineEdit("https://openfotos.example")
+        sign_in = QWidget()
+        sign_in_form = QFormLayout(sign_in)
+        sign_in_form.setContentsMargins(20, 22, 20, 20)
+        sign_in_form.setHorizontalSpacing(18)
+        sign_in_form.setVerticalSpacing(14)
+        self.server = QLineEdit("https://openfotos.example")
         self.username = QLineEdit()
         self.username.setPlaceholderText("photographer@example.com")
         self.password = QLineEdit()
         self.password.setPlaceholderText("Workspace password")
         self.password.setEchoMode(QLineEdit.EchoMode.Password)
-        self.lead_device_label = QLineEdit()
-        self.lead_device_label.setPlaceholderText("e.g. Lead editing workstation")
-        self.lead_button = _style_button(
-            QPushButton("Sign in as event lead"),
-            kind="primary",
-        )
-        self.lead_button.clicked.connect(self._request_lead)
-        lead_form.addRow("Server", self.lead_server)
-        lead_form.addRow("Username", self.username)
-        lead_form.addRow("Password", self.password)
-        lead_form.addRow("Device label", self.lead_device_label)
-        lead_form.addRow(self.lead_button)
-        tabs.addTab(lead, "Lead sign in")
-
-        uploader = QWidget()
-        uploader_form = QFormLayout(uploader)
-        uploader_form.setContentsMargins(20, 22, 20, 20)
-        uploader_form.setHorizontalSpacing(18)
-        uploader_form.setVerticalSpacing(14)
-        self.uploader_server = QLineEdit("https://openfotos.example")
-        self.invitation = QLineEdit()
-        self.invitation.setPlaceholderText("Paste a one-time invitation")
-        self.invitation.setEchoMode(QLineEdit.EchoMode.Password)
         self.device_label = QLineEdit()
-        self.device_label.setPlaceholderText("e.g. Reception laptop 2")
-        self.uploader_button = _style_button(
-            QPushButton("Enroll this workstation"),
+        self.device_label.setPlaceholderText("e.g. Studio workstation 2")
+        self.sign_in_button = _style_button(
+            QPushButton("Sign in as photographer"),
             kind="primary",
         )
-        self.uploader_button.clicked.connect(self._request_uploader)
-        uploader_form.addRow("Server", self.uploader_server)
-        uploader_form.addRow("Invitation", self.invitation)
-        uploader_form.addRow("Device label", self.device_label)
-        uploader_form.addRow(self.uploader_button)
-        tabs.addTab(uploader, "Upload invitation")
+        self.sign_in_button.clicked.connect(self._request_photographer)
+        sign_in_form.addRow("Server", self.server)
+        sign_in_form.addRow("Username", self.username)
+        sign_in_form.addRow("Password", self.password)
+        sign_in_form.addRow("Installation label", self.device_label)
+        sign_in_form.addRow(self.sign_in_button)
+        access_layout.addWidget(sign_in, 1)
 
         self.error = QLabel()
         self.error.setObjectName("ErrorBanner")
@@ -353,12 +327,10 @@ class LoginPage(QWidget):
         access_layout.addWidget(self.error)
         self.resume_button = _style_button(QPushButton("Resume saved session"), kind="ghost")
         self.resume_button.clicked.connect(
-            lambda: self.resume_requested.emit(self.lead_server.text().strip())
+            lambda: self.resume_requested.emit(self.server.text().strip())
         )
         access_layout.addWidget(self.resume_button)
-        self.notice = QLabel(
-            "Credentials and invitations are never written to the local photo checkpoint."
-        )
+        self.notice = QLabel("Credentials are never written to the local photo checkpoint.")
         self.notice.setObjectName("InfoBanner")
         self.notice.setWordWrap(True)
         access_layout.addWidget(self.notice)
@@ -366,29 +338,18 @@ class LoginPage(QWidget):
         layout.addLayout(content, 1)
 
     @Slot()
-    def _request_lead(self) -> None:
+    def _request_photographer(self) -> None:
         self.error.clear()
         self.error.hide()
-        self.lead_requested.emit(
-            self.lead_server.text().strip(),
+        self.photographer_requested.emit(
+            self.server.text().strip(),
             self.username.text().strip(),
             self.password.text(),
-            self.lead_device_label.text().strip(),
-        )
-
-    @Slot()
-    def _request_uploader(self) -> None:
-        self.error.clear()
-        self.error.hide()
-        self.uploader_requested.emit(
-            self.uploader_server.text().strip(),
-            self.invitation.text(),
             self.device_label.text().strip(),
         )
 
     def show_error(self, message: str) -> None:
         self.password.clear()
-        self.invitation.clear()
         self.error.setText(message)
         self.error.show()
 
@@ -475,6 +436,78 @@ class EventSelectorPage(QWidget):
             self.selected.emit(item.data(Qt.ItemDataRole.UserRole))
 
 
+class SubEventSelectorPage(QWidget):
+    selected = Signal(object)
+    back_requested = Signal()
+
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(52, 34, 52, 38)
+        layout.setSpacing(22)
+        self.heading = PageHeading(
+            "Event section",
+            "Choose where these photos belong",
+            "One contribution belongs to exactly one active section.",
+            "2 of 4",
+        )
+        layout.addWidget(self.heading)
+
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(22, 20, 22, 22)
+        title = QLabel("Active sections")
+        title.setObjectName("SectionTitle")
+        panel_layout.addWidget(title)
+        self.sub_events = QListWidget()
+        self.sub_events.setAlternatingRowColors(True)
+        self.sub_events.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.sub_events.itemDoubleClicked.connect(lambda _item: self._select())
+        panel_layout.addWidget(self.sub_events, 1)
+        self.empty = QLabel(
+            "This event has no active sections. Create or restore one in the web dashboard."
+        )
+        self.empty.setObjectName("InfoBanner")
+        self.empty.setWordWrap(True)
+        self.empty.hide()
+        panel_layout.addWidget(self.empty)
+        layout.addWidget(panel, 1)
+
+        footer = QHBoxLayout()
+        back = _style_button(QPushButton("Back to events"), kind="ghost")
+        back.clicked.connect(self.back_requested)
+        footer.addWidget(back)
+        footer.addStretch()
+        self.open_button = _style_button(QPushButton("Open section"), kind="primary")
+        self.open_button.clicked.connect(self._select)
+        footer.addWidget(self.open_button)
+        layout.addLayout(footer)
+
+    def show_event(self, event: EventCache) -> None:
+        self.heading.title.setText(event.name)
+        self.sub_events.clear()
+        for sub_event in event.sub_events:
+            item = QListWidgetItem(
+                _asset_icon("calendar.svg"),
+                f"{sub_event.position:02d}    {sub_event.name}",
+            )
+            item.setSizeHint(QSize(0, 54))
+            item.setData(Qt.ItemDataRole.UserRole, sub_event)
+            self.sub_events.addItem(item)
+        has_sub_events = self.sub_events.count() > 0
+        self.empty.setVisible(not has_sub_events)
+        self.open_button.setEnabled(has_sub_events)
+        if has_sub_events:
+            self.sub_events.setCurrentRow(0)
+
+    @Slot()
+    def _select(self) -> None:
+        item = self.sub_events.currentItem()
+        if item:
+            self.selected.emit(item.data(Qt.ItemDataRole.UserRole))
+
+
 class PreviewPolicyPage(QWidget):
     confirmed = Signal(object)
     back_requested = Signal()
@@ -493,7 +526,7 @@ class PreviewPolicyPage(QWidget):
                 "Choose gallery preview branding",
                 "These settings are locked for the event. They affect previews only; "
                 "thumbnails stay clean and original downloads keep their exact bytes.",
-                "Lead setup",
+                "Event setup",
             )
         )
 
@@ -716,7 +749,6 @@ class SelectionPage(QWidget):
     scan_requested = Signal()
     pause_requested = Signal()
     new_batch_requested = Signal()
-    invitation_requested = Signal()
     intake_requested = Signal()
     finalize_requested = Signal()
 
@@ -753,9 +785,6 @@ class SelectionPage(QWidget):
         self.batch_status = QLabel("COLLECTING")
         self.batch_status.setObjectName("StatusBadge")
         event_layout.addWidget(self.batch_status)
-        self.invitation = _style_button(QPushButton("Copy uploader invitation"), kind="ghost")
-        self.invitation.clicked.connect(self.invitation_requested)
-        event_layout.addWidget(self.invitation)
         self.intake = _style_button(QPushButton("Close intake"), kind="ghost")
         self.intake.clicked.connect(self.intake_requested)
         event_layout.addWidget(self.intake)
@@ -861,7 +890,13 @@ class SelectionPage(QWidget):
         layout.addLayout(buttons)
 
     def show_batch(self, event: EventCache, batch_id: UUID, store: CheckpointStore) -> None:
-        self.heading.setText(event.name)
+        batch = store.get_batch(batch_id)
+        sub_event = next(
+            (value for value in event.sub_events if value.id == batch.sub_event_id),
+            None,
+        )
+        section_name = sub_event.name if sub_event else "Archived section"
+        self.heading.setText(f"{event.name}  /  {section_name}")
         self.batch_meta.setText(f"Contribution  {batch_id}")
         self.selections.clear()
         for selection in store.list_selections(batch_id):
@@ -873,7 +908,6 @@ class SelectionPage(QWidget):
             item.setSizeHint(QSize(0, 48))
             item.setData(Qt.ItemDataRole.UserRole, selection.id)
             self.selections.addItem(item)
-        batch = store.get_batch(batch_id)
         self._batch_frozen = batch.frozen
         self.batch_status.setText("FROZEN" if batch.frozen else "COLLECTING")
         self.batch_status.setProperty("status", "ready" if batch.frozen else "collecting")
@@ -885,15 +919,10 @@ class SelectionPage(QWidget):
         self.add_files.setEnabled(not batch.frozen)
         self.add_folder.setEnabled(not batch.frozen)
         self.remove_selection.setEnabled(not batch.frozen)
-        is_lead = event.role == "lead"
         intake_open = event.intake_state == "open"
         self._intake_open = intake_open
-        self.invitation.setVisible(is_lead)
-        self.invitation.setEnabled(is_lead and intake_open)
-        self.intake.setVisible(is_lead)
         self.intake.setText("Close intake" if intake_open else "Reopen intake")
-        self.finalize.setVisible(is_lead)
-        self.finalize.setEnabled(is_lead and not intake_open)
+        self.finalize.setEnabled(not intake_open)
         self.add_files.setEnabled(not batch.frozen and intake_open)
         self.add_folder.setEnabled(not batch.frozen and intake_open)
         self.remove_selection.setEnabled(not batch.frozen and intake_open)
@@ -911,7 +940,6 @@ class SelectionPage(QWidget):
             self.remove_selection,
             self.scan,
             self.new_batch,
-            self.invitation,
             self.intake,
             self.finalize,
         ):
@@ -931,7 +959,6 @@ class SelectionPage(QWidget):
         self.remove_selection.setEnabled(not self._batch_frozen and self._intake_open)
         self.scan.setEnabled(self._intake_open)
         self.new_batch.setEnabled(self._intake_open)
-        self.invitation.setEnabled(self._intake_open)
         self.intake.setEnabled(True)
         self.finalize.setEnabled(not self._intake_open)
 
@@ -1066,7 +1093,6 @@ class ApprovedPage(QWidget):
     verify_requested = Signal()
     export_requested = Signal()
     cleanup_requested = Signal()
-    invitation_requested = Signal()
     intake_requested = Signal()
     finalize_requested = Signal()
 
@@ -1171,24 +1197,21 @@ class ApprovedPage(QWidget):
         transfer_layout.addLayout(transfer_buttons)
         layout.addWidget(transfer_panel)
 
-        self.lead_panel = QFrame()
-        self.lead_panel.setObjectName("Panel")
-        lead_layout = QHBoxLayout(self.lead_panel)
-        lead_layout.setContentsMargins(22, 16, 22, 16)
-        lead_copy = QLabel("Lead controls")
-        lead_copy.setObjectName("SectionTitle")
-        lead_layout.addWidget(lead_copy)
-        lead_layout.addStretch()
-        self.invitation = _style_button(QPushButton("Copy uploader invitation"), kind="ghost")
-        self.invitation.clicked.connect(self.invitation_requested)
+        self.event_controls = QFrame()
+        self.event_controls.setObjectName("Panel")
+        event_layout = QHBoxLayout(self.event_controls)
+        event_layout.setContentsMargins(22, 16, 22, 16)
+        event_copy = QLabel("Event controls")
+        event_copy.setObjectName("SectionTitle")
+        event_layout.addWidget(event_copy)
+        event_layout.addStretch()
         self.intake = _style_button(QPushButton("Close intake"), kind="ghost")
         self.intake.clicked.connect(self.intake_requested)
         self.finalize = _style_button(QPushButton("Finalize ingestion"), kind="primary")
         self.finalize.clicked.connect(self.finalize_requested)
-        lead_layout.addWidget(self.invitation)
-        lead_layout.addWidget(self.intake)
-        lead_layout.addWidget(self.finalize)
-        layout.addWidget(self.lead_panel)
+        event_layout.addWidget(self.intake)
+        event_layout.addWidget(self.finalize)
+        layout.addWidget(self.event_controls)
 
         buttons = QHBoxLayout()
         self.new_batch = _style_button(
@@ -1233,7 +1256,7 @@ class ApprovedPage(QWidget):
         if complete:
             if excluded_count:
                 self.message.setText(
-                    f"Batch {batch_id} is resolved with {excluded_count} lead-approved "
+                    f"Batch {batch_id} is resolved with {excluded_count} photographer-approved "
                     "exclusion(s). New photos belong in a new contribution."
                 )
                 self.cloud_stage_detail.setText("Verified originals stored; exclusions recorded")
@@ -1247,7 +1270,7 @@ class ApprovedPage(QWidget):
             if derivative_failure_count:
                 self.message.setText(
                     f"Batch {batch_id} has verified originals, but {derivative_failure_count} "
-                    "photo(s) need gallery processing retry or lead review."
+                    "photo(s) need gallery processing retry or photographer review."
                 )
                 self.cloud_stage_detail.setText("Gallery derivative failure")
             else:
@@ -1268,11 +1291,8 @@ class ApprovedPage(QWidget):
         self.transfer_limit.setEnabled(True)
         self.verify.setEnabled(state is BatchState.APPROVED)
         self.new_batch.setEnabled(event.intake_state == "open")
-        is_lead = event.role == "lead"
-        self.lead_panel.setVisible(is_lead)
-        self.invitation.setEnabled(is_lead and event.intake_state == "open")
         self.intake.setText("Reopen intake" if event.intake_state == "closed" else "Close intake")
-        self.finalize.setEnabled(is_lead and event.intake_state == "closed")
+        self.finalize.setEnabled(event.intake_state == "closed")
 
     @Slot()
     def upload_started(self) -> None:
@@ -1319,6 +1339,7 @@ class MainWindow(QMainWindow):
         self.store = store
         self.gateway = gateway
         self.current_event: EventCache | None = None
+        self.current_sub_event: SubEventCache | None = None
         self.current_batch_id: UUID | None = None
         self.scan_thread: QThread | None = None
         self.scan_stop: Event | None = None
@@ -1337,6 +1358,7 @@ class MainWindow(QMainWindow):
         self.stack.setObjectName("PageStack")
         self.login = LoginPage()
         self.events = EventSelectorPage()
+        self.sub_events = SubEventSelectorPage()
         self.preview_policy = PreviewPolicyPage()
         self.selection = SelectionPage()
         self.validation = ValidationPage()
@@ -1344,6 +1366,7 @@ class MainWindow(QMainWindow):
         for page in (
             self.login,
             self.events,
+            self.sub_events,
             self.preview_policy,
             self.selection,
             self.validation,
@@ -1364,8 +1387,7 @@ class MainWindow(QMainWindow):
             }
             if len(cached_origins) == 1:
                 [origin] = cached_origins
-                self.login.lead_server.setText(origin)
-                self.login.uploader_server.setText(origin)
+                self.login.server.setText(origin)
             self.stack.setCurrentWidget(self.login)
         else:
             self.store.cache_event(demo_event)
@@ -1373,10 +1395,11 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.events)
 
     def _connect_actions(self) -> None:
-        self.login.lead_requested.connect(self._lead_login)
-        self.login.uploader_requested.connect(self._enroll_uploader)
+        self.login.photographer_requested.connect(self._photographer_login)
         self.login.resume_requested.connect(self._resume_session)
         self.events.selected.connect(self._open_event)
+        self.sub_events.selected.connect(self._open_sub_event)
+        self.sub_events.back_requested.connect(lambda: self.stack.setCurrentWidget(self.events))
         self.preview_policy.confirmed.connect(self._confirm_preview_policy)
         self.preview_policy.back_requested.connect(lambda: self.stack.setCurrentWidget(self.events))
         self.selection.add_files_requested.connect(self._add_files)
@@ -1385,7 +1408,6 @@ class MainWindow(QMainWindow):
         self.selection.scan_requested.connect(self._start_scan)
         self.selection.pause_requested.connect(self._pause_scan)
         self.selection.new_batch_requested.connect(self._new_batch)
-        self.selection.invitation_requested.connect(self._create_invitation)
         self.selection.intake_requested.connect(self._toggle_intake)
         self.selection.finalize_requested.connect(self._finalize_ingestion)
         self.validation.approve_requested.connect(self._approve_batch)
@@ -1397,12 +1419,11 @@ class MainWindow(QMainWindow):
         self.approved.cleanup_requested.connect(self._cleanup_event)
         self.approved.upload_requested.connect(self._start_upload)
         self.approved.pause_requested.connect(self._pause_upload)
-        self.approved.invitation_requested.connect(self._create_invitation)
         self.approved.intake_requested.connect(self._toggle_intake)
         self.approved.finalize_requested.connect(self._finalize_ingestion)
 
     @Slot(str, str, str, str)
-    def _lead_login(
+    def _photographer_login(
         self,
         server_url: str,
         username: str,
@@ -1410,7 +1431,14 @@ class MainWindow(QMainWindow):
         device_label: str,
     ) -> None:
         try:
-            events = list(self.gateway.sign_in_lead(server_url, username, password, device_label))
+            events = list(
+                self.gateway.sign_in_photographer(
+                    server_url,
+                    username,
+                    password,
+                    device_label,
+                )
+            )
         except RuntimeError as exc:
             self.login.show_error(str(exc))
             return
@@ -1419,19 +1447,6 @@ class MainWindow(QMainWindow):
         for event in events:
             self.store.cache_event(event)
         self.events.set_events(events, demo=False)
-        self.stack.setCurrentWidget(self.events)
-
-    @Slot(str, str, str)
-    def _enroll_uploader(self, server_url: str, invitation: str, device_label: str) -> None:
-        try:
-            event = self.gateway.enroll_uploader(server_url, invitation, device_label)
-        except RuntimeError as exc:
-            self.login.show_error(str(exc))
-            return
-        self.login.invitation.clear()
-        self._show_persistence_warning()
-        self.store.cache_event(event)
-        self.events.set_events([event], demo=False)
         self.stack.setCurrentWidget(self.events)
 
     @Slot(str)
@@ -1448,19 +1463,42 @@ class MainWindow(QMainWindow):
     @Slot(object)
     def _open_event(self, event: EventCache) -> None:
         self.current_event = event
+        self.current_sub_event = None
         self.header.set_context(event.name)
-        if event.role == "lead" and event.preview_policy is None:
+        if event.preview_policy is None:
             self.preview_policy.show_event(event)
             self.stack.setCurrentWidget(self.preview_policy)
             return
+        self._show_sub_events()
+
+    def _show_sub_events(self) -> None:
+        if self.current_event is None:
+            return
+        self.sub_events.show_event(self.current_event)
+        self.stack.setCurrentWidget(self.sub_events)
+
+    @Slot(object)
+    def _open_sub_event(self, sub_event: SubEventCache) -> None:
+        if self.current_event is None or sub_event not in self.current_event.sub_events:
+            return
+        self.current_sub_event = sub_event
+        self.header.set_context(f"{self.current_event.name} / {sub_event.name}")
         self._open_event_inventory()
 
     def _open_event_inventory(self) -> None:
-        if self.current_event is None:
+        if self.current_event is None or self.current_sub_event is None:
             return
         event = self.current_event
-        batches = self.store.list_batches(event.id)
-        self.current_batch_id = batches[-1].id if batches else self.store.create_batch(event.id)
+        batches = [
+            batch
+            for batch in self.store.list_batches(event.id)
+            if batch.sub_event_id == self.current_sub_event.id
+        ]
+        self.current_batch_id = (
+            batches[-1].id
+            if batches
+            else self.store.create_batch(event.id, self.current_sub_event.id)
+        )
         batch = self.store.get_batch(self.current_batch_id)
         if batch.state in {
             BatchState.APPROVED,
@@ -1493,13 +1531,16 @@ class MainWindow(QMainWindow):
             return
         self.current_event = event
         self.store.cache_event(event)
-        self._open_event_inventory()
+        self._show_sub_events()
 
     @Slot()
     def _new_batch(self) -> None:
-        if self.current_event is None:
+        if self.current_event is None or self.current_sub_event is None:
             return
-        self.current_batch_id = self.store.create_batch(self.current_event.id)
+        self.current_batch_id = self.store.create_batch(
+            self.current_event.id,
+            self.current_sub_event.id,
+        )
         self._show_selection()
 
     @Slot()
@@ -1707,23 +1748,6 @@ class MainWindow(QMainWindow):
         self._upload_worker = None
 
     @Slot()
-    def _create_invitation(self) -> None:
-        if self.current_event is None:
-            return
-        try:
-            invitation = self.gateway.create_invitation(self.current_event.id)
-        except RuntimeError as exc:
-            self._show_error(str(exc))
-            return
-        clipboard = QApplication.clipboard()
-        clipboard.setText(invitation)
-        QMessageBox.information(
-            self,
-            "Uploader invitation copied",
-            "The 72-hour uploader invitation was copied to the clipboard.",
-        )
-
-    @Slot()
     def _toggle_intake(self) -> None:
         if self.current_event is None:
             return
@@ -1794,6 +1818,7 @@ class MainWindow(QMainWindow):
             return
         self.store.delete_local_event(self.current_event.id)
         self.current_event = None
+        self.current_sub_event = None
         self.current_batch_id = None
         self.header.set_context("Private event ingestion")
         remaining = self.store.list_events()

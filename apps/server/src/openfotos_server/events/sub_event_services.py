@@ -35,6 +35,15 @@ def _normalized_name(value: str) -> str:
     return name
 
 
+def _validated_position(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 32_767:
+        raise IngestionError(
+            "invalid_sub_event_position",
+            "Use a sub-event display position from 1 to 32767.",
+        )
+    return value
+
+
 def _require_editable(event: Event) -> None:
     if event.state in _LOCKED_STATES:
         raise IngestionError(
@@ -54,9 +63,7 @@ def _require_unique_name(event: Event, name: str, *, excluding: UUID | None = No
 
 
 @transaction.atomic
-def create_sub_event(
-    *, event: Event, name: str, position: int, actor, request=None
-) -> SubEvent:
+def create_sub_event(*, event: Event, name: str, position: int, actor, request=None) -> SubEvent:
     locked_event = Event.objects.select_for_update().get(pk=event.pk)
     _require_editable(locked_event)
     if SubEvent.objects.filter(event=locked_event).count() >= MAX_SUB_EVENTS:
@@ -68,7 +75,7 @@ def create_sub_event(
     sub_event = SubEvent.objects.create(
         event=locked_event,
         name=normalized_name,
-        position=position,
+        position=_validated_position(position),
     )
     record_audit(
         photographer=locked_event.photographer,
@@ -90,12 +97,13 @@ def update_sub_event(
     _require_editable(locked_event)
     locked = SubEvent.objects.select_for_update().get(pk=sub_event.pk, event=locked_event)
     normalized_name = _normalized_name(name)
+    validated_position = _validated_position(position)
     _require_unique_name(locked_event, normalized_name, excluding=locked.id)
-    if locked.name == normalized_name and locked.position == position:
+    if locked.name == normalized_name and locked.position == validated_position:
         return locked
     previous = {"name": locked.name, "position": locked.position}
     locked.name = normalized_name
-    locked.position = position
+    locked.position = validated_position
     locked.save(update_fields=("name", "position", "updated_at"))
     record_audit(
         photographer=locked_event.photographer,
@@ -114,9 +122,7 @@ def update_sub_event(
 
 
 @transaction.atomic
-def set_sub_event_archived(
-    *, sub_event: SubEvent, archived: bool, actor, request=None
-) -> SubEvent:
+def set_sub_event_archived(*, sub_event: SubEvent, archived: bool, actor, request=None) -> SubEvent:
     locked_event = Event.objects.select_for_update().get(pk=sub_event.event_id)
     _require_editable(locked_event)
     locked = SubEvent.objects.select_for_update().get(pk=sub_event.pk, event=locked_event)

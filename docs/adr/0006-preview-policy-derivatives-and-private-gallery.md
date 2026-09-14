@@ -1,6 +1,6 @@
 # ADR 0006: Event preview policy, local derivatives, and private gallery
 
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR 0008
 - **Date:** 2026-09-12
 
 ## Context

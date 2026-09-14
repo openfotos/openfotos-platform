@@ -24,11 +24,12 @@ from openfotos_server.events.models import (
     AuditAction,
     ContributionBatch,
     Event,
+    EventInstallation,
     IngestionManifest,
     Photographer,
     PhotographerMembership,
     PreviewPolicy,
-    UploaderDevice,
+    SubEvent,
 )
 from openfotos_storage import PresignedGet
 
@@ -69,7 +70,7 @@ def _tenant(slug="alpha"):
         display_name=f"{slug.title()} Photos",
     )
     user = get_user_model().objects.create_user(
-        username=f"{slug}-lead", password="correct-password"
+        username=f"{slug}-photographer", password="correct-password"
     )
     PhotographerMembership.objects.create(photographer=photographer, user=user)
     event = Event.objects.create(
@@ -79,17 +80,19 @@ def _tenant(slug="alpha"):
         state=EventState.PROCESSING.value,
         intake_state="closed",
     )
-    event.set_pin("123456")
+    event.set_pin("1234")
     event.save(update_fields=("pin_hash",))
-    device = UploaderDevice.objects.create(
+    installation = EventInstallation.objects.create(
         event=event,
+        user=user,
         installation_id=uuid4(),
-        label="Lead",
-        role="lead",
+        label="Studio workstation",
     )
+    sub_event = SubEvent.objects.create(event=event, name="Reception", position=1)
     batch = ContributionBatch.objects.create(
         id=uuid4(),
-        device=device,
+        installation=installation,
+        sub_event=sub_event,
         intake_generation=1,
         state="complete",
         label="Complete",
@@ -149,6 +152,20 @@ def _gallery_asset(event, batch, *, position=1, filename="client-private-name.jp
 def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(monkeypatch) -> None:
     photographer, user, event, batch = _tenant()
     asset = _gallery_asset(event, batch)
+    haldi = SubEvent.objects.create(event=event, name="Haldi", position=2)
+    haldi_batch = ContributionBatch.objects.create(
+        id=uuid4(),
+        installation=batch.installation,
+        sub_event=haldi,
+        intake_generation=1,
+        state="complete",
+        label="Haldi",
+        processing_profile_id="pilot-profile-v1",
+        declared_asset_count=1,
+        declared_original_bytes=100,
+        manifest_sha256="2" * 64,
+    )
+    haldi_asset = _gallery_asset(event, haldi_batch, position=2)
     event.derivatives_ready_generation = 1
     event.state = EventState.REVIEW.value
     event.save(update_fields=("derivatives_ready_generation", "state"))
@@ -178,7 +195,7 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
     photo_url = reverse("events:visitor-photo", args=(event.public_token, asset.id))
     assert visitor.get(photo_url, headers={"host": "alpha.localhost"}).status_code == 404
     event_url = reverse("events:event-access", args=(event.public_token,))
-    visitor.post(event_url, {"pin": "123456"}, headers={"host": "alpha.localhost"})
+    visitor.post(event_url, {"pin": "1234"}, headers={"host": "alpha.localhost"})
     gallery = visitor.get(event_url, headers={"host": "alpha.localhost"})
     assert gallery.status_code == 200
     assert gallery.headers["Cache-Control"] == "private, no-store"
@@ -190,6 +207,11 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
     assert photo.status_code == 200
     assert b"previews" in photo.content
     assert b"originals" not in photo.content
+    wrong_filtered_photo = reverse(
+        "events:visitor-sub-event-photo",
+        args=(event.public_token, batch.sub_event_id, haldi_asset.id),
+    )
+    assert visitor.get(wrong_filtered_photo, headers={"host": "alpha.localhost"}).status_code == 404
 
     old_cookie = visitor.cookies[visitor_cookie_name(event)].value
     photographer_client.post(
@@ -202,8 +224,8 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
     assert visitor.get(photo_url, headers={"host": "alpha.localhost"}).status_code == 404
 
 
-def test_dashboard_is_tenant_scoped_and_updates_download_policy(monkeypatch) -> None:
-    _, user, event, _ = _tenant()
+def test_dashboard_is_tenant_scoped_and_sub_event_filter_cannot_widen(monkeypatch) -> None:
+    _, user, event, reception_batch = _tenant()
     _, other_user, _, _ = _tenant("beta")
     monkeypatch.setattr(views, "configured_object_store", SigningStore)
     client = Client()
@@ -217,15 +239,37 @@ def test_dashboard_is_tenant_scoped_and_updates_download_policy(monkeypatch) -> 
     )
 
     client.force_login(user)
-    changed = client.post(
-        reverse("events:update-download-policy", args=(event.id,)),
-        {"policy": "explicit-shares"},
+    reception_asset = _gallery_asset(event, reception_batch)
+    haldi = SubEvent.objects.create(event=event, name="Haldi", position=2)
+    haldi_batch = ContributionBatch.objects.create(
+        id=uuid4(),
+        installation=reception_batch.installation,
+        sub_event=haldi,
+        intake_generation=1,
+        state="complete",
+        label="Haldi",
+        processing_profile_id="pilot-profile-v1",
+        declared_asset_count=1,
+        declared_original_bytes=100,
+        manifest_sha256="2" * 64,
+    )
+    haldi_asset = _gallery_asset(event, haldi_batch, position=2)
+
+    filtered_page, filtered_images = gallery_page(
+        event=event,
+        sub_event=haldi,
+        page_number=1,
+        object_store=SigningStore(),
+    )
+    assert filtered_page.paginator.count == 1
+    assert [image.asset.id for image in filtered_images] == [haldi_asset.id]
+    assert reception_asset.id not in {image.asset.id for image in filtered_images}
+
+    response = client.get(
+        reverse("events:photographer-sub-event", args=(event.id, haldi.id)),
         headers={"host": "alpha.localhost"},
     )
-    assert changed.status_code == 302
-    event.refresh_from_db()
-    assert event.original_download_policy == "explicit-shares"
-    assert event.audit_events.filter(action=AuditAction.DOWNLOAD_POLICY_CHANGED).exists()
+    assert response.status_code == 200
 
 
 def test_failed_asset_exclusion_requires_five_attempts_and_is_reversible() -> None:

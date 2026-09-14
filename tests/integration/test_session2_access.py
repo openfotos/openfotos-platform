@@ -42,7 +42,7 @@ def make_event(
     *,
     name: str,
     state: EventState = EventState.DRAFT,
-    pin: str = "123456",
+    pin: str = "1234",
     expires_at=None,
 ) -> Event:
     event = Event(
@@ -144,7 +144,7 @@ def test_locked_event_reveals_no_event_metadata_and_unlocks_with_scoped_cookie(t
     assert b"Private Reception" not in locked.content
     assert b"Alpha Photos" not in locked.content
 
-    unlocked = client.post(event_url, {"pin": "123456"}, headers={"host": "alpha.localhost"})
+    unlocked = client.post(event_url, {"pin": "1234"}, headers={"host": "alpha.localhost"})
     assert unlocked.status_code == 302
     cookie = unlocked.cookies[visitor_cookie_name(event)]
     assert cookie["httponly"]
@@ -194,7 +194,7 @@ def test_expiry_and_access_revocation_invalidate_an_existing_cookie(tenants) -> 
     )
     event_url = reverse("events:event-access", args=(event.public_token,))
     client = Client()
-    client.post(event_url, {"pin": "123456"}, headers={"host": "alpha.localhost"})
+    client.post(event_url, {"pin": "1234"}, headers={"host": "alpha.localhost"})
 
     revoke_event_sessions(event_id=event.id, actor=admin)
     revoked = client.get(event_url, headers={"host": "alpha.localhost"})
@@ -219,7 +219,7 @@ def test_fifth_wrong_pin_is_rate_limited_without_logging_the_pin_or_ip(tenants) 
     client = Client(REMOTE_ADDR="203.0.113.8")
 
     responses = [
-        client.post(event_url, {"pin": "999999"}, headers={"host": "alpha.localhost"})
+        client.post(event_url, {"pin": "9999"}, headers={"host": "alpha.localhost"})
         for _ in range(5)
     ]
 
@@ -230,7 +230,7 @@ def test_fifth_wrong_pin_is_rate_limited_without_logging_the_pin_or_ip(tenants) 
     assert last_audit.result == AuditResult.RATE_LIMITED
     assert last_audit.client_hash != "203.0.113.8"
     assert "203.0.113.8" not in str(last_audit.__dict__)
-    assert "999999" not in str(last_audit.__dict__)
+    assert "9999" not in str(last_audit.__dict__)
 
 
 def test_token_rotation_breaks_old_links_and_requires_a_fresh_unlock(tenants) -> None:
@@ -244,7 +244,7 @@ def test_token_rotation_breaks_old_links_and_requires_a_fresh_unlock(tenants) ->
     )
     old_url = reverse("events:event-access", args=(event.public_token,))
     client = Client()
-    client.post(old_url, {"pin": "123456"}, headers={"host": "alpha.localhost"})
+    client.post(old_url, {"pin": "1234"}, headers={"host": "alpha.localhost"})
 
     rotated = rotate_event_token(event_id=event.id, actor=admin)
     new_url = reverse("events:event-access", args=(rotated.public_token,))

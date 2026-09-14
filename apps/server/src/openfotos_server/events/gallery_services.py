@@ -1,4 +1,4 @@
-"""Authorized gallery queries and photographer-controlled delivery policy."""
+"""Authorized gallery queries within event and sub-event boundaries."""
 
 from dataclasses import dataclass
 from uuid import UUID
@@ -29,9 +29,7 @@ class GalleryImage:
     height: int
 
 
-def available_gallery_assets(
-    event: Event, *, sub_event: SubEvent | None = None
-) -> QuerySet[Asset]:
+def available_gallery_assets(event: Event, *, sub_event: SubEvent | None = None) -> QuerySet[Asset]:
     original = AssetObject.objects.filter(
         asset_id=OuterRef("pk"),
         variant=AssetVariant.ORIGINAL.value,

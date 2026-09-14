@@ -1,9 +1,10 @@
-from django.conf import settings
-import django.core.validators
-from django.db import migrations, models
-import django.db.models.deletion
-from django.utils import timezone
 import uuid
+
+import django.core.validators
+import django.db.models.deletion
+from django.conf import settings
+from django.db import migrations, models
+from django.utils import timezone
 
 
 def migrate_existing_installations_and_batches(apps, schema_editor):
@@ -40,9 +41,7 @@ def migrate_existing_installations_and_batches(apps, schema_editor):
             name="Imported photos",
             position=1,
         )
-        ContributionBatch.objects.filter(installation__event=event).update(
-            sub_event=sub_event
-        )
+        ContributionBatch.objects.filter(installation__event=event).update(sub_event=sub_event)
 
 
 class Migration(migrations.Migration):
@@ -54,6 +53,10 @@ class Migration(migrations.Migration):
         migrations.RenameModel(
             old_name="UploaderDevice",
             new_name="EventInstallation",
+        ),
+        migrations.RemoveIndex(
+            model_name="contributionbatch",
+            name="batch_device_gen_idx",
         ),
         migrations.RenameField(
             model_name="contributionbatch",
@@ -203,10 +206,6 @@ class Migration(migrations.Migration):
             model_name="eventinstallation",
             new_name="install_event_status_idx",
             old_name="device_event_status_idx",
-        ),
-        migrations.RemoveIndex(
-            model_name="contributionbatch",
-            name="batch_device_gen_idx",
         ),
         migrations.AddIndex(
             model_name="contributionbatch",

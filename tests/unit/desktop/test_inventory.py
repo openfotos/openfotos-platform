@@ -15,7 +15,10 @@ from openfotos_desktop.ingestion import (
     InventoryValidator,
     RejectionReason,
     ScanLimits,
+    SubEventCache,
 )
+
+_SUB_EVENT_ID = UUID("00000000-0000-4000-8000-000000000103")
 
 
 def write_jpeg(path: Path, *, size: tuple[int, int] = (8, 6), color: str = "navy") -> int:
@@ -32,9 +35,15 @@ def cache_event(store: CheckpointStore, event_id: UUID | None = None) -> UUID:
             name="Synthetic reception",
             storage_limit_bytes=25_000_000_000,
             processing_profile_id="pilot-profile-v1",
+            sub_events=(SubEventCache(id=_SUB_EVENT_ID, name="Reception", position=1),),
         )
     )
     return selected_id
+
+
+def create_batch(store: CheckpointStore, event_id: UUID | None = None) -> UUID:
+    selected_id = event_id or cache_event(store)
+    return store.create_batch(selected_id, _SUB_EVENT_ID)
 
 
 def test_mixed_nested_inventory_reports_exact_counts_and_bytes(tmp_path: Path) -> None:
@@ -49,7 +58,7 @@ def test_mixed_nested_inventory_reports_exact_counts_and_bytes(tmp_path: Path) -
     individual_bytes = write_jpeg(individual, color="red")
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_folder(batch_id, source)
         store.add_files(batch_id, [individual, individual])
 
@@ -75,7 +84,7 @@ def test_forced_exit_resumes_without_revalidating_unchanged_items(tmp_path: Path
 
     database = tmp_path / "checkpoint.sqlite3"
     with CheckpointStore(database) as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_folder(batch_id, source)
 
         class SimulatedExit(Exception):
@@ -105,7 +114,7 @@ def test_process_termination_recovers_committed_wal_checkpoint(tmp_path: Path) -
         write_jpeg(source / f"{index}.jpg", color=(index * 30, 0, 0))
     database = tmp_path / "checkpoint.sqlite3"
     with CheckpointStore(database) as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_folder(batch_id, source)
 
     crash_script = """
@@ -140,7 +149,7 @@ def test_changed_approved_file_pauses_for_review(tmp_path: Path) -> None:
     write_jpeg(photo, color="blue")
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_files(batch_id, [photo])
         first = InventoryScanner(store).scan(batch_id)
         store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
@@ -161,7 +170,7 @@ def test_approval_requires_complete_scan_and_matching_profile(tmp_path: Path) ->
     missing = tmp_path / "missing"
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_folder(batch_id, missing)
         summary = InventoryScanner(store).scan(batch_id)
 
@@ -186,7 +195,7 @@ def test_byte_and_pixel_limits_are_stable_rejection_reasons(tmp_path: Path) -> N
     limits = ScanLimits(max_file_bytes=1_000, max_pixels=100)
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_files(batch_id, [byte_limited, pixel_limited])
         InventoryScanner(store, validator=InventoryValidator(limits)).scan(batch_id)
 
@@ -202,7 +211,7 @@ def test_relocated_root_is_verified_and_reuses_checkpoint(tmp_path: Path) -> Non
     write_jpeg(original / "nested" / "photo.jpg")
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         selection_id = store.add_folder(batch_id, original)
         InventoryScanner(store).scan(batch_id)
         store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
@@ -229,7 +238,7 @@ def test_ten_installations_create_distinct_batches_and_assets(tmp_path: Path) ->
     for index in range(10):
         with CheckpointStore(tmp_path / f"device-{index}.sqlite3") as store:
             cache_event(store, event_id)
-            batch_id = store.create_batch(event_id)
+            batch_id = create_batch(store, event_id)
             store.add_files(batch_id, [source])
             InventoryScanner(store).scan(batch_id)
             installation_ids.add(store.installation_id)
@@ -249,7 +258,7 @@ def test_distinct_paths_with_identical_bytes_are_separate_accepted_assets(
     second.write_bytes(first.read_bytes())
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_files(batch_id, [first, second])
 
         summary = InventoryScanner(store).scan(batch_id)
@@ -265,7 +274,7 @@ def test_new_file_after_freeze_is_warned_and_left_for_a_new_batch(tmp_path: Path
     write_jpeg(source / "approved.jpg")
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_folder(batch_id, source)
         InventoryScanner(store).scan(batch_id)
         store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
@@ -290,7 +299,7 @@ def test_symbolic_link_is_visible_and_never_followed(tmp_path: Path) -> None:
         pytest.skip("This test environment cannot create symbolic links.")
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_folder(batch_id, source)
         summary = InventoryScanner(store).scan(batch_id)
 
@@ -307,7 +316,7 @@ def test_jpeg_signature_with_invalid_structure_has_decode_reason(tmp_path: Path)
     invalid.write_bytes(b"\xff\xd8\xffnot-a-decodable-jpeg")
 
     with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
-        batch_id = store.create_batch(cache_event(store))
+        batch_id = create_batch(store)
         store.add_files(batch_id, [invalid])
         InventoryScanner(store).scan(batch_id)
 

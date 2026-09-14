@@ -16,9 +16,9 @@ from .models import (
     ScanLimits,
     ScanProgress,
     ScanSummary,
-    SubEventCache,
     SelectionKind,
     SourceSelection,
+    SubEventCache,
     UploadCheckpoint,
 )
 from .scanner import InventoryScanner, RelocationError, ScanCancelled

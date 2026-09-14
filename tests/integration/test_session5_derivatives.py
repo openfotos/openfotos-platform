@@ -29,9 +29,7 @@ from openfotos_server.events.derivative_services import (
     verify_derivative,
 )
 from openfotos_server.events.desktop_auth import (
-    authenticate_lead,
-    create_invitation,
-    redeem_invitation,
+    authenticate_photographer,
 )
 from openfotos_server.events.ingestion_services import (
     IngestionError,
@@ -47,6 +45,7 @@ from openfotos_server.events.models import (
     Event,
     Photographer,
     PhotographerMembership,
+    SubEvent,
 )
 from openfotos_storage import PresignedGet
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectHead, PresignedPut
@@ -117,37 +116,42 @@ def _mark() -> str:
 
 def _setup():
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
-    user = get_user_model().objects.create_user(username="lead", password="correct-password")
+    user = get_user_model().objects.create_user(
+        username="photographer",
+        password="correct-password",
+    )
     PhotographerMembership.objects.create(photographer=photographer, user=user)
     event = Event.objects.create(
         photographer=photographer,
         name="Reception",
         expires_at=timezone.now() + timedelta(days=30),
     )
-    lead = authenticate_lead(
+    SubEvent.objects.create(event=event, name="Reception", position=1)
+    first = authenticate_photographer(
         photographer=photographer,
-        username="lead",
+        username="photographer",
         password="correct-password",
         installation_id=uuid4(),
     ).session
-    invitation = create_invitation(session=lead, event=event)
-    _, uploader = redeem_invitation(
+    second = authenticate_photographer(
         photographer=photographer,
-        token=invitation.token,
+        username="photographer",
+        password="correct-password",
         installation_id=uuid4(),
-        label="Uploader",
-    )
-    return event, lead, uploader.session
+    ).session
+    return event, first, second
 
 
-def _verified_original(event, uploader, storage, *, content=b"original jpeg bytes"):
+def _verified_original(event, installation, storage, *, content=b"original jpeg bytes"):
     asset_id = uuid4()
+    sub_event = SubEvent.objects.get(event=event, is_archived=False)
     contribution = ContributionInput.from_dict(
         {
             "batch_id": str(uuid4()),
+            "sub_event_id": str(sub_event.id),
             "label": "Camera one",
             "processing_profile_id": "pilot-profile-v1",
-            "device_label": "Uploader",
+            "device_label": "Installation",
             "assets": [
                 {
                     "id": str(asset_id),
@@ -162,12 +166,12 @@ def _verified_original(event, uploader, storage, *, content=b"original jpeg byte
         }
     )
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=contribution,
     )
     [lease] = issue_upload_leases(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
@@ -175,7 +179,7 @@ def _verified_original(event, uploader, storage, *, content=b"original jpeg byte
     original = AssetObject.objects.get(asset_id=lease["asset_id"], variant="originals")
     storage.upload(original.object_key, content)
     verify_uploaded_object(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         asset_id=asset_id,
         object_store=storage,
@@ -219,11 +223,11 @@ def _derivative_input(asset, policy):
 
 
 def test_derivatives_are_owned_verified_and_make_current_generation_ready() -> None:
-    event, lead, uploader = _setup()
+    event, primary, installation = _setup()
     storage = MemoryObjectStore()
-    asset, original_content = _verified_original(event, uploader, storage)
+    asset, original_content = _verified_original(event, installation, storage)
     policy = confirm_preview_policy(
-        session=lead,
+        session=primary,
         event_id=event.id,
         value=PreviewPolicyInput.from_dict(
             {
@@ -237,16 +241,16 @@ def test_derivatives_are_owned_verified_and_make_current_generation_ready() -> N
         object_store=storage,
     )
     value, contents = _derivative_input(asset, policy)
-    registered = register_asset_derivatives(session=uploader, event_id=event.id, value=value)
+    registered = register_asset_derivatives(session=installation, event_id=event.id, value=value)
     assert {item.variant for item in registered} == {"previews", "thumbnails"}
 
-    close_intake(session=lead, event_id=event.id)
-    finalize_ingestion(session=lead, event_id=event.id, object_store=storage)
+    close_intake(session=primary, event_id=event.id)
+    finalize_ingestion(session=primary, event_id=event.id, object_store=storage)
     assert not refresh_derivative_readiness(event.id)
 
     for variant, content in contents.items():
         [lease] = issue_derivative_leases(
-            session=uploader,
+            session=installation,
             event_id=event.id,
             asset_id=asset.id,
             variants=(variant,),
@@ -255,7 +259,7 @@ def test_derivatives_are_owned_verified_and_make_current_generation_ready() -> N
         derivative = AssetObject.objects.get(asset=asset, variant=variant.value)
         storage.upload(derivative.object_key, content)
         verified = verify_derivative(
-            session=uploader,
+            session=installation,
             event_id=event.id,
             asset_id=asset.id,
             variant=variant,
@@ -273,10 +277,10 @@ def test_derivatives_are_owned_verified_and_make_current_generation_ready() -> N
     assert storage.objects[original.object_key][0] == original_content
 
 
-def test_policy_is_lead_only_and_derivative_access_is_device_scoped() -> None:
-    event, lead, uploader = _setup()
+def test_policy_is_immutable_and_derivative_access_is_installation_scoped() -> None:
+    event, primary, installation = _setup()
     storage = MemoryObjectStore()
-    asset, _ = _verified_original(event, uploader, storage)
+    asset, _ = _verified_original(event, installation, storage)
     value = PreviewPolicyInput.from_dict(
         {
             "enabled": False,
@@ -286,23 +290,15 @@ def test_policy_is_lead_only_and_derivative_access_is_device_scoped() -> None:
             "mark_png_base64": "",
         }
     )
-    with pytest.raises(IngestionError) as denied:
-        confirm_preview_policy(
-            session=uploader,
-            event_id=event.id,
-            value=value,
-            object_store=storage,
-        )
-    assert denied.value.code == "lead_required"
     policy = confirm_preview_policy(
-        session=lead,
+        session=installation,
         event_id=event.id,
         value=value,
         object_store=storage,
     )
     with pytest.raises(IngestionError) as immutable_policy:
         confirm_preview_policy(
-            session=lead,
+            session=primary,
             event_id=event.id,
             value=PreviewPolicyInput.from_dict(
                 {
@@ -317,12 +313,11 @@ def test_policy_is_lead_only_and_derivative_access_is_device_scoped() -> None:
         )
     assert immutable_policy.value.code == "preview_policy_already_confirmed"
 
-    invitation = create_invitation(session=lead, event=event)
-    _, other = redeem_invitation(
+    other = authenticate_photographer(
         photographer=event.photographer,
-        token=invitation.token,
+        username="photographer",
+        password="correct-password",
         installation_id=uuid4(),
-        label="Other uploader",
     )
     derivative_value, _ = _derivative_input(asset, policy)
     with pytest.raises(IngestionError) as private:
@@ -343,11 +338,11 @@ def test_policy_is_lead_only_and_derivative_access_is_device_scoped() -> None:
 
 
 def test_finalization_reconciles_derivatives_that_finished_while_intake_was_open() -> None:
-    event, lead, uploader = _setup()
+    event, primary, installation = _setup()
     storage = MemoryObjectStore()
-    asset, _ = _verified_original(event, uploader, storage)
+    asset, _ = _verified_original(event, installation, storage)
     policy = confirm_preview_policy(
-        session=lead,
+        session=primary,
         event_id=event.id,
         value=PreviewPolicyInput.from_dict(
             {
@@ -361,12 +356,12 @@ def test_finalization_reconciles_derivatives_that_finished_while_intake_was_open
         object_store=None,
     )
     value, contents = _derivative_input(asset, policy)
-    register_asset_derivatives(session=uploader, event_id=event.id, value=value)
+    register_asset_derivatives(session=installation, event_id=event.id, value=value)
     for variant, content in contents.items():
         derivative = AssetObject.objects.get(asset=asset, variant=variant.value)
         storage.upload(derivative.object_key, content)
         verify_derivative(
-            session=uploader,
+            session=installation,
             event_id=event.id,
             asset_id=asset.id,
             variant=variant,
@@ -375,28 +370,21 @@ def test_finalization_reconciles_derivatives_that_finished_while_intake_was_open
     event.refresh_from_db()
     assert event.state != EventState.REVIEW.value
 
-    close_intake(session=lead, event_id=event.id)
-    finalize_ingestion(session=lead, event_id=event.id, object_store=storage)
+    close_intake(session=primary, event_id=event.id)
+    finalize_ingestion(session=primary, event_id=event.id, object_store=storage)
 
     event.refresh_from_db()
     assert event.state == EventState.REVIEW.value
     assert event.derivatives_ready_generation == event.intake_generation
 
 
-def test_disabled_policy_api_needs_a_lead_but_not_object_storage() -> None:
+def test_disabled_policy_api_accepts_photographer_without_object_storage() -> None:
     event, _, _ = _setup()
-    lead_tokens = authenticate_lead(
+    photographer_tokens = authenticate_photographer(
         photographer=event.photographer,
-        username="lead",
+        username="photographer",
         password="correct-password",
         installation_id=uuid4(),
-    )
-    invitation = create_invitation(session=lead_tokens.session, event=event)
-    _, uploader_tokens = redeem_invitation(
-        photographer=event.photographer,
-        token=invitation.token,
-        installation_id=uuid4(),
-        label="API uploader",
     )
     client = Client()
     url = reverse("desktop-api:confirm-preview-policy", args=(event.id,))
@@ -407,26 +395,13 @@ def test_disabled_policy_api_needs_a_lead_but_not_object_storage() -> None:
         "logo_kind": "none",
         "mark_png_base64": "",
     }
-    denied = client.post(
-        url,
-        body,
-        content_type="application/json",
-        headers={
-            "host": "alpha.localhost",
-            "authorization": f"Bearer {uploader_tokens.access_token}",
-            "idempotency-key": str(uuid4()),
-        },
-    )
-    assert denied.status_code == 403
-    assert denied.json()["error"]["code"] == "lead_required"
-
     confirmed = client.post(
         url,
         body,
         content_type="application/json",
         headers={
             "host": "alpha.localhost",
-            "authorization": f"Bearer {lead_tokens.access_token}",
+            "authorization": f"Bearer {photographer_tokens.access_token}",
             "idempotency-key": str(uuid4()),
         },
     )

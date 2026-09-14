@@ -5,7 +5,14 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
-from .ingestion import CheckpointStore, EventCache
+from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+
+from .ingestion import (
+    CheckpointStore,
+    EventCache,
+    PreviewPolicyCache,
+    SubEventCache,
+)
 from .paths import default_checkpoint_path
 
 DEMO_EVENT = EventCache(
@@ -13,6 +20,23 @@ DEMO_EVENT = EventCache(
     name="Session 3 synthetic reception",
     storage_limit_bytes=25_000_000_000,
     processing_profile_id="pilot-profile-v1",
+    sub_events=(
+        SubEventCache(
+            id=UUID("00000000-0000-4000-8000-000000000004"),
+            name="Reception",
+            position=1,
+        ),
+    ),
+    preview_policy=PreviewPolicyCache(
+        id=UUID("00000000-0000-4000-8000-000000000005"),
+        enabled=False,
+        template=WatermarkTemplate.COMPACT_BOTTOM_RIGHT,
+        text="",
+        logo_kind=WatermarkLogoKind.NONE,
+        renderer_id="watermark-raster-v1",
+        derivative_profile_id="gallery-jpeg-v1",
+        mark_sha256="",
+    ),
 )
 
 

@@ -1,6 +1,6 @@
 # ADR 0005: Contribution lifecycle and event reconciliation
 
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR 0008
 - **Date:** 2026-09-11
 
 ## Context

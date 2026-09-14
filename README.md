@@ -1,22 +1,24 @@
 # OpenFotos
 
-OpenFotos is a supervised pilot for private wedding photo delivery and face-based photo
-discovery. A photographer and invited upload contributors process edited JPEGs with desktop apps;
-customers browse a PIN-protected web gallery and can submit an ephemeral selfie to find likely
-photos.
+OpenFotos is a supervised pilot for private wedding photo delivery and future face-based photo
+discovery. A photographer organizes one main wedding into sub-events such as Haldi, Reception, and
+Marriage, then processes edited JPEGs with one account across tracked desktop installations.
 
-The pilot deliberately targets one photographer, one reception, less than 20 GB of photographs,
-one to ten active contribution devices, and a ten-day delivery window. The complete product and
+The pilot deliberately targets one photographer, wedding-sized events below roughly 20–25 GB, up
+to 50 sub-events, one to ten active desktop installations, and a supervised delivery window. The complete product and
 architecture decisions are in the
 [product and technical plan](OpenFotos_Markdown/OpenFotos_Product_and_Technical_Plan.md). The
 [pilot access decision](docs/adr/0002-pilot-accounts-tenancy-and-event-access.md) records the exact
 Session 2 authorization and PIN tradeoffs. The
-[multi-uploader decision](docs/adr/0003-multi-uploader-desktop-ingestion.md),
+[superseded multi-uploader decision](docs/adr/0003-multi-uploader-desktop-ingestion.md),
 [exact-object lease decision](docs/adr/0004-exact-object-upload-leases.md), and
 [reconciliation decision](docs/adr/0005-contribution-lifecycle-and-reconciliation.md) define how
 independent desktop installations safely contribute to the same event. The
 [preview and gallery decision](docs/adr/0006-preview-policy-derivatives-and-private-gallery.md)
 defines optional event watermarking, local derivative generation, and private browsing.
+The [post-Session-5 revision](docs/adr/0008-main-events-sub-events-and-search-only-face-index.md)
+defines mandatory sub-events, one photographer identity, four-digit PINs, and the search-only face
+index that supersedes collections and clustering.
 
 ## Repository map
 
@@ -27,7 +29,7 @@ apps/
 packages/
   contracts/     Shared event states and API/model contracts
   storage/       Object-key and storage boundary code
-  vision/        Replaceable detection, embedding, and clustering boundary
+  vision/        Replaceable face detection and embedding boundary
 infra/
   docker/        Local PostgreSQL and server container definitions
   railway/       Railway deployment notes
@@ -57,10 +59,11 @@ The health endpoint is `http://127.0.0.1:8000/health/`. Start the real desktop c
 uv run python -m openfotos_desktop
 ```
 
-For a photographer with slug `demo`, use `http://demo.localhost:8000` as the server. Lead login,
-invitation enrollment, durable refresh, private direct upload, pause/resume, intake closure, and
-manifest finalization use the desktop API. Event leads confirm optional preview watermarking in the
-desktop; the same sync action uploads originals and their private previews/thumbnails. To run local
+For a photographer with slug `demo`, use `http://demo.localhost:8000` as the server. Photographer
+login, durable refresh, private direct upload, pause/resume, intake closure, and manifest
+finalization use the desktop API. Before creating a contribution, the desktop requires one active
+sub-event selected from the server snapshot. The photographer confirms optional preview
+watermarking; the same sync action uploads originals and their private previews/thumbnails. To run local
 inventory without a server, start the
 explicit synthetic demo instead:
 
@@ -78,8 +81,9 @@ uv run python -m openfotos_desktop.benchmark_inventory /path/to/representative/f
 ```
 
 For the Session 2 browser flow, open `http://localhost:8000/admin/` and provision records in this
-order: Django user, photographer, photographer membership, then event. Event PINs are write-only
-six-digit values. Use the event admin actions to move a sample through its legal lifecycle or to
+order: Django user, photographer, photographer membership, then event. Event PINs are generated
+four-digit ASCII values shown once and stored with Argon2 plus `EVENT_PIN_PEPPER`. Create at least
+one sub-event in the photographer dashboard before upload/publication. Use the event admin actions to move a sample through its legal lifecycle or to
 revoke visitor sessions. A photographer with slug `demo` signs in at
 `http://demo.localhost:8000/login/`; its visitor links use the same tenant host.
 
@@ -90,7 +94,8 @@ uv sync --extra server
 ./scripts/check.sh
 ```
 
-Copy `.env.example` to `.env` for local values. Never commit `.env`, model weights, customer
+Copy `.env.example` to `.env` for local values and set `EVENT_PIN_PEPPER` independently from
+`DJANGO_SECRET_KEY`. Never commit `.env`, model weights, customer
 photos, selfies, face embeddings, or production credentials. The application-source licence is
 still an explicit pre-publication decision; pretrained model weights retain separate terms.
 

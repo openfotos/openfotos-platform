@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.hashers import identify_hasher
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
-from django.test import RequestFactory
+from django.test import RequestFactory, override_settings
 from django.utils import timezone
 
 from openfotos_contracts import EventState, IngestionManifestState, IntakeState
@@ -18,13 +18,14 @@ from openfotos_server.events.models import (
     Photographer,
     PhotographerMembership,
     PreviewPolicy,
+    SubEvent,
 )
 from openfotos_server.events.services import change_event_pin, transition_event
 
 pytestmark = pytest.mark.django_db
 
 
-def make_event(photographer: Photographer, *, pin: str = "012345", expires=True) -> Event:
+def make_event(photographer: Photographer, *, pin: str = "0123", expires=True) -> Event:
     event = Event(
         photographer=photographer,
         name="Reception",
@@ -32,6 +33,7 @@ def make_event(photographer: Photographer, *, pin: str = "012345", expires=True)
     )
     event.set_pin(pin)
     event.save()
+    SubEvent.objects.create(event=event, name="Reception", position=1)
     return event
 
 
@@ -52,19 +54,22 @@ def attach_committed_manifest(event: Event) -> IngestionManifest:
     return manifest
 
 
-def test_event_pin_is_six_ascii_digits_and_uses_argon2() -> None:
+def test_event_pin_is_four_ascii_digits_peppered_and_uses_argon2() -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     event = make_event(photographer)
 
-    assert event.pin_hash != "012345"
-    assert "012345" not in event.pin_hash
+    assert event.pin_hash != "0123"
+    assert "0123" not in event.pin_hash
     assert identify_hasher(event.pin_hash).algorithm == "argon2"
-    assert event.check_pin("012345")
-    assert not event.check_pin("999999")
+    assert event.check_pin("0123")
+    assert not event.check_pin("9999")
     assert len(event.public_token) >= 43
 
-    for invalid_pin in ("12345", "1234567", "１２３４５６", "abc123"):
-        with pytest.raises(ValidationError, match="six ASCII digits"):
+    with override_settings(EVENT_PIN_PEPPER="another-independent-pepper-value-1234"):
+        assert not event.check_pin("0123")
+
+    for invalid_pin in ("123", "12345", "１２３４", "ab12"):
+        with pytest.raises(ValidationError, match="four ASCII digits"):
             event.set_pin(invalid_pin)
 
 
@@ -147,16 +152,16 @@ def test_pin_change_rotates_access_version_without_recording_the_pin() -> None:
     event = make_event(photographer)
     previous_version = event.visitor_access_version
 
-    changed = change_event_pin(event_id=event.id, raw_pin="654321", actor=actor)
+    changed = change_event_pin(event_id=event.id, raw_pin="6543", actor=actor)
 
     assert changed.visitor_access_version != previous_version
-    assert changed.check_pin("654321")
+    assert changed.check_pin("6543")
     audit = changed.audit_events.get(action=AuditAction.EVENT_PIN_CHANGED)
     assert audit.metadata == {}
-    assert "654321" not in str(audit.__dict__)
+    assert "6543" not in str(audit.__dict__)
 
 
-def test_admin_can_provision_a_draft_event_with_a_write_only_pin() -> None:
+def test_admin_provisions_a_draft_event_with_a_generated_write_only_pin(monkeypatch) -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     actor = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     form = EventAdminForm(
@@ -167,7 +172,6 @@ def test_admin_can_provision_a_draft_event_with_a_write_only_pin() -> None:
             "max_contribution_devices": 10,
             "processing_profile_id": "pilot-profile-v1",
             "expires_at": (timezone.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
-            "pin": "123456",
         }
     )
     assert form.is_valid(), form.errors
@@ -175,10 +179,19 @@ def test_admin_can_provision_a_draft_event_with_a_write_only_pin() -> None:
     request = RequestFactory().post("/admin/events/event/add/")
     request.user = actor
 
-    EventAdmin(Event, AdminSite()).save_model(request, event, form, change=False)
+    messages = []
+    event_admin = EventAdmin(Event, AdminSite())
+    monkeypatch.setattr(
+        event_admin,
+        "message_user",
+        lambda _request, message: messages.append(message),
+    )
+    event_admin.save_model(request, event, form, change=False)
 
     event.refresh_from_db()
     assert event.state == EventState.DRAFT
-    assert event.check_pin("123456")
-    assert event.pin_hash != "123456"
+    generated_pin = messages[0].split(": ", 1)[1].split(".", 1)[0]
+    assert len(generated_pin) == 4 and generated_pin.isascii() and generated_pin.isdigit()
+    assert event.check_pin(generated_pin)
+    assert generated_pin not in event.pin_hash
     assert event.audit_events.filter(action=AuditAction.EVENT_CREATED).exists()

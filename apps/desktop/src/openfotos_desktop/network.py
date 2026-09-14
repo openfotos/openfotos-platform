@@ -3,7 +3,7 @@
 import base64
 import random
 import time
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urlparse
 from uuid import UUID
 
 import httpx
@@ -21,7 +21,7 @@ from .batch_sync import operation_key as _operation_key
 from .credentials import RefreshTokenStore
 from .errors import DesktopApiError
 from .errors import SourceChangedError as SourceChangedError
-from .ingestion import CheckpointStore, EventCache, PreviewPolicyCache
+from .ingestion import CheckpointStore, EventCache, PreviewPolicyCache, SubEventCache
 from .object_transfer import ObjectTransferClient
 
 
@@ -66,7 +66,7 @@ class DesktopNetworkService:
         self._api.close()
         self._objects.close()
 
-    def sign_in_lead(
+    def sign_in_photographer(
         self,
         server_url: str,
         username: str,
@@ -86,28 +86,10 @@ class DesktopNetworkService:
         )
         return self._cache_events(origin, response["events"], device_label=label)
 
-    def enroll_uploader(self, server_url: str, invitation: str, device_label: str) -> EventCache:
-        origin, token = _invitation_parts(server_url, invitation)
-        label = _device_label(device_label)
-        response = self._api.start_session(
-            origin,
-            "/api/v1/uploader-invitations/redeem/",
-            {
-                "invitation_token": token,
-                "installation_id": str(self.store.installation_id),
-                "device_label": label,
-            },
-        )
-        return self._cache_events(origin, [response["event"]], device_label=label)[0]
-
     def resume(self, server_url: str) -> list[EventCache]:
         origin = _server_origin(server_url)
         response = self._api.resume(origin)
         return self._cache_events(origin, response["events"])
-
-    def create_invitation(self, event_id: UUID) -> str:
-        response = self._request("POST", f"/api/v1/events/{event_id}/invitations/", json={})
-        return response["enrollment_url"]
 
     def close_intake(self, event_id: UUID) -> EventCache:
         return self._event_action(event_id, "intake/close")
@@ -214,13 +196,20 @@ class DesktopNetworkService:
                     storage_limit_bytes=snapshot.storage_limit_bytes,
                     processing_profile_id=snapshot.processing_profile_id,
                     server_url=origin,
-                    role=snapshot.role.value,
                     reserved_original_bytes=snapshot.reserved_original_bytes,
                     verified_original_bytes=snapshot.verified_original_bytes,
                     intake_state=snapshot.intake_state.value,
                     intake_generation=snapshot.intake_generation,
                     device_label=(
                         snapshot.device_label or device_label or cached_labels.get(snapshot.id, "")
+                    ),
+                    sub_events=tuple(
+                        SubEventCache(
+                            id=sub_event.id,
+                            name=sub_event.name,
+                            position=sub_event.position,
+                        )
+                        for sub_event in snapshot.sub_events
                     ),
                     preview_policy=(
                         PreviewPolicyCache(
@@ -267,19 +256,6 @@ def _server_origin(value: str) -> str:
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
         raise DesktopApiError("invalid_server_url", "Enter the OpenFotos server origin only.")
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
-
-
-def _invitation_parts(server_url: str, invitation: str) -> tuple[str, str]:
-    parsed = urlparse(invitation.strip())
-    if parsed.scheme and parsed.netloc:
-        origin = _server_origin(f"{parsed.scheme}://{parsed.netloc}")
-        token = parse_qs(parsed.fragment).get("invite", [""])[0]
-    else:
-        origin = _server_origin(server_url)
-        token = invitation.strip()
-    if not token.startswith("ofts_invite_"):
-        raise DesktopApiError("invalid_invitation", "Paste a complete OpenFotos invitation.")
-    return origin, token
 
 
 def _device_label(value: str) -> str:

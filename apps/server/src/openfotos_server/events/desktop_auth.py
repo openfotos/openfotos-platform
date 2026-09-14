@@ -92,9 +92,7 @@ def authenticate_photographer(
 
 
 @transaction.atomic
-def _issue_session(
-    *, photographer: Photographer, installation_id: UUID, user
-) -> SessionTokens:
+def _issue_session(*, photographer: Photographer, installation_id: UUID, user) -> SessionTokens:
     now = timezone.now()
     access_token = _new_token("access")
     refresh_token = _new_token("refresh")

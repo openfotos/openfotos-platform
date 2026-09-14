@@ -258,12 +258,10 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
             "sub_events": event.sub_events.all(),
             "active_sub_events": event.sub_events.filter(is_archived=False),
             "selected_sub_event": selected_sub_event,
-            "sub_event_form": SubEventForm(
-                initial={"position": event.sub_events.count() + 1}
+            "sub_event_form": SubEventForm(initial={"position": event.sub_events.count() + 1}),
+            "batches": ContributionBatch.objects.filter(installation__event=event).select_related(
+                "sub_event", "installation"
             ),
-            "batches": ContributionBatch.objects.filter(
-                installation__event=event
-            ).select_related("sub_event", "installation"),
             "ready": event.derivatives_ready_generation == event.intake_generation,
         },
     )
@@ -320,8 +318,14 @@ def update_event_sub_event(request: HttpRequest, event_id, sub_event_id) -> Http
 def archive_event_sub_event(request: HttpRequest, event_id, sub_event_id) -> HttpResponse:
     event = _photographer_event(request, event_id)
     sub_event = _sub_event(event, sub_event_id, include_archived=True)
-    archived = request.POST.get("action") == "archive"
     try:
+        action = request.POST.get("action")
+        if action not in {"archive", "restore"}:
+            raise IngestionError(
+                "invalid_sub_event_action",
+                "Choose whether to archive or restore the sub-event.",
+            )
+        archived = action == "archive"
         set_sub_event_archived(
             sub_event=sub_event,
             archived=archived,
@@ -432,9 +436,7 @@ def restore_gallery_asset(request: HttpRequest, event_id, asset_id) -> HttpRespo
 
 
 @require_GET
-def photographer_photo(
-    request: HttpRequest, event_id, asset_id, sub_event_id=None
-) -> HttpResponse:
+def photographer_photo(request: HttpRequest, event_id, asset_id, sub_event_id=None) -> HttpResponse:
     event = _photographer_event(request, event_id)
     selected_sub_event = _sub_event(event, sub_event_id)
     try:
@@ -596,9 +598,7 @@ def event_access(request: HttpRequest, token: str, sub_event_id=None) -> HttpRes
 
 
 @require_GET
-def visitor_photo(
-    request: HttpRequest, token: str, asset_id, sub_event_id=None
-) -> HttpResponse:
+def visitor_photo(request: HttpRequest, token: str, asset_id, sub_event_id=None) -> HttpResponse:
     event = _available_event(request, token)
     selected_sub_event = _sub_event(event, sub_event_id)
     if not has_valid_visitor_cookie(request, event):

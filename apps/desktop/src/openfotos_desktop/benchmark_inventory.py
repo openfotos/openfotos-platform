@@ -8,19 +8,21 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
-from .ingestion import CheckpointStore, EventCache, InventoryScanner, ScanLimits
+from .ingestion import CheckpointStore, EventCache, InventoryScanner, ScanLimits, SubEventCache
 
 
 def run_benchmark(source: Path, database: Path) -> dict[str, object]:
+    sub_event = SubEventCache(id=uuid4(), name="Benchmark section", position=1)
     event = EventCache(
         id=uuid4(),
         name="Redacted benchmark event",
         storage_limit_bytes=25_000_000_000,
         processing_profile_id="pilot-profile-v1",
+        sub_events=(sub_event,),
     )
     with CheckpointStore(database) as store:
         store.cache_event(event)
-        batch_id = store.create_batch(event.id, label="benchmark")
+        batch_id = store.create_batch(event.id, sub_event.id, label="benchmark")
         store.add_folder(batch_id, source)
         started = time.perf_counter()
         summary = InventoryScanner(store).scan(batch_id)

@@ -18,12 +18,19 @@ from openfotos_desktop.ingestion import (
     InventoryScanner,
     LocalUploadState,
     PreviewPolicyCache,
+    SubEventCache,
 )
 from openfotos_desktop.network import (
     DesktopApiError,
     DesktopNetworkService,
     SourceChangedError,
     _server_origin,
+)
+
+_SUB_EVENT = SubEventCache(
+    id=UUID("00000000-0000-4000-8000-000000000104"),
+    name="Reception",
+    position=1,
 )
 
 
@@ -52,11 +59,11 @@ def approved_batch(tmp_path: Path):
             storage_limit_bytes=25_000_000_000,
             processing_profile_id="pilot-profile-v1",
             server_url="http://localhost:8000",
-            role="lead",
-            device_label="Lead workstation",
+            device_label="Studio workstation",
+            sub_events=(_SUB_EVENT,),
         )
     )
-    batch_id = store.create_batch(event_id, label="Edited originals")
+    batch_id = store.create_batch(event_id, _SUB_EVENT.id, label="Edited originals")
     store.add_files(batch_id, [photo])
     InventoryScanner(store).scan(batch_id)
     store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
@@ -81,7 +88,13 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
             "state": "uploading",
             "storage_limit_bytes": 25_000_000_000,
             "processing_profile_id": "pilot-profile-v1",
-            "role": "lead",
+            "sub_events": [
+                {
+                    "id": str(_SUB_EVENT.id),
+                    "name": _SUB_EVENT.name,
+                    "position": _SUB_EVENT.position,
+                }
+            ],
             "reserved_original_bytes": 0,
             "verified_original_bytes": 0,
             "remaining_original_bytes": 25_000_000_000,
@@ -251,11 +264,11 @@ def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_
         sleeper=sleeps.append,
         jitter=lambda _start, maximum: maximum,
     )
-    events = service.sign_in_lead(
+    events = service.sign_in_photographer(
         "http://localhost:8000",
-        "lead",
+        "primary",
         "password",
-        "Lead workstation",
+        "Primary workstation",
     )
     progress = []
 
@@ -266,8 +279,8 @@ def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_
             on_progress=lambda done, total: progress.append((done, total)),
         )
 
-    assert events[0].device_label == "Lead workstation"
-    assert state["manifest"]["device_label"] == "Lead workstation"
+    assert events[0].device_label == "Primary workstation"
+    assert state["manifest"]["device_label"] == "Primary workstation"
     assert state["storage_attempts"] == 5
     assert sleeps == [1.0, 2.0, 4.0, 8.0]
     assert progress[-1] == (1, 1)
@@ -321,7 +334,9 @@ def test_one_sync_generates_uploads_and_resumes_both_derivatives(tmp_path: Path)
         ),
         storage_client=httpx.Client(transport=httpx.MockTransport(storage_handler)),
     )
-    service.sign_in_lead("http://localhost:8000", "lead", "password", "Lead workstation")
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
     stages = []
     service.upload(
         batch_id,
@@ -363,7 +378,9 @@ def test_source_change_after_approval_fails_without_uploading(tmp_path: Path) ->
             )
         ),
     )
-    service.sign_in_lead("http://localhost:8000", "lead", "password", "Lead workstation")
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
     photo.write_bytes(photo.read_bytes() + b"changed")
 
     with pytest.raises(SourceChangedError):

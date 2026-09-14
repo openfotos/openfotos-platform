@@ -8,89 +8,83 @@ from django.utils import timezone
 from openfotos_server.events.desktop_auth import (
     DesktopAuthError,
     authenticate_access_token,
-    authenticate_lead,
-    create_invitation,
-    redeem_invitation,
+    authenticate_photographer,
     refresh_session,
-    register_lead_device,
+    register_event_installation,
 )
 from openfotos_server.events.models import (
     DesktopSession,
     Event,
+    EventInstallation,
     Photographer,
     PhotographerMembership,
-    UploaderDevice,
 )
 
 pytestmark = pytest.mark.django_db
 
 
-def lead_and_event():
+def photographer_and_event():
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
-    user = get_user_model().objects.create_user(username="lead", password="correct-password")
+    user = get_user_model().objects.create_user(
+        username="photographer",
+        password="correct-password",
+    )
     PhotographerMembership.objects.create(photographer=photographer, user=user)
     event = Event.objects.create(
         photographer=photographer,
-        name="Reception",
+        name="Wedding",
         expires_at=timezone.now() + timedelta(days=30),
     )
     return photographer, user, event
 
 
-def test_event_allows_one_to_ten_total_contribution_devices_including_lead() -> None:
-    photographer, _, event = lead_and_event()
-    lead = authenticate_lead(
+def session_for(photographer, *, installation_id=None):
+    return authenticate_photographer(
         photographer=photographer,
-        username="lead",
+        username="photographer",
         password="correct-password",
-        installation_id=uuid4(),
+        installation_id=installation_id or uuid4(),
     )
-    register_lead_device(session=lead.session, event=event, label="Lead workstation")
-    issued = create_invitation(session=lead.session, event=event)
 
-    first_installation = uuid4()
-    redeem_invitation(
-        photographer=photographer,
-        token=issued.token,
-        installation_id=first_installation,
-        label="Uploader 1",
+
+def test_event_allows_up_to_ten_photographer_installations() -> None:
+    photographer, user, event = photographer_and_event()
+    first_id = uuid4()
+    first = session_for(photographer, installation_id=first_id)
+    registered = register_event_installation(
+        session=first.session,
+        event=event,
+        label="Studio workstation 1",
     )
-    for index in range(2, 10):
-        redeem_invitation(
-            photographer=photographer,
-            token=issued.token,
-            installation_id=uuid4(),
-            label=f"Uploader {index}",
+    for index in range(2, 11):
+        tokens = session_for(photographer)
+        register_event_installation(
+            session=tokens.session,
+            event=event,
+            label=f"Studio workstation {index}",
         )
 
-    assert UploaderDevice.objects.filter(event=event).count() == 10
-    event_again, _ = redeem_invitation(
-        photographer=photographer,
-        token=issued.token,
-        installation_id=first_installation,
+    assert EventInstallation.objects.filter(event=event).count() == 10
+    repeated = register_event_installation(
+        session=first.session,
+        event=event,
         label="Ignored replacement label",
     )
-    assert event_again == event
-    assert UploaderDevice.objects.filter(event=event).count() == 10
+    assert repeated == registered
+    assert repeated.user == user
 
     with pytest.raises(DesktopAuthError) as error:
-        redeem_invitation(
-            photographer=photographer,
-            token=issued.token,
-            installation_id=uuid4(),
-            label="Uploader 10",
+        register_event_installation(
+            session=session_for(photographer).session,
+            event=event,
+            label="Studio workstation 11",
         )
     assert error.value.code == "event_device_limit"
 
 
 def test_refresh_response_loss_recovers_within_the_short_replay_window() -> None:
-    photographer, _, _ = lead_and_event()
-    original = authenticate_lead(
-        photographer=photographer,
-        username="lead",
-        password="correct-password",
-        installation_id=uuid4(),
-    )
+    photographer, _, _ = photographer_and_event()
+    original = session_for(photographer)
 
     rotated = refresh_session(original.refresh_token)
 
@@ -108,13 +102,8 @@ def test_refresh_response_loss_recovers_within_the_short_replay_window() -> None
 
 
 def test_refresh_reuse_outside_the_grace_window_revokes_the_session(settings) -> None:
-    photographer, _, _ = lead_and_event()
-    original = authenticate_lead(
-        photographer=photographer,
-        username="lead",
-        password="correct-password",
-        installation_id=uuid4(),
-    )
+    photographer, _, _ = photographer_and_event()
+    original = session_for(photographer)
     rotated = refresh_session(original.refresh_token)
     DesktopSession.objects.filter(pk=original.session.id).update(
         updated_at=timezone.now()
@@ -130,24 +119,17 @@ def test_refresh_reuse_outside_the_grace_window_revokes_the_session(settings) ->
         authenticate_access_token(rotated.access_token)
 
 
-def test_invitation_secret_is_hashed_and_wrong_tenant_cannot_redeem() -> None:
-    photographer, _, event = lead_and_event()
-    lead = authenticate_lead(
-        photographer=photographer,
-        username="lead",
-        password="correct-password",
-        installation_id=uuid4(),
+def test_inactive_membership_cannot_authenticate_or_keep_using_a_session() -> None:
+    photographer, user, _ = photographer_and_event()
+    active = session_for(photographer)
+    PhotographerMembership.objects.filter(photographer=photographer, user=user).update(
+        is_active=False
     )
-    issued = create_invitation(session=lead.session, event=event)
-    other = Photographer.objects.create(slug="beta", display_name="Beta Photos")
 
-    assert issued.invitation.token_hash != issued.token
-    assert issued.token not in str(issued.invitation.__dict__)
-    with pytest.raises(DesktopAuthError) as error:
-        redeem_invitation(
-            photographer=other,
-            token=issued.token,
-            installation_id=uuid4(),
-            label="Wrong tenant",
-        )
-    assert error.value.code == "invalid_invitation"
+    with pytest.raises(DesktopAuthError) as login_error:
+        session_for(photographer)
+    assert login_error.value.code == "invalid_credentials"
+
+    with pytest.raises(DesktopAuthError) as access_error:
+        authenticate_access_token(active.access_token)
+    assert access_error.value.code == "invalid_access_token"

@@ -290,6 +290,7 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             ALTER TABLE events DROP COLUMN role;
             ALTER TABLE batches RENAME COLUMN device_id TO installation_id;
             ALTER TABLE batches ADD COLUMN sub_event_id TEXT;
+            DELETE FROM batches;
             CREATE TABLE sub_events (
                 id TEXT PRIMARY KEY,
                 event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
@@ -478,19 +479,20 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
 
     def create_batch(self, event_id: UUID, sub_event_id: UUID, *, label: str = "") -> UUID:
         self.get_event(event_id)
-        sub_event = self._connection.execute(
-            "SELECT id FROM sub_events WHERE id = ? AND event_id = ? AND is_active = 1",
-            (str(sub_event_id), str(event_id)),
-        ).fetchone()
-        if sub_event is None:
-            raise ValueError("Select an active sub-event before creating a contribution.")
         batch_id = uuid4()
         timestamp = _now()
         with self._lock, self._connection:
+            sub_event = self._connection.execute(
+                "SELECT id FROM sub_events WHERE id = ? AND event_id = ? AND is_active = 1",
+                (str(sub_event_id), str(event_id)),
+            ).fetchone()
+            if sub_event is None:
+                raise ValueError("Select an active sub-event before creating a contribution.")
             self._connection.execute(
                 """
                 INSERT INTO batches(
-                    id, event_id, installation_id, sub_event_id, state, label, created_at, updated_at
+                    id, event_id, installation_id, sub_event_id, state, label,
+                    created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (

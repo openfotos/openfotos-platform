@@ -1,4 +1,4 @@
-"""Compose the event's immutable raster watermark mark on the lead workstation."""
+"""Compose the event's immutable raster watermark mark on a photographer installation."""
 
 import unicodedata
 from io import BytesIO

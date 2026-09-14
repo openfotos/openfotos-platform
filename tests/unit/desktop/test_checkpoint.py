@@ -13,7 +13,10 @@ from openfotos_desktop.ingestion import (
     InventoryScanner,
     LocalUploadState,
     PreviewPolicyCache,
+    SubEventCache,
 )
+
+_SUB_EVENT = SubEventCache(id=uuid4(), name="Reception", position=1)
 
 
 def test_newer_checkpoint_schema_fails_closed(tmp_path: Path) -> None:
@@ -25,7 +28,7 @@ def test_newer_checkpoint_schema_fails_closed(tmp_path: Path) -> None:
         CheckpointStore(database)
 
 
-def test_session3_checkpoint_migrates_without_losing_inventory(tmp_path: Path) -> None:
+def test_session4_checkpoint_migrates_event_metadata_to_sub_event_schema(tmp_path: Path) -> None:
     database = tmp_path / "checkpoint.sqlite3"
     event_id = uuid4()
     with CheckpointStore(database) as store:
@@ -35,37 +38,22 @@ def test_session3_checkpoint_migrates_without_losing_inventory(tmp_path: Path) -
                 name="Reception",
                 storage_limit_bytes=25_000_000_000,
                 processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
             )
         )
     with sqlite3.connect(database) as connection:
-        connection.execute("DROP TABLE upload_checkpoints")
-        connection.execute("DROP TABLE derivative_checkpoints")
-        for column in (
-            "server_url",
-            "role",
-            "reserved_original_bytes",
-            "verified_original_bytes",
-            "intake_state",
-            "intake_generation",
-            "device_label",
-            "preview_policy_id",
-            "preview_watermark_enabled",
-            "preview_template",
-            "preview_text",
-            "preview_logo_kind",
-            "preview_renderer_id",
-            "derivative_profile_id",
-            "preview_mark_sha256",
-        ):
-            connection.execute(f"ALTER TABLE events DROP COLUMN {column}")
-        connection.execute("ALTER TABLE inventory_items DROP COLUMN content_md5")
-        connection.execute("PRAGMA user_version = 1")
+        connection.execute("ALTER TABLE events ADD COLUMN role TEXT NOT NULL DEFAULT 'primary'")
+        connection.execute("ALTER TABLE batches RENAME COLUMN installation_id TO device_id")
+        connection.execute("ALTER TABLE batches DROP COLUMN sub_event_id")
+        connection.execute("DROP TABLE sub_events")
+        connection.execute("PRAGMA user_version = 4")
 
     with CheckpointStore(database) as migrated:
         event = migrated.get_event(event_id)
         assert event.name == "Reception"
         assert event.intake_generation == 1
         assert event.device_label == ""
+        assert event.sub_events == ()
         assert migrated.installation_id
 
 
@@ -81,9 +69,10 @@ def test_approved_batch_rejects_new_selections(tmp_path: Path) -> None:
                 name="Reception",
                 storage_limit_bytes=25_000_000_000,
                 processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
             )
         )
-        batch_id = store.create_batch(event_id)
+        batch_id = store.create_batch(event_id, _SUB_EVENT.id)
         selection_id = store.add_files(batch_id, [photo])[0]
         InventoryScanner(store).scan(batch_id)
         store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
@@ -116,10 +105,11 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
                 name="Reception",
                 storage_limit_bytes=25_000_000_000,
                 processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
                 preview_policy=policy,
             )
         )
-        batch_id = store.create_batch(event_id)
+        batch_id = store.create_batch(event_id, _SUB_EVENT.id)
         store.add_files(batch_id, [photo])
         InventoryScanner(store).scan(batch_id)
         store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
@@ -140,7 +130,7 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
         assert thumbnail.state is LocalUploadState.PENDING
 
 
-def test_lead_exclusion_is_a_terminal_local_upload_state(tmp_path: Path) -> None:
+def test_photographer_exclusion_is_a_terminal_local_upload_state(tmp_path: Path) -> None:
     photo = tmp_path / "photo.jpg"
     Image.new("RGB", (4, 4), color="blue").save(photo, format="JPEG")
 
@@ -152,9 +142,10 @@ def test_lead_exclusion_is_a_terminal_local_upload_state(tmp_path: Path) -> None
                 name="Reception",
                 storage_limit_bytes=25_000_000_000,
                 processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
             )
         )
-        batch_id = store.create_batch(event_id)
+        batch_id = store.create_batch(event_id, _SUB_EVENT.id)
         store.add_files(batch_id, [photo])
         InventoryScanner(store).scan(batch_id)
         store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
@@ -179,9 +170,10 @@ def test_draft_selection_can_be_removed_without_touching_source(tmp_path: Path) 
                 name="Reception",
                 storage_limit_bytes=25_000_000_000,
                 processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
             )
         )
-        batch_id = store.create_batch(event_id)
+        batch_id = store.create_batch(event_id, _SUB_EVENT.id)
         selection_id = store.add_files(batch_id, [photo])[0]
 
         store.remove_selection(selection_id)
@@ -202,9 +194,10 @@ def test_deleting_local_event_removes_checkpoints_but_not_sources(tmp_path: Path
                 name="Reception",
                 storage_limit_bytes=25_000_000_000,
                 processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
             )
         )
-        batch_id = store.create_batch(event_id)
+        batch_id = store.create_batch(event_id, _SUB_EVENT.id)
         store.add_files(batch_id, [photo])
 
         store.delete_local_event(event_id)
@@ -227,9 +220,10 @@ def test_cached_event_allowance_blocks_oversized_batch_approval(tmp_path: Path) 
                 name="Reception",
                 storage_limit_bytes=photo.stat().st_size - 1,
                 processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
             )
         )
-        batch_id = store.create_batch(event_id)
+        batch_id = store.create_batch(event_id, _SUB_EVENT.id)
         store.add_files(batch_id, [photo])
         InventoryScanner(store).scan(batch_id)
 

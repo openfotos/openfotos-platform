@@ -4,15 +4,45 @@ from uuid import UUID
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import QApplication, QToolButton
 
-from openfotos_desktop.ingestion import CheckpointStore, EventCache
+from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+from openfotos_desktop.ingestion import (
+    CheckpointStore,
+    EventCache,
+    PreviewPolicyCache,
+    SubEventCache,
+)
 from openfotos_desktop.ports import Session3Gateway
-from openfotos_desktop.ui import LoginPage, MainWindow, PreviewPolicyPage, SelectionPage
+from openfotos_desktop.ui import (
+    LoginPage,
+    MainWindow,
+    PreviewPolicyPage,
+    SelectionPage,
+    SubEventSelectorPage,
+)
+
+_SUB_EVENT = SubEventCache(
+    id=UUID("00000000-0000-4000-8000-000000000006"),
+    name="Reception",
+    position=1,
+)
+_DISABLED_POLICY = PreviewPolicyCache(
+    id=UUID("00000000-0000-4000-8000-000000000007"),
+    enabled=False,
+    template=WatermarkTemplate.COMPACT_BOTTOM_RIGHT,
+    text="",
+    logo_kind=WatermarkLogoKind.NONE,
+    renderer_id="watermark-raster-v1",
+    derivative_profile_id="gallery-jpeg-v1",
+    mark_sha256="",
+)
 
 DEMO_EVENT = EventCache(
     id=UUID("00000000-0000-4000-8000-000000000003"),
     name="Session 3 synthetic reception",
     storage_limit_bytes=25_000_000_000,
     processing_profile_id="pilot-profile-v1",
+    sub_events=(_SUB_EVENT,),
+    preview_policy=_DISABLED_POLICY,
 )
 
 
@@ -30,7 +60,7 @@ def test_normal_mode_exposes_honest_session4_boundary(tmp_path: Path) -> None:
 
     assert isinstance(window.stack.currentWidget(), LoginPage)
     window.login.password.setText("never-store-this")
-    window.login.lead_button.click()
+    window.login.sign_in_button.click()
     app.processEvents()
 
     assert "Session 4" in window.login.error.text()
@@ -49,6 +79,9 @@ def test_demo_event_opens_functional_local_inventory(tmp_path: Path) -> None:
     assert "synthetic demo" in window.events.heading.text()
     assert "remaining" in window.events.events.item(0).text()
     window.events.open_button.click()
+    app.processEvents()
+    assert isinstance(window.stack.currentWidget(), SubEventSelectorPage)
+    window.sub_events.open_button.click()
     app.processEvents()
 
     assert isinstance(window.stack.currentWidget(), SelectionPage)
@@ -71,6 +104,8 @@ def test_desktop_shell_packages_corporate_brand_and_source_actions(tmp_path: Pat
 
     window.events.open_button.click()
     app.processEvents()
+    window.sub_events.open_button.click()
+    app.processEvents()
 
     assert isinstance(window.selection.add_files, QToolButton)
     assert isinstance(window.selection.add_folder, QToolButton)
@@ -81,19 +116,20 @@ def test_desktop_shell_packages_corporate_brand_and_source_actions(tmp_path: Pat
     window.close()
 
 
-def test_coordination_only_lead_can_finalize_after_closing_intake(tmp_path: Path) -> None:
+def test_photographer_can_finalize_after_closing_intake(tmp_path: Path) -> None:
     application()
-    store = CheckpointStore(tmp_path / "lead.sqlite3")
+    store = CheckpointStore(tmp_path / "primary.sqlite3")
     event = EventCache(
         id=UUID("00000000-0000-4000-8000-000000000004"),
         name="Reception",
         storage_limit_bytes=25_000_000_000,
         processing_profile_id="pilot-profile-v1",
-        role="lead",
         intake_state="closed",
+        sub_events=(_SUB_EVENT,),
+        preview_policy=_DISABLED_POLICY,
     )
     store.cache_event(event)
-    batch_id = store.create_batch(event.id)
+    batch_id = store.create_batch(event.id, _SUB_EVENT.id)
     page = SelectionPage()
 
     page.show_batch(event, batch_id, store)
@@ -104,7 +140,7 @@ def test_coordination_only_lead_can_finalize_after_closing_intake(tmp_path: Path
     store.close()
 
 
-def test_unconfigured_lead_gets_optional_watermark_setup_with_clean_default(
+def test_unconfigured_event_gets_optional_watermark_setup_with_clean_default(
     tmp_path: Path,
 ) -> None:
     application()
@@ -113,7 +149,7 @@ def test_unconfigured_lead_gets_optional_watermark_setup_with_clean_default(
         name="Reception",
         storage_limit_bytes=25_000_000_000,
         processing_profile_id="pilot-profile-v1",
-        role="lead",
+        sub_events=(_SUB_EVENT,),
     )
     window = MainWindow(
         store=CheckpointStore(tmp_path / "policy.sqlite3"),

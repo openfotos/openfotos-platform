@@ -1,6 +1,6 @@
 # ADR 0002: Pilot accounts, tenancy, and event access
 
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR 0008
 - **Date:** 2026-09-10
 
 ## Context

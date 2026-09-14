@@ -1,241 +1,223 @@
 # OpenFotos implementation sessions
 
-Use nine focused Codex sessions for the pilot. This is a better boundary than treating each
-calendar day as a session: several features span the desktop, API, database, and object store and
-should be completed together. Start every new session by reading the product plan, this file, and
-the latest git status. End it with the listed completion checks, updated documentation, and a
-verified commit.
+This is the execution plan for the supervised pilot. Read the product plan, this file, the
+applicable ADRs, nearby tests, and `git status` before each session. A session finishes only after
+its observable slice, failure behavior, migrations, documentation, and repository checks pass.
 
-## Session 1: Repository foundation
+## Post-Session-5 product revision
 
-**Goal:** Make architectural boundaries visible and give later sessions one repeatable toolchain.
+**Status (2026-09-13): complete in the current worktree.**
 
-**Work:** Create the monorepo layout, Python project metadata, Django and PySide6 entry points,
-shared contract/storage packages, local infrastructure definitions, CI, and baseline checks.
+The client replaced three earlier assumptions:
 
-**Done when:** The unit suite and linter pass, Django's system check passes with server
-dependencies installed, the container configuration parses, and no secret or generated-data path
-is tracked.
+- a main wedding now contains mandatory one-level sub-events;
+- customer-visible collections and all pre-clustering are removed;
+- access PINs are exactly four auto-generated ASCII digits.
 
-## Session 2: Accounts, tenancy, and event lifecycle
+The retrofit applies only to work implemented in Sessions 1–5. It does not implement future face
+indexing, owner/guest sharing, selfie search, or original-download endpoints.
 
-**Status (2026-09-10):** Complete. The Django browser slice now resolves photographer tenants
-from the host, enforces active memberships, provides a tenant-filtered dashboard, protects
-Published events with Argon2 PINs and event-scoped signed cookies, rate limits authentication
-failures in the database, and records immutable security audit events. ADR 0002 records the
-interview decisions and accepted PIN risk.
+### Retrofit work
 
-**Goal:** Establish the authorization boundary before accepting media.
+- Keep `Event` as the tenant/lifecycle/quota/manifest/security boundary.
+- Add photographer-managed `SubEvent` records with create, rename, order, archive, restore, main
+  gallery aggregation, and strict filtered galleries.
+- Require every local/server contribution batch to reference exactly one active sub-event.
+- Permit whole-batch reassignment before publication and audit both child identifiers.
+- Replace lead/uploader invitation roles with one photographer account and up to ten tracked,
+  revocable event installations.
+- Remove the original-download policy setting; future downloads derive from visibility.
+- Generate four-digit PINs, hash PIN+dedicated pepper with Argon2, and retain throttling/audit.
+- Revise shared contracts, SQLite/Django migrations, desktop/UI/API behavior, tests, README, plan,
+  and ADRs.
 
-**Work:** Implement photographer membership, events, state transitions, admin provisioning,
-host/subdomain resolution, photographer login, visitor PIN sessions, Argon2, and initial audit
-events. Add migrations and cross-tenant denial tests.
+### Retrofit completion checks
 
-**Done when:** An administrator can create the pilot photographer and event; the photographer sees
-only assigned events; a visitor can unlock only a matching published sample event; altered tenant,
-event, and host identifiers are denied.
+- Wrong-tenant, wrong-event, archived, or missing sub-events fail closed.
+- The desktop selects a child before creating a batch and sends the child in the strict manifest.
+- Main/filtered gallery routes cannot widen their asset set; archived child media disappears.
+- The old invitation/uploader/download-policy surfaces are absent.
+- Fresh migrations, the deterministic suite, lint/type checks, and Django checks pass.
+- No active plan/session describes clustering or collections.
 
-**Handoff:**
+## Session 1: repository foundation
 
-1. Administrators can provision the user, photographer, membership, and event; drive legal event
-   transitions; rotate the write-only PIN or public token; and revoke visitor sessions. A
-   photographer can sign in on its own subdomain and see only that tenant's events. A visitor sees
-   event metadata only after unlocking a matching, unexpired Published event.
-2. Migration `events/0001_initial.py`, server-rendered templates, one static stylesheet, host and
-   request middleware, admin controls, `AUTH_FAILURE_LIMIT`, and
-   `AUTH_FAILURE_WINDOW_SECONDS` were added. The container now collects static files.
-3. `./scripts/check.sh` passes with 23 tests, and a fresh in-memory database applies all Django and
-   events migrations. Static-file discovery succeeds in dry-run mode.
-4. Six-digit PINs retain the accepted database-only offline-guessing risk. Trusted proxy client-IP
-   handling waits for Session 9. Sessions 4 and 5 must add manifest and derivative readiness to the
-   publication gate. Desktop access and refresh tokens remain Session 4 scope.
-5. Session 3's first failing acceptance test should scan a synthetic nested directory and report
-   exact accepted/rejected JPEG counts and bytes while persisting enough SQLite state to resume the
-   same scan after restart.
+**Status:** complete.
 
-## Session 3: Desktop discovery and durable local state
+**Goal:** Make system boundaries and one repeatable toolchain visible.
 
-**Status (2026-09-10):** Complete. ADR 0003 makes five-to-ten-device concurrent contribution a
-required event boundary. Each device owns durable event-scoped contribution batches; the server will
-own aggregate quota, intake closure, and final manifest reconciliation in Session 4.
+**Delivered:** Monorepo packages, Python/Django/PySide entry points, shared contracts and storage
+boundaries, local infrastructure, CI, baseline checks, and secret/generated-data exclusions.
 
-**Goal:** Reliably inventory a client folder before any network transfer.
+**Invariant:** Future work stays inside the documented desktop, server, storage, contract, and
+vision boundaries and does not commit private media or credentials.
 
-**Work:** Build honest lead/invitation and event-selection scaffolding, recursive folder plus
-single/multiple-file discovery, extension/content/decode validation, size limits, checksums, the
-per-installation event/batch SQLite checkpoint, and folder/validation/progress screens. Keep
-processing and upload services behind interfaces. Use explicit synthetic demo mode until Session 4
-implements network identity.
+## Session 2: accounts, tenancy, event lifecycle, and private access
 
-**Done when:** The app reports exact accepted/rejected counts and bytes, survives a forced exit,
-detects changed files, and resumes without decoding or hashing completed unchanged assets. Ten
-independent device checkpoints targeting one event must create distinct batch/asset identities.
+**Status:** complete; revised by ADR 0008.
 
-**Handoff:**
+**Goal:** Establish authorization before accepting media.
 
-1. `python -m openfotos_desktop --demo` now opens a functional synthetic event. A user can add
-   recursive folders, one or multiple files, mix selection types, pause/resume background scans,
-   review exact accepted/rejected counts and bytes, approve a frozen contribution, export redacted
-   diagnostics, and explicitly remove local event metadata without deleting source photographs.
-2. The desktop now has a versioned WAL SQLite checkpoint, stable scan/batch states and reason codes,
-   full JPEG decode plus 100 MiB/120 MP limits, SHA-256, changed-file review, verified source-root
-   relocation, per-user data paths, a single-instance lock, explicit network/processing/upload ports,
-   and a redacted representative-data benchmark command. Pillow was added to desktop/dev
-   dependencies and CI now installs the desktop extra.
-3. `./scripts/check.sh` passes with 44 tests, including a real subprocess termination and WAL
-   recovery, ten independent installation stores, duplicate-byte policy, link exclusion, profile and
-   capacity failures, diagnostic privacy, Qt offscreen behavior, all Session 2 tests, and Django's
-   system check. The demo window also remained healthy through a headless launch smoke test.
-4. No authentication, invitation redemption, device token, cloud reservation, processing, or upload
-   occurs in Session 3. Native Windows/macOS smoke/package runs and a real 10,000-photo hardware
-   benchmark remain release gates. A timestamp-preserving content mutation may use the fast local
-   metadata path; Session 4 must checksum bytes while transferring and let the server reject any
-   mismatch. Network shares and cloud placeholder folders remain unsupported.
-5. Session 4's first failing acceptance test should enroll ten simulated device sessions into one
-   event, submit concurrent immutable contribution reservations, prove the transactionally reserved
-   byte total never exceeds the event allowance, deny cross-device batch details, and permit only the
-   lead to close intake and finalize after all batches are terminal or explicitly excluded.
+**Delivered:** Photographer tenants and memberships, host scoping, event state transitions, admin
+provisioning, private visitor access, Argon2 PIN checks, event cookies, database throttling, audit
+events, and cross-tenant denial tests.
 
-## Session 4: Direct upload and manifest reconciliation
+**Revision:** PINs are now system-generated four-digit ASCII values with `EVENT_PIN_PEPPER`.
+Publication also requires at least one active sub-event. The current event token/PIN flow is an
+interim private gallery access path until Session 8 introduces owner/guest capabilities.
 
-**Status (2026-09-11):** Complete. ADRs 0004 and 0005 replace prefix-wide upload credentials with
-exact-object PUT leases and record the device, quota, revocation, intake-generation, reconciliation,
-and publication-gate decisions.
+**Done when:** Matching tenant+event+host access succeeds; all identifier substitution, expiry,
+revocation, invalid PIN, and throttling cases fail without leaking event/PIN details.
 
-**Goal:** Move originals and metadata safely from desktop to private R2.
+## Session 3: desktop discovery and durable local state
 
-**Work:** Implement lead authentication plus timed uploader invitations, per-device event-scoped
-sessions, server-owned object keys, immutable contribution manifests, atomic event quota
-reservation, one-to-four-way resumable transfers per device, credential refresh, retries,
-idempotency records, per-variant completion, intake closure, and lead-owned aggregate manifest
-validation. Use an S3-compatible local test service or fakes before real R2.
+**Status:** complete; revised by ADR 0008.
 
-**Done when:** An interrupted upload resumes without repeating verified assets, clients cannot
-choose object keys, byte/checksum limits are enforced, and the server reconciles a complete test
-manifest while ten simulated clients race on one event without exceeding quota. Finalization is
-lead-only, requires closed intake, and rejects nonterminal contributions.
+**Goal:** Reliably inventory a customer folder before network transfer.
 
-**Handoff:**
+**Delivered:** Recursive and individual file selection, JPEG validation, limits, hashes, durable WAL
+SQLite checkpoints, changed-file detection, pause/restart, redacted diagnostics, synthetic demo, and
+background Qt flows.
 
-1. Normal desktop mode now signs in a photographer or redeems a 72-hour uploader invitation,
-   persists rotating refresh tokens only in the operating-system credential store, caches
-   event/device scope, reserves a frozen contribution, streams one to four private original uploads,
-   pauses between objects, and resumes at the verified-object boundary.
-2. Django owns exact object keys, transactional event quota, the one-to-ten active contribution
-   device cap, invitation/device revocation, strict JSON and idempotency records, upload leases,
-   `HeadObject` reconciliation, reasoned lead exclusions, intake generations, and immutable
-   generation manifests. Publication now requires both the current committed ingestion manifest and
-   matching derivative readiness.
-3. The S3 adapter signs exact five-minute PUT operations with length, Content-MD5, JPEG type,
-   create-only semantics, and SHA-256 metadata. The same synthetic provider contract passed against
-   local MinIO and Cloudflare R2. R2 Object Read & Write credentials are sufficient; no Cloudflare
-   account API token is required.
-4. `./scripts/check.sh` passes with 70 deterministic tests plus one opt-in provider test. Session 4
-   authentication, ten-client quota locking, upload/reconciliation, and migrations also passed
-   against PostgreSQL 18.6 rather than SQLite.
-5. Native Windows/macOS packaging and the representative 10,000-photo rehearsal remain release
-   gates. Session 5's first failing acceptance test should prove a derivative object loses GPS and
-   nonessential EXIF while its original object's checksum remains unchanged, then mark derivative
-   readiness only for the current ingestion generation.
+**Revision:** The login scaffold has one photographer path. Event snapshots cache ordered active
+sub-events. A user selects an event then a sub-event; every local batch stores `sub_event_id` and
+`installation_id` before source selection. A checkpoint upgraded from the older role schema drops
+incompatible unsubmitted batches because no production checkpoint data exists.
 
-## Session 5: Image derivatives and private gallery
+**Done when:** Exact counts/bytes and rejection reasons survive restart; changed media stops safely;
+ten independent installation stores create distinct batch/asset identities; a batch cannot be
+created for a missing or inactive cached child.
 
-**Status (2026-09-12):** Complete. ADR 0006 records the immutable optional preview policy,
-desktop-owned derivative profile, exact private GET authorization, retry/exclusion workflow,
-gallery presentation, publication gate, and accepted screenshot/residual-URL risks.
-ADR 0007 records the 2026-09-13 behavior-preserving simplicity pass over the completed Sessions
-1-5 code.
+## Session 4: direct upload and manifest reconciliation
 
-**Goal:** Publish fast, authorized browsing assets while preserving uploaded originals.
+**Status:** complete; revised by ADR 0008.
 
-**Work:** Apply EXIF orientation, generate clean thumbnails and optionally watermarked previews,
-remove derivative metadata, add gallery pagination/lightbox pages, authorize short-lived object
-URLs, and implement download policy plumbing.
+**Goal:** Move originals safely from photographer desktops to private object storage.
 
-**Done when:** Authorized visitors can browse private derivatives, unauthorized and expired
-sessions cannot obtain URLs, enabled previews contain the selected watermark while disabled ones
-remain clean, derivatives contain no GPS data, and original checksums remain unchanged.
+**Delivered:** Photographer desktop sessions, rotating refresh tokens, server-owned keys, strict
+immutable reservations, atomic quota, exact PUT leases, one-to-four-way resumable transfer,
+verification, idempotency, exclusions/cancellation, intake generations, and aggregate manifests.
 
-**Handoff:**
+**Revision:** Upload invitations and upload-only sessions are removed. One authenticated
+photographer account may register up to ten event installations. Reservations require an active
+sub-event in the same event; aggregate manifests record its ID/name. Revoking an installation
+blocks new lease work while photographer management can reconcile already uploaded bytes.
 
-1. The lead desktop now provides a clean-by-default preview settings screen with a local sample,
-   built-in OFTS or custom transparent logo, Unicode text, and four fixed layouts. Confirmation is
-   explicit, event-scoped, immutable, stored by Django, and readable by contributor installations.
-2. One restart-safe sync uploads originals and then produces a 2048/q85 preview and clean 512/q78
-   thumbnail. It applies orientation, converts to sRGB, strips derivative metadata, validates source
-   and derivative checksums, can read back only the same contributor's exact original, and removes
-   private temporary files after server verification.
-3. Django validates derivative manifests, issues exact PUT/GET URLs, reconciles readiness at both
-   derivative completion and finalization, and permits audited gallery exclusion only after five
-   failures. Publication requires the current manifest, confirmed policy, and complete non-excluded
-   derivatives.
-4. The photographer dashboard supports review, failure/exclusion status, publish/unpublish, and the
-   three-mode original-download policy. Authorized visitors receive a 48-item masonry gallery and
-   standalone preview navigation with private/no-store HTML and five-minute signed media URLs;
-   uploaded filenames and original URLs are absent.
-5. Original downloads and explicit share enforcement remain Session 8. Disabling downloads cannot
-   prevent saving or screenshotting an authorized 2048 preview, and a revoked five-minute signed URL
-   can remain usable until expiry. Native Windows/macOS packaging and representative visual review
-   remain release gates. Session 6's first failing acceptance test should reject a recognizer whose
-   model/hash/embedding contract differs from the event before persisting any face vector.
+**Done when:** Interruptions resume at verified objects; clients cannot choose keys; cross-tenant,
+cross-installation transfer, wrong-child, quota, checksum, and lifecycle cases fail intentionally;
+concurrent reservations cannot exceed event quota.
 
-## Session 6: Face-engine benchmark and embedding contract
+## Session 5: derivatives, sub-events, and private gallery
 
-**Goal:** Prove CPU throughput and matching quality before the face workflow depends on it.
+**Status:** complete; revised by ADR 0008.
 
-**Work:** Build the replaceable InsightFace adapter, verified model download/checksum mechanism,
-normal and group-photo detection modes, quality filters, normalization, model/version contract,
-and benchmark report. Use only synthetic or consented images; do not commit weights or embeddings.
+**Goal:** Publish fast authorized gallery media while preserving exact originals and event section
+boundaries.
 
-**Done when:** A 500-to-1,000-image representative benchmark records hardware, timings, face yield,
-memory, false merges/misses, thresholds, model hashes, and projected full-event duration. The go/no
-go decision for `buffalo_m` is documented.
+**Delivered:** Immutable optional preview policy, clean thumbnails, optionally watermarked previews,
+orientation/color/metadata handling, derivative upload/verification/readiness, audited exclusions,
+private signed gallery media, 48-item pagination, photo navigation, and publish/unpublish.
 
-## Session 7: Face ingestion, clustering, and photographer review
+**Revision:** The photographer dashboard manages sub-events and whole-batch reassignment. `All
+Photos` aggregates active children; filtered list/photo navigation stays child-scoped. Archiving a
+child hides its assets and blocks processing/new uploads until restoration. The download-policy UI,
+model, service, and tests are removed; actual original downloads remain Session 8.
 
-**Goal:** Turn compatible embeddings into conservative, correctable anonymous collections.
+**Done when:** Unauthorized, expired, cross-tenant, cross-child, and archived-child requests cannot
+obtain media; derivatives contain no source metadata; original hashes do not change; publication
+requires current manifest/policy/derivatives and an active child.
 
-**Work:** Add pgvector migrations, face and cluster ingestion, event-scoped neighbor queries,
-mutual-neighbor clustering, minimum-photo rules, ranking, and merge/hide/feature/rebuild controls.
+## Session 6: face-engine benchmark and model contract
 
-**Done when:** Batch retries create no duplicate faces, all vector queries are event-scoped, the
-highest-ranked collections can be reviewed and corrected, and a false-merge security test passes.
+**Status:** not started. No production face implementation belongs before this session passes.
 
-## Session 8: Shares, selfie search, and original downloads
+**Goal:** Prove CPU throughput and matching quality and freeze a compatible contract.
 
-**Goal:** Complete the customer discovery and delivery flow.
+**Work:** Benchmark replaceable detector/recognizer candidates on 500–1,000 consented representative
+photos. Exercise single portraits and dense group photos. Record hardware, latency/throughput,
+memory, detection/usable-face yield, false matches/misses, model files and licence, cryptographic
+hashes, preprocessing, vector dimension, normalization, distance metric, and candidate thresholds.
 
-**Work:** Add full-event and collection share links, expiry and revocation, consent recording,
-strict selfie validation, in-memory inference, event-filtered vector search, result deduplication,
-rate limits, and authorized signed original downloads.
+**Not in scope:** Database face rows, production upload endpoints, clustering, or collections.
 
-**Done when:** Selfies are absent from storage, database fields, logs, and error paths; model
-mismatches fail closed; restricted shares expose only their collection; expired links and URLs are
-denied; downloaded originals match uploaded checksums.
+**Done when:** A reproducible redacted report and explicit go/no-go decision are reviewed; the model
+ID/hash/dimension/normalization/quality/threshold contract is accepted; model weights and test faces
+are not tracked.
 
-## Session 9: Production hardening and launch rehearsal
+**First failing acceptance test:** Reject a result document whose model hash, dimension, finite
+values, or normalization differs from the accepted contract before any vector is persisted.
+
+## Session 7: direct per-photo face indexing
+
+**Status:** not started; depends on Session 6.
+
+**Goal:** Create a conservative event-scoped face search index without grouping people.
+
+**Work:** Add pgvector migration, `FaceAnalysis` terminal state, and per-face embeddings attached to
+assets. Generate embeddings on the photographer desktop and upload strict idempotent documents to
+Django. Validate tenant/event/asset/model/content/count/vector invariants. Add exact event and
+sub-event vector-query boundaries, retries/rebuilds, and a publication gate requiring every visible
+asset to be `indexed` or `no_usable_face`.
+
+**Not in scope:** Clusters, collections, person labels, customer identity profiles, or selfie UI.
+
+**Done when:** Retry creates no duplicates; model mismatch and malformed vectors fail before write;
+every query is event-filtered and optional child-filtered in SQL; archived-child faces are excluded;
+publication blocks on nonterminal visible assets.
+
+**First failing acceptance test:** Attempt to upload an otherwise valid face result to an asset in a
+different tenant or sub-event and prove that no analysis/vector row is written.
+
+## Session 8: owner/guest sharing, ephemeral search, and downloads
+
+**Status:** not started; depends on Sessions 6–7.
+
+**Goal:** Complete customer discovery and delivery with independently scoped links.
+
+**Work:** Add a photographer-created owner capability for the main event. Let the owner create and
+revoke guest capabilities scoped to the whole event or one active sub-event and to `full` or
+`selfie_only` mode. Give every link an independent high-entropy URL, auto-generated four-digit PIN,
+required/capped expiry, throttling, audit, and revocation. Implement exactly-one-usable-face input,
+ephemeral processing/cleanup, scoped vector search, deduplicated results, and visibility-derived
+signed original downloads.
+
+**Done when:**
+
+- Owner, full guest, and selfie-only guest permissions cannot widen through changed identifiers.
+- Zero-face and multiple-face inputs are rejected clearly; exactly one usable face is required.
+- Raw input/crop is absent from object storage, database, logs, diagnostics, analytics, and error
+  paths after every success/failure/cancellation.
+- Full links can browse/download all scoped visible photos; selfie-only links can view/download only
+  their returned result set.
+- Expired/revoked links and residual sessions fail; downloaded original hashes match uploads.
+
+**First failing acceptance test:** Use a valid selfie-only sub-event capability to request a matched
+photo from another sub-event and prove it returns not found and no signed URL.
+
+## Session 9: production hardening and launch rehearsal
+
+**Status:** not started.
 
 **Goal:** Turn the feature-complete pilot into an operable release.
 
-**Work:** Finish Railway/R2/Supabase configuration, security headers and cookie policy, wildcard
-domain checks, secret scanning, monitoring, database backup/restore, Windows/macOS packaging, failure
-runbooks, performance fixes, and the end-to-end rehearsal. Resolve the application licence before
-making the repository public.
+**Work:** Finalize Railway/R2/Supabase regions and secrets, wildcard DNS/TLS, trusted proxies,
+headers/cookies, secret scanning, monitoring, cost limits, backups/restores, retention deletion,
+privacy/legal notices, incident runbooks, native packaging, performance tuning, licence decisions,
+and a clean end-to-end rehearsal.
 
-**Done when:** The complete acceptance checklist passes from an empty database and bucket prefix;
-one backup restores into a separate database; upload interruption and rollback are rehearsed; the
-photographer walkthrough is complete; the launch commit is tagged.
+**Done when:** Empty-database/bucket deployment passes; backup restores separately; upload outage,
+link leak/revocation, pepper rotation, and retention deletion are rehearsed; Windows/macOS packages
+pass; the client walkthrough is accepted; the release commit is tagged.
 
-## Session handoff template
+## Handoff template
 
-At the end of each session, record:
+At the end of every session record:
 
-1. The user-visible behavior now working.
-2. Files, migrations, environment variables, and external resources added or changed.
-3. Commands run and their results.
-4. Known limitations and any decisions that the next session must preserve.
+1. User-visible behavior delivered.
+2. Contracts, schema/migrations, files, variables, and external resources changed.
+3. Commands/checks run and exact results.
+4. Known limitations and preserved invariants.
 5. The next session's first failing acceptance test.
 
-Do not begin a later session while an earlier session's authorization or data-isolation checks are
-failing. Session 6 may run earlier on separate hardware if representative client images become
-available; its confirmed model contract must land before Sessions 7 and 8.
+Do not begin Session 7 until Session 6 accepts the model contract. Do not begin a later session while
+an earlier authorization, privacy-cleanup, tenant, sub-event, checksum, or lifecycle test is failing.

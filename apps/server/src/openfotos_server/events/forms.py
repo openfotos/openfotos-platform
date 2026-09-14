@@ -2,6 +2,7 @@
 
 from django import forms
 
+
 class PhotographerLoginForm(forms.Form):
     username = forms.CharField(
         max_length=150,

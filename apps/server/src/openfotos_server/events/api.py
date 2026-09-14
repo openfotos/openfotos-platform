@@ -297,6 +297,10 @@ def _event_data(event, *, session) -> dict:
         status=InstallationStatus.ACTIVE.value,
     ).first()
     policy = PreviewPolicy.objects.filter(event=event).first()
+    active_sub_events = sorted(
+        event.sub_events.filter(is_archived=False),
+        key=lambda item: (item.position, item.name, str(item.id)),
+    )
     return EventSnapshot(
         id=event.id,
         name=event.name,
@@ -313,9 +317,7 @@ def _event_data(event, *, session) -> dict:
         device_label=installation.label if installation else "",
         sub_events=tuple(
             SubEventSnapshot(id=item.id, name=item.name, position=item.position)
-            for item in event.sub_events.filter(is_archived=False).order_by(
-                "position", "name", "id"
-            )
+            for item in active_sub_events
         ),
         preview_policy=preview_policy_snapshot(policy),
     ).as_dict()

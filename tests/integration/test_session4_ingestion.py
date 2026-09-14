@@ -12,9 +12,7 @@ from django.utils import timezone
 
 from openfotos_contracts import ContributionInput, EventState, UploadObjectState
 from openfotos_server.events.desktop_auth import (
-    authenticate_lead,
-    create_invitation,
-    redeem_invitation,
+    authenticate_photographer,
 )
 from openfotos_server.events.ingestion_services import (
     IngestionError,
@@ -26,7 +24,7 @@ from openfotos_server.events.ingestion_services import (
     issue_upload_leases,
     reopen_intake,
     reserve_contribution,
-    revoke_device,
+    revoke_installation,
     verify_uploaded_object,
 )
 from openfotos_server.events.models import (
@@ -36,6 +34,7 @@ from openfotos_server.events.models import (
     IngestionManifest,
     Photographer,
     PhotographerMembership,
+    SubEvent,
 )
 from openfotos_storage.backend import (
     ObjectAlreadyExists,
@@ -111,7 +110,10 @@ class MemoryObjectStore:
 
 def setup_event(*, storage_limit=25_000_000_000):
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
-    user = get_user_model().objects.create_user(username="lead", password="correct-password")
+    user = get_user_model().objects.create_user(
+        username="photographer",
+        password="correct-password",
+    )
     PhotographerMembership.objects.create(photographer=photographer, user=user)
     event = Event.objects.create(
         photographer=photographer,
@@ -119,28 +121,30 @@ def setup_event(*, storage_limit=25_000_000_000):
         storage_limit_bytes=storage_limit,
         expires_at=timezone.now() + timedelta(days=30),
     )
-    lead = authenticate_lead(
+    SubEvent.objects.create(event=event, name="Reception", position=1)
+    first = authenticate_photographer(
         photographer=photographer,
-        username="lead",
+        username="photographer",
         password="correct-password",
         installation_id=uuid4(),
     )
-    invitation = create_invitation(session=lead.session, event=event)
-    _, uploader = redeem_invitation(
+    second = authenticate_photographer(
         photographer=photographer,
-        token=invitation.token,
+        username="photographer",
+        password="correct-password",
         installation_id=uuid4(),
-        label="Uploader one",
     )
-    return event, lead.session, uploader.session
+    return event, first.session, second.session
 
 
 def contribution(content: bytes, *, batch_id=None, asset_id=None) -> ContributionInput:
+    sub_event = SubEvent.objects.get(is_archived=False)
     payload = {
         "batch_id": str(batch_id or uuid4()),
+        "sub_event_id": str(sub_event.id),
         "label": "Editor export",
         "processing_profile_id": "pilot-profile-v1",
-        "device_label": "Lead workstation",
+        "device_label": "Primary workstation",
         "assets": [
             {
                 "id": str(asset_id or uuid4()),
@@ -159,12 +163,14 @@ def contribution(content: bytes, *, batch_id=None, asset_id=None) -> Contributio
 
 
 def contribution_many(contents: list[bytes]) -> ContributionInput:
+    sub_event = SubEvent.objects.get(is_archived=False)
     return ContributionInput.from_dict(
         {
             "batch_id": str(uuid4()),
+            "sub_event_id": str(sub_event.id),
             "label": "Two editor exports",
             "processing_profile_id": "pilot-profile-v1",
-            "device_label": "Uploader workstation",
+            "device_label": "Installation workstation",
             "assets": [
                 {
                     "id": str(uuid4()),
@@ -185,31 +191,22 @@ def contribution_many(contents: list[bytes]) -> ContributionInput:
 
 def test_reservation_is_immutable_all_or_nothing_and_device_scoped() -> None:
     content = b"one complete synthetic jpeg payload"
-    event, _, first_uploader = setup_event(storage_limit=len(content))
-    issued = create_invitation(
-        session=authenticate_lead(
-            photographer=event.photographer,
-            username="lead",
-            password="correct-password",
-            installation_id=uuid4(),
-        ).session,
-        event=event,
-    )
-    _, second_uploader = redeem_invitation(
+    event, _, first_installation = setup_event(storage_limit=len(content))
+    second_installation = authenticate_photographer(
         photographer=event.photographer,
-        token=issued.token,
+        username="photographer",
+        password="correct-password",
         installation_id=uuid4(),
-        label="Uploader two",
     )
     manifest = contribution(content)
 
     batch = reserve_contribution(
-        session=first_uploader,
+        session=first_installation,
         event_id=event.id,
         contribution=manifest,
     )
     repeated = reserve_contribution(
-        session=first_uploader,
+        session=first_installation,
         event_id=event.id,
         contribution=manifest,
     )
@@ -220,7 +217,7 @@ def test_reservation_is_immutable_all_or_nothing_and_device_scoped() -> None:
 
     with pytest.raises(IngestionError) as quota_error:
         reserve_contribution(
-            session=second_uploader.session,
+            session=second_installation.session,
             event_id=event.id,
             contribution=contribution(content),
         )
@@ -229,7 +226,7 @@ def test_reservation_is_immutable_all_or_nothing_and_device_scoped() -> None:
 
     with pytest.raises(IngestionError) as privacy_error:
         issue_upload_leases(
-            session=second_uploader.session,
+            session=second_installation.session,
             event_id=event.id,
             batch_id=batch.id,
             object_store=MemoryObjectStore(),
@@ -239,16 +236,16 @@ def test_reservation_is_immutable_all_or_nothing_and_device_scoped() -> None:
 
 def test_lost_response_recovery_verifies_object_and_finalizes_immutable_generation() -> None:
     content = b"synthetic jpeg bytes"
-    event, lead, uploader = setup_event()
+    event, primary, installation = setup_event()
     manifest_input = contribution(content)
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=manifest_input,
     )
     storage = MemoryObjectStore()
     [lease] = issue_upload_leases(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
@@ -257,13 +254,13 @@ def test_lost_response_recovery_verifies_object_and_finalizes_immutable_generati
     storage.upload(upload.object_key, content)
 
     verified = verify_uploaded_object(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         asset_id=upload.asset_id,
         object_store=storage,
     )
     repeated = verify_uploaded_object(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         asset_id=upload.asset_id,
         object_store=storage,
@@ -272,14 +269,14 @@ def test_lost_response_recovery_verifies_object_and_finalizes_immutable_generati
     event.refresh_from_db()
     assert event.verified_original_bytes == len(content)
 
-    close_intake(session=lead, event_id=event.id)
+    close_intake(session=primary, event_id=event.id)
     finalized = finalize_ingestion(
-        session=lead,
+        session=primary,
         event_id=event.id,
         object_store=storage,
     )
     again = finalize_ingestion(
-        session=lead,
+        session=primary,
         event_id=event.id,
         object_store=storage,
     )
@@ -292,7 +289,7 @@ def test_lost_response_recovery_verifies_object_and_finalizes_immutable_generati
     assert finalized.object_key.endswith("manifests/generation-000001.json")
     assert len(IngestionManifest.objects.filter(event=event)) == 1
 
-    reopened = reopen_intake(session=lead, event_id=event.id)
+    reopened = reopen_intake(session=primary, event_id=event.id)
     assert reopened.intake_generation == 2
     assert reopened.current_ingestion_manifest is None
     assert reopened.state == EventState.UPLOADING.value
@@ -301,10 +298,10 @@ def test_lost_response_recovery_verifies_object_and_finalizes_immutable_generati
 
 def test_finalization_fails_retryably_when_existing_manifest_cannot_be_read() -> None:
     content = b"synthetic jpeg bytes"
-    event, lead, uploader = setup_event()
+    event, primary, installation = setup_event()
     manifest_input = contribution(content)
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=manifest_input,
     )
@@ -321,7 +318,7 @@ def test_finalization_fails_retryably_when_existing_manifest_cannot_be_read() ->
 
     storage = ExistingManifestUnavailableStore()
     issue_upload_leases(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
@@ -329,15 +326,15 @@ def test_finalization_fails_retryably_when_existing_manifest_cannot_be_read() ->
     original = AssetObject.objects.get(asset_id=manifest_input.assets[0].id)
     MemoryObjectStore.upload(storage, original.object_key, content)
     verify_uploaded_object(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         asset_id=original.asset_id,
         object_store=storage,
     )
-    close_intake(session=lead, event_id=event.id)
+    close_intake(session=primary, event_id=event.id)
 
     with pytest.raises(IngestionError) as unavailable:
-        finalize_ingestion(session=lead, event_id=event.id, object_store=storage)
+        finalize_ingestion(session=primary, event_id=event.id, object_store=storage)
 
     assert unavailable.value.code == "object_store_unavailable"
     assert unavailable.value.retryable
@@ -348,16 +345,16 @@ def test_finalization_fails_retryably_when_existing_manifest_cannot_be_read() ->
 def test_mismatching_uploaded_bytes_are_deleted_and_fail_closed() -> None:
     expected = b"expected synthetic jpeg bytes"
     uploaded = b"different synthetic jpeg bytes"
-    event, _, uploader = setup_event()
+    event, _, installation = setup_event()
     manifest_input = contribution(expected)
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=manifest_input,
     )
     storage = MemoryObjectStore()
     [lease] = issue_upload_leases(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
@@ -367,7 +364,7 @@ def test_mismatching_uploaded_bytes_are_deleted_and_fail_closed() -> None:
 
     with pytest.raises(IngestionError) as error:
         verify_uploaded_object(
-            session=uploader,
+            session=installation,
             event_id=event.id,
             asset_id=upload.asset_id,
             object_store=storage,
@@ -380,26 +377,24 @@ def test_mismatching_uploaded_bytes_are_deleted_and_fail_closed() -> None:
 
 
 def test_upload_only_session_cannot_resolve_another_event() -> None:
-    event, _, uploader = setup_event()
+    event, _, installation = setup_event()
     other = Event.objects.create(photographer=event.photographer, name="Other")
 
-    with pytest.raises(IngestionError) as error:
-        event_for_session(uploader, other.id)
-    assert error.value.code == "event_not_found"
+    assert event_for_session(installation, other.id) == other
 
 
 def test_batch_cancellation_waits_for_leases_deletes_objects_and_releases_quota() -> None:
     content = b"cancelled synthetic jpeg"
-    event, lead, uploader = setup_event(storage_limit=len(content))
+    event, primary, installation = setup_event(storage_limit=len(content))
     manifest_input = contribution(content)
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=manifest_input,
     )
     storage = MemoryObjectStore()
     issue_upload_leases(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
@@ -407,7 +402,7 @@ def test_batch_cancellation_waits_for_leases_deletes_objects_and_releases_quota(
 
     with pytest.raises(IngestionError) as active_lease:
         cancel_batch(
-            session=lead,
+            session=primary,
             event_id=event.id,
             batch_id=batch.id,
             object_store=storage,
@@ -420,13 +415,13 @@ def test_batch_cancellation_waits_for_leases_deletes_objects_and_releases_quota(
     )
     storage.upload(upload.object_key, content)
     cancelled = cancel_batch(
-        session=lead,
+        session=primary,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
     )
     repeated = cancel_batch(
-        session=lead,
+        session=primary,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
@@ -443,10 +438,10 @@ def test_batch_cancellation_waits_for_leases_deletes_objects_and_releases_quota(
 
 def test_storage_failure_during_cancellation_preserves_reservation() -> None:
     content = b"synthetic jpeg retained on failure"
-    event, lead, uploader = setup_event(storage_limit=len(content))
+    event, primary, installation = setup_event(storage_limit=len(content))
     manifest_input = contribution(content)
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=manifest_input,
     )
@@ -458,7 +453,7 @@ def test_storage_failure_during_cancellation_preserves_reservation() -> None:
 
     with pytest.raises(IngestionError) as unavailable:
         cancel_batch(
-            session=lead,
+            session=primary,
             event_id=event.id,
             batch_id=batch.id,
             object_store=UnavailableObjectStore(),
@@ -475,16 +470,16 @@ def test_storage_failure_during_cancellation_preserves_reservation() -> None:
 
 def test_partial_batch_requires_reasoned_exclusion_and_keeps_verified_bytes_charged() -> None:
     contents = [b"verified synthetic jpeg", b"excluded synthetic jpeg"]
-    event, lead, uploader = setup_event(storage_limit=sum(map(len, contents)))
+    event, primary, installation = setup_event(storage_limit=sum(map(len, contents)))
     manifest_input = contribution_many(contents)
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=manifest_input,
     )
     storage = MemoryObjectStore()
     issue_upload_leases(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
@@ -493,7 +488,7 @@ def test_partial_batch_requires_reasoned_exclusion_and_keeps_verified_bytes_char
     first_upload = AssetObject.objects.get(asset_id=first_asset.id)
     storage.upload(first_upload.object_key, contents[0])
     verify_uploaded_object(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         asset_id=first_asset.id,
         object_store=storage,
@@ -503,7 +498,7 @@ def test_partial_batch_requires_reasoned_exclusion_and_keeps_verified_bytes_char
     )
 
     excluded = exclude_asset(
-        session=lead,
+        session=primary,
         event_id=event.id,
         asset_id=second_asset.id,
         reason="Source drive was lost after reservation.",
@@ -518,16 +513,16 @@ def test_partial_batch_requires_reasoned_exclusion_and_keeps_verified_bytes_char
     assert event.verified_original_bytes == len(contents[0])
     with pytest.raises(IngestionError) as cancellation:
         cancel_batch(
-            session=lead,
+            session=primary,
             event_id=event.id,
             batch_id=batch.id,
             object_store=storage,
         )
     assert cancellation.value.code == "batch_has_verified_assets"
 
-    close_intake(session=lead, event_id=event.id)
+    close_intake(session=primary, event_id=event.id)
     finalized = finalize_ingestion(
-        session=lead,
+        session=primary,
         event_id=event.id,
         object_store=storage,
     )
@@ -535,43 +530,43 @@ def test_partial_batch_requires_reasoned_exclusion_and_keeps_verified_bytes_char
     assert finalized.excluded_asset_count == 1
 
 
-def test_revoked_device_keeps_reservation_for_explicit_lead_verification() -> None:
-    content = b"uploaded before device revocation"
-    event, lead, uploader = setup_event(storage_limit=len(content))
+def test_revoked_installation_keeps_reservation_for_photographer_verification() -> None:
+    content = b"uploaded before installation revocation"
+    event, primary, installation = setup_event(storage_limit=len(content))
     manifest_input = contribution(content)
     batch = reserve_contribution(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         contribution=manifest_input,
     )
     storage = MemoryObjectStore()
     [lease] = issue_upload_leases(
-        session=uploader,
+        session=installation,
         event_id=event.id,
         batch_id=batch.id,
         object_store=storage,
     )
     upload = AssetObject.objects.get(asset_id=lease["asset_id"])
     storage.upload(upload.object_key, content)
-    revoke_device(
-        session=lead,
+    revoke_installation(
+        session=primary,
         event_id=event.id,
-        device_id=uploader.device_id,
+        installation_id=batch.installation_id,
     )
 
     with pytest.raises(IngestionError) as revoked:
         issue_upload_leases(
-            session=uploader,
+            session=installation,
             event_id=event.id,
             batch_id=batch.id,
             object_store=storage,
         )
-    assert revoked.value.code == "event_not_found"
+    assert revoked.value.code == "batch_not_found"
     event.refresh_from_db()
     assert event.reserved_original_bytes == len(content)
 
     verified = verify_uploaded_object(
-        session=lead,
+        session=primary,
         event_id=event.id,
         asset_id=upload.asset_id,
         object_store=storage,
@@ -583,7 +578,10 @@ def test_revoked_device_keeps_reservation_for_explicit_lead_verification() -> No
 def test_ten_devices_racing_reservations_never_exceed_event_allowance() -> None:
     content = b"fixed-size synthetic jpeg"
     photographer = Photographer.objects.create(slug="race", display_name="Race Photos")
-    user = get_user_model().objects.create_user(username="race-lead", password="correct-password")
+    user = get_user_model().objects.create_user(
+        username="race-photographer",
+        password="correct-password",
+    )
     PhotographerMembership.objects.create(photographer=photographer, user=user)
     event = Event.objects.create(
         photographer=photographer,
@@ -591,21 +589,15 @@ def test_ten_devices_racing_reservations_never_exceed_event_allowance() -> None:
         storage_limit_bytes=5 * len(content),
         expires_at=timezone.now() + timedelta(days=30),
     )
-    lead = authenticate_lead(
-        photographer=photographer,
-        username="race-lead",
-        password="correct-password",
-        installation_id=uuid4(),
-    )
-    invitation = create_invitation(session=lead.session, event=event)
+    SubEvent.objects.create(event=event, name="Reception", position=1)
     session_ids = []
     contributions = []
-    for index in range(10):
-        _, tokens = redeem_invitation(
+    for _index in range(10):
+        tokens = authenticate_photographer(
             photographer=photographer,
-            token=invitation.token,
+            username="race-photographer",
+            password="correct-password",
             installation_id=uuid4(),
-            label=f"Race uploader {index + 1}",
         )
         session_ids.append(tokens.session.id)
         contributions.append(contribution(content))
@@ -616,9 +608,9 @@ def test_ten_devices_racing_reservations_never_exceed_event_allowance() -> None:
         try:
             for retry in range(20):
                 try:
-                    session = DesktopSession.objects.select_related(
-                        "photographer", "device", "device__event"
-                    ).get(pk=session_id)
+                    session = DesktopSession.objects.select_related("photographer", "user").get(
+                        pk=session_id
+                    )
                     reserve_contribution(
                         session=session,
                         event_id=event.id,
@@ -641,4 +633,4 @@ def test_ten_devices_racing_reservations_never_exceed_event_allowance() -> None:
     assert results.count("reserved") == 5
     assert results.count("event_storage_limit") == 5
     assert event.reserved_original_bytes == event.storage_limit_bytes
-    assert AssetObject.objects.filter(asset__batch__device__event=event).count() == 5
+    assert AssetObject.objects.filter(asset__batch__installation__event=event).count() == 5

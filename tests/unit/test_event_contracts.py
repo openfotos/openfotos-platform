@@ -15,7 +15,6 @@ def _event_response() -> dict:
         "id": str(uuid4()),
         "name": "Reception",
         "state": "processing",
-        "role": "lead",
         "storage_limit_bytes": 10_000,
         "reserved_original_bytes": 4_000,
         "verified_original_bytes": 3_000,
@@ -25,7 +24,14 @@ def _event_response() -> dict:
         "processing_profile_id": "pilot-profile-v1",
         "max_contribution_devices": 10,
         "active_contribution_devices": 3,
-        "device_label": "Lead workstation",
+        "device_label": "Studio workstation",
+        "sub_events": [
+            {
+                "id": str(uuid4()),
+                "name": "Reception",
+                "position": 1,
+            }
+        ],
         "preview_policy": {
             "id": str(uuid4()),
             "enabled": True,

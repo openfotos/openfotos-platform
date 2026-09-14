@@ -216,7 +216,10 @@ class EventSnapshot:
         sub_events = tuple(SubEventSnapshot.from_dict(item) for item in sub_events_value)
         if len({item.id for item in sub_events}) != len(sub_events):
             raise ContractError("invalid_response", "Sub-event identifiers must be unique.")
-        if tuple(sorted(sub_events, key=lambda item: (item.position, item.name, str(item.id)))) != sub_events:
+        ordered_sub_events = tuple(
+            sorted(sub_events, key=lambda item: (item.position, item.name, str(item.id)))
+        )
+        if ordered_sub_events != sub_events:
             raise ContractError("invalid_response", "Sub-events are not in canonical order.")
         return cls(
             id=_uuid(value["id"], field="event id"),

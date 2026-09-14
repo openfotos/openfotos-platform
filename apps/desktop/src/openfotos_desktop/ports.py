@@ -15,17 +15,11 @@ class OnlineServicesUnavailable(RuntimeError):
 
 
 class PhotographerSessionGateway(Protocol):
-    def sign_in_lead(
+    def sign_in_photographer(
         self, server_url: str, username: str, password: str, device_label: str
     ) -> Sequence[EventCache]: ...
 
-    def enroll_uploader(
-        self, server_url: str, invitation: str, device_label: str
-    ) -> EventCache: ...
-
     def resume(self, server_url: str) -> Sequence[EventCache]: ...
-
-    def create_invitation(self, event_id: UUID) -> str: ...
 
     def close_intake(self, event_id: UUID) -> EventCache: ...
 
@@ -74,11 +68,11 @@ class Session3Gateway:
     """Make the incomplete network boundary explicit in normal application mode."""
 
     _MESSAGE = (
-        "Online authentication and uploader enrollment are delivered in Session 4. "
+        "Online photographer authentication is delivered in Session 4. "
         "Launch with --demo to exercise Session 3 local inventory."
     )
 
-    def sign_in_lead(
+    def sign_in_photographer(
         self,
         server_url: str,
         username: str,
@@ -88,16 +82,8 @@ class Session3Gateway:
         del server_url, username, password, device_label
         raise OnlineServicesUnavailable(self._MESSAGE)
 
-    def enroll_uploader(self, server_url: str, invitation: str, device_label: str) -> EventCache:
-        del server_url, invitation, device_label
-        raise OnlineServicesUnavailable(self._MESSAGE)
-
     def resume(self, server_url: str) -> Sequence[EventCache]:
         del server_url
-        raise OnlineServicesUnavailable(self._MESSAGE)
-
-    def create_invitation(self, event_id: UUID) -> str:
-        del event_id
         raise OnlineServicesUnavailable(self._MESSAGE)
 
     def close_intake(self, event_id: UUID) -> EventCache:

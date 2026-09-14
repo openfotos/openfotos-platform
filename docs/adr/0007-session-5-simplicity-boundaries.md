@@ -1,6 +1,6 @@
 # ADR 0007: Session 5 simplicity boundaries
 
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR 0008
 - **Date:** 2026-09-13
 
 ## Context

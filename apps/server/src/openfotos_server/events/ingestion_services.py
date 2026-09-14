@@ -14,9 +14,9 @@ from openfotos_contracts import (
     AssetVariant,
     ContributionInput,
     ContributionState,
-    InstallationStatus,
     EventState,
     IngestionManifestState,
+    InstallationStatus,
     IntakeState,
     UploadObjectState,
 )
@@ -278,7 +278,7 @@ def verify_uploaded_object(
     request=None,
 ) -> AssetObject:
     event = event_for_session(session, event_id)
-    upload = _owned_upload(
+    upload = _manageable_upload(
         session=session,
         event=event,
         asset_id=asset_id,
@@ -386,9 +386,7 @@ def revoke_installation(
             pk=installation_id, event=event
         )
     except EventInstallation.DoesNotExist as exc:
-        raise IngestionError(
-            "installation_not_found", "The workstation is unavailable."
-        ) from exc
+        raise IngestionError("installation_not_found", "The workstation is unavailable.") from exc
     if installation.status == InstallationStatus.REVOKED.value:
         return installation
     now = timezone.now()
@@ -771,7 +769,7 @@ def _owned_batch(
     return batch
 
 
-def _owned_upload(
+def _manageable_upload(
     *,
     session: DesktopSession,
     event: Event,
@@ -787,9 +785,6 @@ def _owned_upload(
         )
     except AssetObject.DoesNotExist as exc:
         raise IngestionError("asset_not_found", "The asset is unavailable.") from exc
-    installation = _existing_contribution_installation(session=session, event=event)
-    if upload.asset.batch.installation_id != installation.id:
-        raise IngestionError("asset_not_found", "The asset is unavailable.")
     if upload.asset.batch.sub_event.is_archived:
         raise IngestionError("sub_event_archived", "The sub-event is archived.")
     return upload
@@ -846,9 +841,11 @@ def _complete_batch_if_terminal(batch: ContributionBatch, *, now) -> None:
 
 
 def _aggregate_manifest_document(event: Event) -> dict:
-    batches = ContributionBatch.objects.select_related("sub_event").filter(
-        installation__event=event
-    ).order_by("created_at", "id")
+    batches = (
+        ContributionBatch.objects.select_related("sub_event")
+        .filter(installation__event=event)
+        .order_by("created_at", "id")
+    )
     contributions = [
         {
             "batch_id": str(batch.id),
