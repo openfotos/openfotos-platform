@@ -4,7 +4,7 @@ import os
 import shutil
 import sqlite3
 from collections.abc import Iterable
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
@@ -22,9 +22,11 @@ from .models import (
     ContributionBatch,
     DerivativeCheckpoint,
     EventCache,
+    FaceAnalysisCheckpoint,
     FileSnapshot,
     InventoryItem,
     InventoryStatus,
+    LocalFaceState,
     LocalUploadState,
     RejectionReason,
     ScanIssue,
@@ -75,6 +77,8 @@ CREATE TABLE IF NOT EXISTS events (
     preview_renderer_id TEXT,
     derivative_profile_id TEXT,
     preview_mark_sha256 TEXT NOT NULL DEFAULT '',
+    face_model_id TEXT NOT NULL DEFAULT 'opencv-yunet-2023mar-sface-2021dec',
+    face_index_ready INTEGER NOT NULL DEFAULT 0 CHECK (face_index_ready IN (0, 1)),
     cached_at TEXT NOT NULL
 );
 
@@ -170,8 +174,19 @@ CREATE TABLE IF NOT EXISTS derivative_checkpoints (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (item_id, variant)
 );
+
+CREATE TABLE IF NOT EXISTS face_analysis_checkpoints (
+    item_id TEXT PRIMARY KEY REFERENCES inventory_items(id) ON DELETE CASCADE,
+    state TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    last_error_code TEXT,
+    detected_face_count INTEGER NOT NULL DEFAULT 0 CHECK (detected_face_count >= 0),
+    usable_face_count INTEGER NOT NULL DEFAULT 0 CHECK (usable_face_count >= 0),
+    completed_at TEXT,
+    updated_at TEXT NOT NULL
+);
 """
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 
 def normalize_path(path: Path) -> str:
@@ -217,6 +232,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     self._migrate_version_4()
                 elif schema_version == 4:
                     self._migrate_version_4()
+                if 1 <= schema_version <= 5:
+                    self._migrate_version_5()
         except Exception:
             self._connection.close()
             raise
@@ -303,6 +320,29 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             """
         )
 
+    def _migrate_version_5(self) -> None:
+        self._connection.executescript(
+            """
+            ALTER TABLE events ADD COLUMN face_model_id TEXT NOT NULL
+                DEFAULT 'opencv-yunet-2023mar-sface-2021dec';
+            ALTER TABLE events ADD COLUMN face_index_ready INTEGER NOT NULL DEFAULT 0
+                CHECK (face_index_ready IN (0, 1));
+            CREATE TABLE face_analysis_checkpoints (
+                item_id TEXT PRIMARY KEY REFERENCES inventory_items(id) ON DELETE CASCADE,
+                state TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                last_error_code TEXT,
+                detected_face_count INTEGER NOT NULL DEFAULT 0 CHECK (detected_face_count >= 0),
+                usable_face_count INTEGER NOT NULL DEFAULT 0 CHECK (usable_face_count >= 0),
+                completed_at TEXT,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO face_analysis_checkpoints(item_id, state, updated_at)
+            SELECT item_id, 'pending', updated_at FROM upload_checkpoints;
+            PRAGMA user_version = 6;
+            """
+        )
+
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
@@ -329,8 +369,12 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             return installation_id
 
     def cache_event(self, event: EventCache) -> None:
-        if not event.name.strip() or not event.processing_profile_id.strip():
-            raise ValueError("Cached event name and processing profile are required.")
+        if (
+            not event.name.strip()
+            or not event.processing_profile_id.strip()
+            or not event.face_model_id.strip()
+        ):
+            raise ValueError("Cached event name and processing profiles are required.")
         with self._lock, self._connection:
             self._connection.execute(
                 """
@@ -340,8 +384,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     intake_generation, device_label, preview_policy_id,
                     preview_watermark_enabled, preview_template, preview_text,
                     preview_logo_kind, preview_renderer_id, derivative_profile_id,
-                    preview_mark_sha256, cached_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    preview_mark_sha256, face_model_id, face_index_ready, cached_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     name = excluded.name,
                     storage_limit_bytes = excluded.storage_limit_bytes,
@@ -363,6 +407,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     preview_renderer_id = excluded.preview_renderer_id,
                     derivative_profile_id = excluded.derivative_profile_id,
                     preview_mark_sha256 = excluded.preview_mark_sha256,
+                    face_model_id = excluded.face_model_id,
+                    face_index_ready = excluded.face_index_ready,
                     cached_at = excluded.cached_at
                 """,
                 (
@@ -384,6 +430,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     event.preview_policy.renderer_id if event.preview_policy else None,
                     event.preview_policy.derivative_profile_id if event.preview_policy else None,
                     event.preview_policy.mark_sha256 if event.preview_policy else "",
+                    event.face_model_id,
+                    int(event.face_index_ready),
                     _now(),
                 ),
             )
@@ -444,6 +492,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             name=row["name"],
             storage_limit_bytes=row["storage_limit_bytes"],
             processing_profile_id=row["processing_profile_id"],
+            face_model_id=row["face_model_id"],
+            face_index_ready=bool(row["face_index_ready"]),
             server_url=row["server_url"],
             reserved_original_bytes=row["reserved_original_bytes"],
             verified_original_bytes=row["verified_original_bytes"],
@@ -516,6 +566,23 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
         if row is None:
             raise KeyError(f"Unknown contribution batch {batch_id}.")
         return self._batch_from_row(row)
+
+    def update_batch_sub_event(self, batch_id: UUID, sub_event_id: UUID) -> None:
+        batch = self.get_batch(batch_id)
+        with self._lock, self._connection:
+            target = self._connection.execute(
+                """
+                SELECT 1 FROM sub_events
+                WHERE id = ? AND event_id = ? AND is_active = 1
+                """,
+                (str(sub_event_id), str(batch.event_id)),
+            ).fetchone()
+            if target is None:
+                raise ValueError("The server-assigned sub-event is not in the active snapshot.")
+            self._connection.execute(
+                "UPDATE batches SET sub_event_id = ?, updated_at = ? WHERE id = ?",
+                (str(sub_event_id), _now(), str(batch_id)),
+            )
 
     def list_batches(self, event_id: UUID) -> list[ContributionBatch]:
         with self._lock:
@@ -837,6 +904,21 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     InventoryStatus.ACCEPTED.value,
                 ),
             )
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO face_analysis_checkpoints(
+                    item_id, state, attempt_count, updated_at
+                )
+                SELECT id, ?, 0, ? FROM inventory_items
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    LocalFaceState.PENDING.value,
+                    timestamp,
+                    str(batch_id),
+                    InventoryStatus.ACCEPTED.value,
+                ),
+            )
 
     def list_upload_checkpoints(self, batch_id: UUID) -> list[UploadCheckpoint]:
         with self._lock:
@@ -907,6 +989,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
 
     def mark_upload_excluded(self, item_id: UUID) -> None:
         self._update_upload(item_id, state=LocalUploadState.EXCLUDED)
+        with suppress(KeyError):
+            self.mark_face_analysis_excluded(item_id)
         self._refresh_batch_upload_state(item_id)
 
     def _refresh_batch_upload_state(self, item_id: UUID) -> None:
@@ -1110,6 +1194,190 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
         checkpoints = self.list_derivative_checkpoints(batch_id)
         return bool(checkpoints) and all(
             checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+            for checkpoint in checkpoints
+        )
+
+    def ensure_face_analysis_checkpoints(self, batch_id: UUID) -> None:
+        self.get_batch(batch_id)
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT OR IGNORE INTO face_analysis_checkpoints(
+                    item_id, state, attempt_count, updated_at
+                )
+                SELECT id, ?, 0, ? FROM inventory_items
+                WHERE batch_id = ? AND status = ?
+                """,
+                (
+                    LocalFaceState.PENDING.value,
+                    _now(),
+                    str(batch_id),
+                    InventoryStatus.ACCEPTED.value,
+                ),
+            )
+
+    def list_face_analysis_checkpoints(self, batch_id: UUID) -> list[FaceAnalysisCheckpoint]:
+        with self._lock:
+            rows = self._connection.execute(
+                """
+                SELECT face_analysis_checkpoints.* FROM face_analysis_checkpoints
+                JOIN inventory_items
+                  ON inventory_items.id = face_analysis_checkpoints.item_id
+                WHERE inventory_items.batch_id = ?
+                ORDER BY inventory_items.normalized_path, inventory_items.id
+                """,
+                (str(batch_id),),
+            ).fetchall()
+        return [self._face_analysis_from_row(row) for row in rows]
+
+    def get_face_analysis_checkpoint(self, item_id: UUID) -> FaceAnalysisCheckpoint:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT * FROM face_analysis_checkpoints WHERE item_id = ?",
+                (str(item_id),),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown face-analysis checkpoint {item_id}.")
+        return self._face_analysis_from_row(row)
+
+    @staticmethod
+    def _face_analysis_from_row(row: sqlite3.Row) -> FaceAnalysisCheckpoint:
+        return FaceAnalysisCheckpoint(
+            item_id=UUID(row["item_id"]),
+            state=LocalFaceState(row["state"]),
+            attempt_count=row["attempt_count"],
+            last_error_code=row["last_error_code"],
+            detected_face_count=row["detected_face_count"],
+            usable_face_count=row["usable_face_count"],
+        )
+
+    def mark_face_analysis_started(self, item_id: UUID) -> None:
+        self._update_face_analysis(
+            item_id,
+            state=LocalFaceState.PROCESSING,
+            increment_attempt=True,
+        )
+
+    def mark_face_analysis_failed(
+        self, item_id: UUID, error_code: str, *, conflict: bool = False
+    ) -> None:
+        self._update_face_analysis(
+            item_id,
+            state=LocalFaceState.CONFLICT if conflict else LocalFaceState.FAILED,
+            error_code=error_code,
+        )
+
+    def mark_face_analysis_complete(
+        self,
+        item_id: UUID,
+        *,
+        state: LocalFaceState,
+        detected_face_count: int,
+        usable_face_count: int,
+    ) -> None:
+        if state not in {LocalFaceState.INDEXED, LocalFaceState.NO_USABLE_FACE}:
+            raise ValueError("Face analysis must complete as indexed or no usable face.")
+        if (
+            detected_face_count < usable_face_count
+            or usable_face_count < 0
+            or (state is LocalFaceState.INDEXED) != (usable_face_count > 0)
+        ):
+            raise ValueError("Face-analysis counts do not match the terminal state.")
+        self._update_face_analysis(
+            item_id,
+            state=state,
+            detected_face_count=detected_face_count,
+            usable_face_count=usable_face_count,
+        )
+
+    def sync_face_analysis(
+        self,
+        item_id: UUID,
+        *,
+        state: LocalFaceState,
+        attempt_count: int,
+        error_code: str,
+        detected_face_count: int,
+        usable_face_count: int,
+    ) -> None:
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE face_analysis_checkpoints
+                SET state = ?, attempt_count = ?, last_error_code = ?,
+                    detected_face_count = ?, usable_face_count = ?,
+                    completed_at = CASE WHEN ? IN (?, ?) THEN ? ELSE NULL END,
+                    updated_at = ?
+                WHERE item_id = ?
+                """,
+                (
+                    state.value,
+                    attempt_count,
+                    error_code or None,
+                    detected_face_count,
+                    usable_face_count,
+                    state.value,
+                    LocalFaceState.INDEXED.value,
+                    LocalFaceState.NO_USABLE_FACE.value,
+                    _now(),
+                    _now(),
+                    str(item_id),
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown face-analysis checkpoint {item_id}.")
+
+    def mark_face_analysis_excluded(self, item_id: UUID) -> None:
+        self._update_face_analysis(item_id, state=LocalFaceState.EXCLUDED)
+
+    def _update_face_analysis(
+        self,
+        item_id: UUID,
+        *,
+        state: LocalFaceState,
+        error_code: str | None = None,
+        detected_face_count: int = 0,
+        usable_face_count: int = 0,
+        increment_attempt: bool = False,
+    ) -> None:
+        timestamp = _now()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE face_analysis_checkpoints
+                SET state = ?, attempt_count = attempt_count + ?, last_error_code = ?,
+                    detected_face_count = ?, usable_face_count = ?,
+                    completed_at = CASE WHEN ? IN (?, ?, ?) THEN ? ELSE NULL END,
+                    updated_at = ?
+                WHERE item_id = ?
+                """,
+                (
+                    state.value,
+                    int(increment_attempt),
+                    error_code,
+                    detected_face_count,
+                    usable_face_count,
+                    state.value,
+                    LocalFaceState.INDEXED.value,
+                    LocalFaceState.NO_USABLE_FACE.value,
+                    LocalFaceState.EXCLUDED.value,
+                    timestamp,
+                    timestamp,
+                    str(item_id),
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown face-analysis checkpoint {item_id}.")
+
+    def face_analysis_complete(self, batch_id: UUID) -> bool:
+        checkpoints = self.list_face_analysis_checkpoints(batch_id)
+        return bool(checkpoints) and all(
+            checkpoint.state
+            in {
+                LocalFaceState.INDEXED,
+                LocalFaceState.NO_USABLE_FACE,
+                LocalFaceState.EXCLUDED,
+            }
             for checkpoint in checkpoints
         )
 

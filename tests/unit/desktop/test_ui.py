@@ -1,10 +1,12 @@
 from pathlib import Path
+from unittest.mock import Mock
 from uuid import UUID
 
-from PySide6.QtGui import QPalette
+from PySide6.QtGui import QCloseEvent, QPalette
 from PySide6.QtWidgets import QApplication, QToolButton
 
 from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+from openfotos_desktop.face_models import FaceModelStore
 from openfotos_desktop.ingestion import (
     CheckpointStore,
     EventCache,
@@ -113,6 +115,44 @@ def test_desktop_shell_packages_corporate_brand_and_source_actions(tmp_path: Pat
     assert not window.selection.add_folder.icon().isNull()
     assert window.selection.add_files.property("actionCard") is True
     assert window.selection.add_folder.property("actionCard") is True
+    window.close()
+
+
+def test_face_model_settings_show_an_explicit_not_ready_state(tmp_path: Path) -> None:
+    app = application()
+    window = MainWindow(
+        store=CheckpointStore(tmp_path / "model-settings.sqlite3"),
+        gateway=Session3Gateway(),
+        face_model_store=FaceModelStore(tmp_path / "models"),
+    )
+
+    window.header.settings.click()
+    app.processEvents()
+
+    assert window.model_settings is not None
+    assert window.model_settings.isVisible()
+    assert "Not ready" in window.model_settings.status.text()
+    window.model_settings.accept()
+    window.close()
+
+
+def test_window_close_waits_for_active_face_model_setup(tmp_path: Path) -> None:
+    application()
+    window = MainWindow(
+        store=CheckpointStore(tmp_path / "model-close.sqlite3"),
+        gateway=Session3Gateway(),
+    )
+    active_dialog = Mock(is_busy=True)
+    window.model_settings = active_dialog
+    close_event = QCloseEvent()
+
+    window.closeEvent(close_event)
+
+    assert not close_event.isAccepted()
+    active_dialog.show.assert_called_once_with()
+    active_dialog.raise_.assert_called_once_with()
+    active_dialog.activateWindow.assert_called_once_with()
+    window.model_settings = None
     window.close()
 
 

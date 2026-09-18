@@ -1,7 +1,7 @@
 # OpenFotos
 
-OpenFotos is a supervised pilot for private wedding photo delivery and future face-based photo
-discovery. A photographer organizes one main wedding into sub-events such as Haldi, Reception, and
+OpenFotos is a supervised pilot for private wedding photo delivery and event-scoped face-based
+photo discovery. A photographer organizes one main wedding into sub-events such as Haldi, Reception, and
 Marriage, then processes edited JPEGs with one account across tracked desktop installations.
 
 The pilot deliberately targets one photographer, wedding-sized events below roughly 20–25 GB, up
@@ -19,6 +19,16 @@ defines optional event watermarking, local derivative generation, and private br
 The [post-Session-5 revision](docs/adr/0008-main-events-sub-events-and-search-only-face-index.md)
 defines mandatory sub-events, one photographer identity, four-digit PINs, and the search-only face
 index that supersedes collections and clustering.
+The [full-gallery search decision](docs/adr/0009-full-gallery-guest-search-and-recall-first-matching.md)
+removes selfie-only authorization and makes face search a recall-first filter over photos a guest
+may already browse.
+The [Session 6 benchmark method](docs/session6/benchmark-method.md) freezes the candidate artifacts,
+privacy-safe measurement protocol, quality gates, and reproducible commands.
+The [accepted face-model contract](docs/adr/0010-accepted-yunet-sface-model-contract.md) records the
+YuNet/SFace hashes, preprocessing, vector and quality invariants, fixed threshold, and evidence that
+unblocked Session 7. The
+[direct face-index decision](docs/adr/0011-direct-per-photo-face-index.md) records the strict
+desktop-to-server document, retry/reset behavior, publication gate, and exact SQL search scope.
 
 ## Repository map
 
@@ -46,7 +56,7 @@ scripts/         Repeatable developer checks
 Install [uv](https://docs.astral.sh/uv/), then run:
 
 ```bash
-uv sync --extra server --extra desktop
+uv sync --extra server --extra desktop --extra vision
 uv run python apps/server/manage.py migrate
 uv run python apps/server/manage.py createsuperuser
 uv run python apps/server/manage.py check
@@ -63,8 +73,11 @@ For a photographer with slug `demo`, use `http://demo.localhost:8000` as the ser
 login, durable refresh, private direct upload, pause/resume, intake closure, and manifest
 finalization use the desktop API. Before creating a contribution, the desktop requires one active
 sub-event selected from the server snapshot. The photographer confirms optional preview
-watermarking; the same sync action uploads originals and their private previews/thumbnails. To run local
-inventory without a server, start the
+watermarking; the same sync action uploads originals, generates private previews/thumbnails, and
+then uploads strict per-photo face-analysis results. Use **Face model settings** in the desktop
+header to download and SHA-256-verify the accepted YuNet/SFace files, or to locate existing copies.
+Weights remain in the private desktop application-data directory and are never committed. To run
+local inventory without a server, start the
 explicit synthetic demo instead:
 
 ```bash
@@ -90,9 +103,22 @@ revoke visitor sessions. A photographer with slug `demo` signs in at
 For development checks:
 
 ```bash
-uv sync --extra server
+uv sync --extra server --extra desktop --extra vision
 ./scripts/check.sh
 ```
+
+The default fast suite uses SQLite. Session 7's dedicated CI job runs its migrations and exact
+cosine-scope tests against `pgvector/pgvector:pg16`. To exercise the same boundary locally with the
+repository service:
+
+```bash
+docker compose -f infra/docker/compose.yaml up -d postgres
+DATABASE_URL=postgresql://openfotos:openfotos@127.0.0.1:5432/openfotos \
+  uv run pytest tests/integration/test_session7_face_index.py
+```
+
+Migration `0005_face_index` enables pgvector and intentionally aborts if any event is already
+published. Unpublish and index those events deliberately before applying it.
 
 Copy `.env.example` to `.env` for local values and set `EVENT_PIN_PEPPER` independently from
 `DJANGO_SECRET_KEY`. Never commit `.env`, model weights, customer

@@ -26,12 +26,22 @@ from openfotos_desktop.network import (
     SourceChangedError,
     _server_origin,
 )
+from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT
 
 _SUB_EVENT = SubEventCache(
     id=UUID("00000000-0000-4000-8000-000000000104"),
     name="Reception",
     position=1,
 )
+
+
+class NoFaceEngine:
+    model = ACCEPTED_FACE_MODEL_CONTRACT.model
+    runtime_versions = {"synthetic": "1"}
+
+    def detect_and_embed(self, image_bytes: bytes):
+        assert image_bytes
+        return ()
 
 
 class MemoryTokenStore:
@@ -88,6 +98,8 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
             "state": "uploading",
             "storage_limit_bytes": 25_000_000_000,
             "processing_profile_id": "pilot-profile-v1",
+            "face_model_id": "opencv-yunet-2023mar-sface-2021dec",
+            "face_index_ready": False,
             "sub_events": [
                 {
                     "id": str(_SUB_EVENT.id),
@@ -132,6 +144,13 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                     "state": "verified" if state.get("verified") else "reserved",
                     "failure_code": "",
                     "gallery_excluded": False,
+                    "face_analysis": {
+                        "state": state.get("face_state", "pending"),
+                        "attempt_count": state.get("face_attempts", 0),
+                        "failure_code": "",
+                        "detected_face_count": 0,
+                        "usable_face_count": 0,
+                    },
                 }
             ]
             assets.extend(
@@ -152,6 +171,7 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                 200,
                 json={
                     "id": str(batch_id),
+                    "sub_event_id": str(_SUB_EVENT.id),
                     "state": "complete" if state.get("verified") else "reserved",
                     "assets": assets,
                 },
@@ -233,6 +253,24 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                 200,
                 json={"asset_id": str(asset_id), "variant": variant, "state": "verified"},
             )
+        face_path = (
+            f"/api/v1/events/{event_id}/sub-events/{_SUB_EVENT.id}/assets/{asset_id}/face-analysis/"
+        )
+        if path == face_path:
+            body = json.loads(request.content)
+            assert body["status"] == "no_usable_face"
+            state["face_state"] = "no_usable_face"
+            state["face_attempts"] = 1
+            return httpx.Response(
+                200,
+                json={
+                    "state": "no_usable_face",
+                    "attempt_count": 1,
+                    "failure_code": "",
+                    "detected_face_count": 0,
+                    "usable_face_count": 0,
+                },
+            )
         raise AssertionError(f"Unexpected API request: {request.method} {path}")
 
     return handle
@@ -261,6 +299,7 @@ def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_
             transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, state))
         ),
         storage_client=httpx.Client(transport=httpx.MockTransport(storage_handler)),
+        face_engine_factory=NoFaceEngine,
         sleeper=sleeps.append,
         jitter=lambda _start, maximum: maximum,
     )
@@ -333,6 +372,7 @@ def test_one_sync_generates_uploads_and_resumes_both_derivatives(tmp_path: Path)
             transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, state))
         ),
         storage_client=httpx.Client(transport=httpx.MockTransport(storage_handler)),
+        face_engine_factory=NoFaceEngine,
     )
     service.sign_in_photographer(
         "http://localhost:8000", "photographer", "password", "Studio workstation"
@@ -351,8 +391,9 @@ def test_one_sync_generates_uploads_and_resumes_both_derivatives(tmp_path: Path)
         "/thumbnails",
     ]
     assert all(content.startswith(b"\xff\xd8") for _path, content in uploads[1:])
-    assert stages[-1] == ("derivatives", 2, 2)
+    assert stages[-1] == ("face-index", 1, 1)
     assert store.derivatives_complete(batch_id)
+    assert store.face_analysis_complete(batch_id)
     assert not list(store.derivative_cache_directory(batch_id).iterdir())
 
     service.upload(batch_id, transfer_limit=1, on_progress=lambda *_: None)

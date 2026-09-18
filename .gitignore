@@ -25,6 +25,7 @@ staticfiles/
 uploads/
 exports/
 models/
+private_benchmark_media/
 *.onnx
 
 # Desktop packaging and logs.

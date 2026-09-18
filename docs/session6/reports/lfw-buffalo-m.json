@@ -1,0 +1,121 @@
+{
+  "dataset": {
+    "calibration_images": 9525,
+    "holdout_images": 3708,
+    "id": "lfw-deepfunneled-dev-split",
+    "sample_seed": 20260914
+  },
+  "decision": {
+    "go": false,
+    "reasons": [
+      "representative_wedding_benchmark_pending",
+      "dense_group_benchmark_pending",
+      "lfw_matching_gate_failed"
+    ]
+  },
+  "detection": {
+    "detected_faces": 15735,
+    "images_with_multiple_faces": 2059,
+    "images_without_detection": 43,
+    "images_without_usable_face": 3183,
+    "processing_failures": 0,
+    "usable_faces": 10159
+  },
+  "format": "openfotos-face-benchmark-v1",
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) i5-6200U CPU @ 2.30GHz",
+    "logical_cpu_count": 4,
+    "machine": "x86_64",
+    "memory_mib": 7640,
+    "numpy": "2.5.3",
+    "python": "3.12.13",
+    "system": "Linux"
+  },
+  "matching": {
+    "calibration": {
+      "estimated_false_comparisons_per_100000_faces": 9.998,
+      "false_accept_rate": 9.99763e-05,
+      "false_accepts": 2594,
+      "negative_comparisons": 25946162,
+      "positive_pairs": 217637,
+      "positive_pairs_with_two_usable_faces": 143314,
+      "recall": 0.6518331,
+      "true_accepts": 141863
+    },
+    "holdout": {
+      "estimated_false_comparisons_per_100000_faces": 1.836,
+      "false_accept_rate": 1.83646e-05,
+      "false_accepts": 73,
+      "negative_comparisons": 3975038,
+      "positive_pairs": 24620,
+      "positive_pairs_with_two_usable_faces": 16687,
+      "recall": 0.67457352,
+      "true_accepts": 16608
+    },
+    "holdout_gate_passed": false,
+    "limitation": "LFW is aligned and is not representative of dense wedding photos."
+  },
+  "model": {
+    "artifacts": [
+      {
+        "filename": "det_2.5g.onnx",
+        "license_id": "insightface-public-model",
+        "sha256": "041f73f47371333d1d17a6fee6c8ab4e6aecabefe398ff32cca4e2d5eaee0af9"
+      },
+      {
+        "filename": "w600k_r50.onnx",
+        "license_id": "insightface-public-model",
+        "sha256": "4c06341c33c2ca1f86781dab0e829f88ad5b64be9fba56e56bc9ebdefc619e43"
+      }
+    ],
+    "detector": "scrfd-2.5gf",
+    "detector_input_size": [
+      640,
+      640
+    ],
+    "distance_metric": "cosine",
+    "embedding_dimensions": 512,
+    "id": "insightface-buffalo_m-v0.7",
+    "licensing": {
+      "basis": "Private OpenFotos grant confirmed by the product owner on 2026-09-14",
+      "permission_evidence_private": true,
+      "status": "written-use-and-distribution-permission-confirmed"
+    },
+    "normalization": "l2",
+    "normalization_tolerance": 0.001,
+    "preprocessing": "exif-srgb-insightface-arcface-v1",
+    "recognizer": "w600k-r50",
+    "recommended_maximum_distance": 0.70582706,
+    "runtime_versions": {
+      "insightface": "0.7.3",
+      "onnxruntime": "1.29.0"
+    }
+  },
+  "performance": {
+    "full_evaluation_elapsed_seconds": 4902.796,
+    "full_evaluation_images": 13233,
+    "images_per_second": 2.6892,
+    "memory_gate_passed": true,
+    "peak_rss_mib": 695.9,
+    "preliminary_time_gate_passed": true,
+    "projected_10000_one_face_hours": 1.033,
+    "runtime_threads": 4,
+    "sample_elapsed_seconds": 371.858,
+    "sample_images": 1000
+  },
+  "quality": {
+    "detector_confidence_threshold": 0.8,
+    "maximum_faces_per_photo": 100,
+    "minimum_face_size_pixels": 40
+  },
+  "redacted": true,
+  "status": "preliminary",
+  "targets": {
+    "maximum_event_hours": 12.0,
+    "maximum_false_accept_rate": 0.0001,
+    "maximum_rss_mib": 2048.0,
+    "minimum_holdout_recall": 0.98,
+    "photos_per_event": 10000,
+    "usable_faces_per_event": 100000
+  }
+}

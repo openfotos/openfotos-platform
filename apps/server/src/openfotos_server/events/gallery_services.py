@@ -15,8 +15,17 @@ from openfotos_storage.backend import ObjectStoreError, S3ObjectStore
 from .audit import record_audit
 from .derivative_services import refresh_derivative_readiness
 from .event_lifecycle import state_for_derivative_readiness
+from .face_services import refresh_face_index_readiness
 from .ingestion_services import IngestionError
-from .models import Asset, AssetObject, AuditAction, AuditResult, Event, SubEvent
+from .models import (
+    Asset,
+    AssetObject,
+    AuditAction,
+    AuditResult,
+    Event,
+    FaceAnalysisState,
+    SubEvent,
+)
 
 GALLERY_PAGE_SIZE = 48
 
@@ -137,14 +146,30 @@ def exclude_from_gallery(
             asset=asset,
             variant__in=(AssetVariant.PREVIEW.value, AssetVariant.THUMBNAIL.value),
         )
-        has_reported_failure = (
+        derivative_failed = (
             bool(asset.derivative_failure_code)
             or derivatives.filter(state=UploadObjectState.FAILED.value).exists()
         )
-        if asset.derivative_attempt_count < 5 or not has_reported_failure:
+        face_failed = hasattr(asset, "face_analysis") and asset.face_analysis.state in {
+            FaceAnalysisState.FAILED,
+            FaceAnalysisState.CONFLICT,
+        }
+        failure_exhausted = (derivative_failed and asset.derivative_attempt_count >= 5) or (
+            face_failed and asset.face_analysis.attempt_count >= 5
+        )
+        if not failure_exhausted:
+            if derivative_failed:
+                code = "derivative_retries_remaining"
+                message = "Retry gallery processing five times before excluding this photo."
+            elif face_failed:
+                code = "face_analysis_retries_remaining"
+                message = "Retry face analysis five times before excluding this photo."
+            else:
+                code = "processing_retries_remaining"
+                message = "Only a photo with exhausted processing retries can be excluded."
             raise IngestionError(
-                "derivative_retries_remaining",
-                "Retry derivative processing five times before excluding this photo.",
+                code,
+                message,
             )
         asset.gallery_excluded_at = timezone.now()
         asset.gallery_exclusion_reason = normalized_reason
@@ -159,7 +184,14 @@ def exclude_from_gallery(
             )
         )
         locked_event.derivatives_ready_generation = None
-        locked_event.save(update_fields=("derivatives_ready_generation", "updated_at"))
+        locked_event.face_index_ready_generation = None
+        locked_event.save(
+            update_fields=(
+                "derivatives_ready_generation",
+                "face_index_ready_generation",
+                "updated_at",
+            )
+        )
     record_audit(
         photographer=event.photographer,
         event=event,
@@ -170,6 +202,7 @@ def exclude_from_gallery(
         metadata={"asset_id": str(asset.id), "reason": normalized_reason},
     )
     refresh_derivative_readiness(event.id)
+    refresh_face_index_readiness(event.id)
     return asset
 
 
@@ -202,10 +235,18 @@ def restore_to_gallery(*, event: Event, asset_id: UUID, actor, request=None) -> 
             )
         )
         locked_event.derivatives_ready_generation = None
+        locked_event.face_index_ready_generation = None
         locked_event.state = state_for_derivative_readiness(
             EventState(locked_event.state), ready=False
         ).value
-        locked_event.save(update_fields=("derivatives_ready_generation", "state", "updated_at"))
+        locked_event.save(
+            update_fields=(
+                "derivatives_ready_generation",
+                "face_index_ready_generation",
+                "state",
+                "updated_at",
+            )
+        )
     record_audit(
         photographer=event.photographer,
         event=event,
@@ -216,6 +257,7 @@ def restore_to_gallery(*, event: Event, asset_id: UUID, actor, request=None) -> 
         metadata={"asset_id": str(asset.id)},
     )
     refresh_derivative_readiness(event.id)
+    refresh_face_index_readiness(event.id)
     return asset
 
 

@@ -1,0 +1,122 @@
+{
+  "dataset": {
+    "consent_attested": true,
+    "eligible_images": 1782,
+    "evaluated_bytes": 31508505301,
+    "evaluated_images": 1782,
+    "id": "consented-representative-wedding",
+    "photo_count_gate_passed": true,
+    "sample_seed": 20260914
+  },
+  "decision": {
+    "go": true,
+    "reasons": []
+  },
+  "detection": {
+    "dense_group_coverage_gate_passed": true,
+    "detected_faces": 8558,
+    "faces_below_confidence": 1954,
+    "faces_below_minimum_size": 0,
+    "images_with_at_least_10_usable_faces": 119,
+    "images_with_multiple_faces": 1302,
+    "images_without_detection": 157,
+    "images_without_usable_face": 186,
+    "maximum_usable_faces_in_one_image": 28,
+    "processing_failures": 0,
+    "usable_faces": 6604,
+    "usable_faces_per_image_histogram": {
+      "0": 186,
+      "1": 361,
+      "10-19": 115,
+      "2-4": 680,
+      "20+": 4,
+      "5-9": 436
+    }
+  },
+  "format": "openfotos-face-benchmark-v1",
+  "hardware": {
+    "cpu": "Intel(R) Core(TM) i5-6200U CPU @ 2.30GHz",
+    "logical_cpu_count": 4,
+    "machine": "x86_64",
+    "memory_mib": 7640,
+    "numpy": "2.5.3",
+    "python": "3.12.13",
+    "system": "Linux"
+  },
+  "limitations": [
+    "The representative dataset has no identity labels, so it cannot measure uniqueness, recall, or false accepts.",
+    "The 100000-face runtime is a regression projection beyond the observed per-image face counts."
+  ],
+  "matching_evidence": {
+    "false_accept_rate": 3.18334e-05,
+    "gate_passed": true,
+    "holdout_recall": 0.98204712,
+    "report_sha256": "1bc26268b9c21808ed38c85593a91e54dc38e9a378c319b4f2162db74fe793a3"
+  },
+  "model": {
+    "artifacts": [
+      {
+        "filename": "face_detection_yunet_2023mar.onnx",
+        "license_id": "mit",
+        "sha256": "8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4"
+      },
+      {
+        "filename": "face_recognition_sface_2021dec.onnx",
+        "license_id": "apache-2.0",
+        "sha256": "0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79"
+      }
+    ],
+    "detector": "yunet-2023mar",
+    "detector_input_size": [
+      640,
+      640
+    ],
+    "distance_metric": "cosine",
+    "embedding_dimensions": 128,
+    "id": "opencv-yunet-2023mar-sface-2021dec",
+    "licensing": {
+      "basis": "YuNet MIT and SFace Apache-2.0 model-directory licences",
+      "permission_evidence_private": false,
+      "status": "redistributable"
+    },
+    "normalization": "l2",
+    "normalization_tolerance": 0.001,
+    "preprocessing": "exif-srgb-letterbox-opencv-sface-v1",
+    "recognizer": "sface-2021dec",
+    "recommended_maximum_distance": 0.55514365,
+    "runtime_versions": {
+      "opencv": "5.0.0"
+    }
+  },
+  "performance": {
+    "elapsed_seconds": 3255.545,
+    "evaluated_images": 1782,
+    "event_projection_gate_passed": true,
+    "images_per_second": 0.5474,
+    "memory_gate_passed": true,
+    "peak_rss_mib": 797.8,
+    "projected_10000_photos_100000_usable_faces_hours": 6.022,
+    "projected_detected_faces_for_100000_usable_faces": 129588,
+    "runtime_model_observed_maximum_detected_faces": 67,
+    "runtime_model_seconds_per_detected_face": 0.041829,
+    "runtime_model_seconds_per_photo": 1.625968,
+    "runtime_threads": 4
+  },
+  "quality": {
+    "detector_confidence_threshold": 0.8,
+    "maximum_faces_per_photo": 100,
+    "minimum_face_size_pixels": 40
+  },
+  "redacted": true,
+  "status": "preliminary",
+  "targets": {
+    "dense_group_minimum_usable_faces": 10,
+    "maximum_event_hours": 12.0,
+    "maximum_representative_photos": 1000,
+    "maximum_rss_mib": 2048.0,
+    "minimum_dense_group_photos": 10,
+    "minimum_representative_photos": 500,
+    "photos_per_event": 10000,
+    "usable_faces_per_event": 100000
+  }
+}

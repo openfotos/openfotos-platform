@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QFileDialog,
     QFormLayout,
     QFrame,
@@ -51,12 +53,14 @@ from openfotos_contracts import (
 from .branding import WatermarkCompositionError, compose_watermark_mark
 from .derivatives import DerivativeError, RenderPolicy, render_for_review
 from .diagnostics import RedactedDiagnosticExporter
+from .face_models import FaceModelSetupError, FaceModelStore
 from .ingestion import (
     BatchState,
     CheckpointStore,
     EventCache,
     InventoryScanner,
     InventoryStatus,
+    LocalFaceState,
     LocalUploadState,
     ScanCancelled,
     ScanProgress,
@@ -70,6 +74,7 @@ if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
 
 SUPPORTED_PROCESSING_PROFILE_ID = "pilot-profile-v1"
+LOGGER = logging.getLogger(__name__)
 
 
 def _asset_icon(name: str) -> QIcon:
@@ -133,6 +138,8 @@ class StatCard(QFrame):
 
 
 class BrandHeader(QFrame):
+    settings_requested = Signal()
+
     def __init__(self, *, demo: bool) -> None:
         super().__init__()
         self.setObjectName("AppHeader")
@@ -157,6 +164,9 @@ class BrandHeader(QFrame):
         mode = QLabel("Demo workspace" if demo else "Secure workspace")
         mode.setObjectName("ModeBadge")
         layout.addWidget(mode)
+        self.settings = _style_button(QPushButton("Face model settings"), kind="ghost")
+        self.settings.clicked.connect(self.settings_requested)
+        layout.addWidget(self.settings)
 
     def set_context(self, text: str) -> None:
         self.context.setText(text)
@@ -238,6 +248,158 @@ class UploadWorker(QObject):
                 self.cancelled.emit()
             else:
                 self.completed.emit()
+
+
+class FaceModelSetupWorker(QObject):
+    progressed = Signal(int, int)
+    completed = Signal()
+    failed = Signal(str)
+
+    def __init__(self, store: FaceModelStore, source_directory: Path | None) -> None:
+        super().__init__()
+        self.store = store
+        self.source_directory = source_directory
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if self.source_directory is None:
+                self.store.download(progress=self.progressed.emit)
+            else:
+                self.store.install_from_directory(self.source_directory)
+        except (FaceModelSetupError, OSError) as exc:
+            self.failed.emit(str(exc))
+        except Exception:
+            LOGGER.exception("Unexpected face-model setup failure")
+            self.failed.emit("Unexpected model setup failure. Check the application log.")
+        else:
+            self.completed.emit()
+
+
+class FaceModelSettingsDialog(QDialog):
+    def __init__(self, store: FaceModelStore, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.store = store
+        self._thread: QThread | None = None
+        self._worker: FaceModelSetupWorker | None = None
+        self.setWindowTitle("Face model settings")
+        self.setModal(True)
+        self.setMinimumWidth(560)
+
+        layout = QVBoxLayout(self)
+        heading = QLabel("Accepted face models")
+        heading.setObjectName("SectionTitle")
+        layout.addWidget(heading)
+        description = QLabel(
+            "Face indexing runs only on this workstation. Model files are hash-verified "
+            "before use and remain in the private application data directory."
+        )
+        description.setWordWrap(True)
+        description.setObjectName("BodyMuted")
+        layout.addWidget(description)
+        self.status = QLabel()
+        self.status.setWordWrap(True)
+        layout.addWidget(self.status)
+        location = QLabel(f"Storage: {store.directory}")
+        location.setWordWrap(True)
+        location.setObjectName("BodyMuted")
+        layout.addWidget(location)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 2)
+        self.progress.setValue(0)
+        layout.addWidget(self.progress)
+
+        buttons = QHBoxLayout()
+        self.locate = _style_button(QPushButton("Locate existing files"), kind="ghost")
+        self.locate.clicked.connect(self._locate)
+        self.download = _style_button(QPushButton("Download / verify"), kind="primary")
+        self.download.clicked.connect(lambda: self._start_setup(None))
+        self.close_button = _style_button(QPushButton("Close"), kind="ghost")
+        self.close_button.clicked.connect(self.accept)
+        buttons.addWidget(self.locate)
+        buttons.addStretch()
+        buttons.addWidget(self.close_button)
+        buttons.addWidget(self.download)
+        layout.addLayout(buttons)
+        self.refresh_status()
+
+    def refresh_status(self) -> None:
+        if self.store.verified_paths() is None:
+            self.status.setText(
+                "Not ready — download the accepted files or select a folder containing them."
+            )
+            self.progress.setValue(0)
+        else:
+            self.status.setText("Ready — both accepted model files passed SHA-256 verification.")
+            self.progress.setValue(2)
+
+    @Slot()
+    def _locate(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "Locate accepted face-model files",
+            str(Path.home()),
+        )
+        if selected:
+            self._start_setup(Path(selected))
+
+    def _start_setup(self, source_directory: Path | None) -> None:
+        if self._thread is not None:
+            return
+        self._set_busy(True)
+        self.progress.setRange(0, 2)
+        self.progress.setValue(0)
+        self.status.setText(
+            "Verifying selected files…" if source_directory else "Downloading and verifying…"
+        )
+        thread = QThread(self)
+        worker = FaceModelSetupWorker(self.store, source_directory)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progressed.connect(self._setup_progressed)
+        worker.completed.connect(self._setup_completed)
+        worker.failed.connect(self._setup_failed)
+        for signal in (worker.completed, worker.failed):
+            signal.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._setup_finished)
+        self._thread = thread
+        self._worker = worker
+        thread.start()
+
+    @Slot()
+    def _setup_completed(self) -> None:
+        self.refresh_status()
+
+    @Slot(int, int)
+    def _setup_progressed(self, completed: int, total: int) -> None:
+        self.progress.setRange(0, max(total, 1))
+        self.progress.setValue(completed)
+
+    @Slot(str)
+    def _setup_failed(self, message: str) -> None:
+        self.status.setText(f"Setup failed — {message}")
+
+    @Slot()
+    def _setup_finished(self) -> None:
+        if self._thread is not None:
+            self._thread.deleteLater()
+        self._thread = None
+        self._worker = None
+        self._set_busy(False)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.locate.setEnabled(not busy)
+        self.download.setEnabled(not busy)
+        self.close_button.setEnabled(not busy)
+
+    @property
+    def is_busy(self) -> bool:
+        return self._thread is not None
+
+    def reject(self) -> None:
+        if not self.is_busy:
+            super().reject()
 
 
 class LoginPage(QWidget):
@@ -1127,10 +1289,10 @@ class ApprovedPage(QWidget):
         self.message.setWordWrap(True)
         copy.addWidget(self.message)
         hero_layout.addLayout(copy, 1)
-        ready = QLabel("READY")
-        ready.setObjectName("StatusBadge")
-        ready.setProperty("status", "ready")
-        hero_layout.addWidget(ready, 0, Qt.AlignmentFlag.AlignTop)
+        self.ready_status = QLabel("READY")
+        self.ready_status.setObjectName("StatusBadge")
+        self.ready_status.setProperty("status", "ready")
+        hero_layout.addWidget(self.ready_status, 0, Qt.AlignmentFlag.AlignTop)
         layout.addWidget(hero)
 
         stages = QHBoxLayout()
@@ -1185,6 +1347,11 @@ class ApprovedPage(QWidget):
         self.derivative_progress.setRange(0, 1)
         self.derivative_progress.setValue(0)
         transfer_layout.addWidget(self.derivative_progress)
+        transfer_layout.addWidget(QLabel("Face index"))
+        self.face_progress = QProgressBar()
+        self.face_progress.setRange(0, 1)
+        self.face_progress.setValue(0)
+        transfer_layout.addWidget(self.face_progress)
         transfer_buttons = QHBoxLayout()
         self.upload = _style_button(QPushButton("Process and upload contribution"), kind="primary")
         self.upload.clicked.connect(lambda: self.upload_requested.emit(self.transfer_limit.value()))
@@ -1250,9 +1417,23 @@ class ApprovedPage(QWidget):
         excluded_count: int = 0,
         derivative_failure_count: int = 0,
         derivatives_complete: bool = False,
+        face_failure_count: int = 0,
+        face_analysis_complete: bool = False,
+        derivative_completed_count: int = 0,
+        derivative_total_count: int = 0,
+        face_completed_count: int = 0,
+        face_total_count: int = 0,
     ) -> None:
         originals_complete = state is BatchState.COMPLETE
-        complete = originals_complete and derivatives_complete
+        complete = originals_complete and derivatives_complete and face_analysis_complete
+        self.derivative_progress.setRange(0, max(derivative_total_count, 1))
+        self.derivative_progress.setValue(derivative_completed_count)
+        self.face_progress.setRange(0, max(face_total_count, 1))
+        self.face_progress.setValue(face_completed_count)
+        self.ready_status.setText("READY" if complete else "PROCESSING")
+        self.ready_status.setProperty("status", "ready" if complete else "collecting")
+        self.ready_status.style().unpolish(self.ready_status)
+        self.ready_status.style().polish(self.ready_status)
         if complete:
             if excluded_count:
                 self.message.setText(
@@ -1262,10 +1443,23 @@ class ApprovedPage(QWidget):
                 self.cloud_stage_detail.setText("Verified originals stored; exclusions recorded")
             else:
                 self.message.setText(
-                    f"Batch {batch_id} and its gallery media are verified in private object "
-                    "storage. New photos belong in a new contribution."
+                    f"Batch {batch_id}, its gallery media, and its face index are complete. "
+                    "New photos belong in a new contribution."
                 )
-                self.cloud_stage_detail.setText("Originals and gallery media verified")
+                self.cloud_stage_detail.setText("Originals, gallery media, and face index verified")
+        elif originals_complete and derivatives_complete:
+            if face_failure_count:
+                self.message.setText(
+                    f"Batch {batch_id} has verified gallery media, but {face_failure_count} "
+                    "photo(s) need face-analysis retry or photographer review."
+                )
+                self.cloud_stage_detail.setText("Face-analysis failure")
+            else:
+                self.message.setText(
+                    f"Batch {batch_id} has verified gallery media. Face indexing is ready "
+                    "to resume on this workstation."
+                )
+                self.cloud_stage_detail.setText("Face indexing pending")
         elif originals_complete:
             if derivative_failure_count:
                 self.message.setText(
@@ -1312,6 +1506,11 @@ class ApprovedPage(QWidget):
         if stage == AssetVariant.ORIGINAL.value:
             self.upload_progressed(completed, total)
             return
+        if stage == "face-index":
+            self.face_progress.setRange(0, max(total, 1))
+            self.face_progress.setValue(completed)
+            self.cloud_stage_detail.setText(f"{completed} of {total} photos face-indexed")
+            return
         self.derivative_progress.setRange(0, max(total, 1))
         self.derivative_progress.setValue(completed)
         self.cloud_stage_detail.setText(f"{completed} of {total} gallery derivatives verified")
@@ -1331,6 +1530,7 @@ class MainWindow(QMainWindow):
         store: CheckpointStore,
         gateway: DesktopGateway,
         demo_event: EventCache | None = None,
+        face_model_store: FaceModelStore | None = None,
     ) -> None:
         super().__init__()
         application = QApplication.instance()
@@ -1338,6 +1538,8 @@ class MainWindow(QMainWindow):
             apply_corporate_theme(application)
         self.store = store
         self.gateway = gateway
+        self.face_model_store = face_model_store
+        self.model_settings: FaceModelSettingsDialog | None = None
         self.current_event: EventCache | None = None
         self.current_sub_event: SubEventCache | None = None
         self.current_batch_id: UUID | None = None
@@ -1395,6 +1597,7 @@ class MainWindow(QMainWindow):
             self.stack.setCurrentWidget(self.events)
 
     def _connect_actions(self) -> None:
+        self.header.settings_requested.connect(self._show_face_model_settings)
         self.login.photographer_requested.connect(self._photographer_login)
         self.login.resume_requested.connect(self._resume_session)
         self.events.selected.connect(self._open_event)
@@ -1421,6 +1624,18 @@ class MainWindow(QMainWindow):
         self.approved.pause_requested.connect(self._pause_upload)
         self.approved.intake_requested.connect(self._toggle_intake)
         self.approved.finalize_requested.connect(self._finalize_ingestion)
+
+    @Slot()
+    def _show_face_model_settings(self) -> None:
+        if self.model_settings is None:
+            self.model_settings = FaceModelSettingsDialog(
+                self.face_model_store or FaceModelStore(),
+                self,
+            )
+        self.model_settings.refresh_status()
+        self.model_settings.show()
+        self.model_settings.raise_()
+        self.model_settings.activateWindow()
 
     @Slot(str, str, str, str)
     def _photographer_login(
@@ -1682,6 +1897,17 @@ class MainWindow(QMainWindow):
             for checkpoint in derivative_checkpoints
             if checkpoint.state is LocalUploadState.FAILED
         }
+        face_checkpoints = self.store.list_face_analysis_checkpoints(batch.id)
+        excluded_items.update(
+            checkpoint.item_id
+            for checkpoint in face_checkpoints
+            if checkpoint.state is LocalFaceState.EXCLUDED
+        )
+        failed_face_items = {
+            checkpoint.item_id
+            for checkpoint in face_checkpoints
+            if checkpoint.state in {LocalFaceState.FAILED, LocalFaceState.CONFLICT}
+        }
         self.approved.show_batch(
             batch.id,
             state=batch.state,
@@ -1689,6 +1915,23 @@ class MainWindow(QMainWindow):
             excluded_count=len(excluded_items),
             derivative_failure_count=len(failed_derivative_items),
             derivatives_complete=self.store.derivatives_complete(batch.id),
+            face_failure_count=len(failed_face_items),
+            face_analysis_complete=self.store.face_analysis_complete(batch.id),
+            derivative_completed_count=sum(
+                checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                for checkpoint in derivative_checkpoints
+            ),
+            derivative_total_count=len(derivative_checkpoints),
+            face_completed_count=sum(
+                checkpoint.state
+                in {
+                    LocalFaceState.INDEXED,
+                    LocalFaceState.NO_USABLE_FACE,
+                    LocalFaceState.EXCLUDED,
+                }
+                for checkpoint in face_checkpoints
+            ),
+            face_total_count=len(face_checkpoints),
         )
         self.stack.setCurrentWidget(self.approved)
 
@@ -1829,6 +2072,12 @@ class MainWindow(QMainWindow):
         QMessageBox.critical(self, "OpenFotos", message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        if self.model_settings is not None and self.model_settings.is_busy:
+            self.model_settings.show()
+            self.model_settings.raise_()
+            self.model_settings.activateWindow()
+            event.ignore()
+            return
         if self.scan_stop is not None:
             self.scan_stop.set()
         if self.scan_thread is not None and not self.scan_thread.wait(5_000):

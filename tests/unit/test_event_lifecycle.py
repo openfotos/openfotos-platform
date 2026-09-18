@@ -22,6 +22,7 @@ def _facts(**changes) -> TransitionFacts:
         "pin_configured": True,
         "expiry_is_future": True,
         "derivatives_ready_generation": 2,
+        "face_index_ready_generation": 2,
         "preview_policy_confirmed": True,
         "has_active_sub_event": True,
     }
@@ -70,6 +71,13 @@ def test_manual_publication_requires_all_current_generation_facts() -> None:
             EventState.REVIEW,
             EventState.PUBLISHED,
             facts=_facts(derivatives_ready_generation=1),
+        )
+
+    with pytest.raises(LifecycleViolation, match="face analysis"):
+        state_for_manual_transition(
+            EventState.REVIEW,
+            EventState.PUBLISHED,
+            facts=_facts(face_index_ready_generation=1),
         )
 
 

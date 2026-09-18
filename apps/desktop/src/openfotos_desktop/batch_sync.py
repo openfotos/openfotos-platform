@@ -12,14 +12,24 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 import httpx
 
 from openfotos_contracts import DERIVATIVE_VARIANTS, AssetVariant
+from openfotos_vision import (
+    ACCEPTED_FACE_MODEL_CONTRACT,
+    ACCEPTED_SFACE_DETECTOR_FLOOR,
+    FaceAnalysisDocumentError,
+    FaceEngine,
+    FaceEngineError,
+    build_face_analysis_document,
+)
 
 from .derivatives import DerivativeError, DerivativeRenderer, RenderPolicy
 from .errors import DesktopApiError, SourceChangedError
+from .face_models import FaceModelSetupError, create_accepted_face_engine
 from .ingestion import (
     BatchState,
     CheckpointStore,
     EventCache,
     InventoryStatus,
+    LocalFaceState,
     LocalUploadState,
     PreviewPolicyCache,
 )
@@ -46,6 +56,25 @@ _FATAL_DERIVATIVE_CODES = frozenset(
         "watermark_checksum_mismatch",
     }
 )
+_FATAL_FACE_CODES = frozenset(
+    {
+        "asset_not_found",
+        "device_revoked",
+        "event_not_found",
+        "event_not_processing",
+        "face_analysis_attempts_exhausted",
+        "face_analysis_conflict",
+        "idempotency_conflict",
+        "installation_revoked",
+        "invalid_access_token",
+        "invalid_server_response",
+        "model_contract_mismatch",
+        "original_not_verified",
+        "session_unavailable",
+        "source_checksum_mismatch",
+        "sub_event_archived",
+    }
+)
 
 
 class BatchSyncService:
@@ -58,6 +87,7 @@ class BatchSyncService:
         objects: ObjectTransferClient,
         sleeper: Callable[[float], None],
         jitter: Callable[[float, float], float],
+        face_engine_factory: Callable[[], FaceEngine] = create_accepted_face_engine,
     ) -> None:
         self.store = store
         self._request = request
@@ -65,6 +95,7 @@ class BatchSyncService:
         self._objects = objects
         self._sleep = sleeper
         self._jitter = jitter
+        self._face_engine_factory = face_engine_factory
 
     def upload(
         self,
@@ -140,6 +171,18 @@ class BatchSyncService:
         self.store.ensure_derivative_checkpoints(batch.id)
         self._sync_batch(event.id, batch.id)
         self._process_derivatives(
+            event=event,
+            batch_id=batch.id,
+            items=items,
+            on_stage=on_stage,
+            is_cancelled=is_cancelled,
+        )
+        if is_cancelled and is_cancelled():
+            return
+        event = self._refresh_cached_event(event.id)
+        self.store.ensure_face_analysis_checkpoints(batch.id)
+        self._sync_batch(event.id, batch.id)
+        self._process_face_index(
             event=event,
             batch_id=batch.id,
             items=items,
@@ -580,6 +623,193 @@ class BatchSyncService:
             )
         return response.content
 
+    def _process_face_index(
+        self,
+        *,
+        event: EventCache,
+        batch_id: UUID,
+        items: dict[UUID, object],
+        on_stage,
+        is_cancelled,
+    ) -> None:
+        if event.face_model_id != ACCEPTED_FACE_MODEL_CONTRACT.model.id:
+            raise DesktopApiError(
+                "face_model_mismatch",
+                "This desktop version cannot process the event's face model.",
+            )
+        try:
+            engine = self._face_engine_factory()
+        except FaceModelSetupError as exc:
+            raise DesktopApiError(exc.code, str(exc)) from exc
+        cache_directory = self.store.derivative_cache_directory(batch_id)
+        try:
+            for item in sorted(items.values(), key=lambda value: str(value.id)):
+                if is_cancelled and is_cancelled():
+                    return
+                while True:
+                    checkpoint = self.store.get_face_analysis_checkpoint(item.id)
+                    if checkpoint.state in {
+                        LocalFaceState.INDEXED,
+                        LocalFaceState.NO_USABLE_FACE,
+                        LocalFaceState.EXCLUDED,
+                    }:
+                        self._report_face_progress(batch_id, on_stage)
+                        break
+                    if checkpoint.state is LocalFaceState.CONFLICT:
+                        raise DesktopApiError(
+                            "face_analysis_conflict",
+                            "A photo needs an explicit face-analysis reset in the dashboard.",
+                        )
+                    if checkpoint.attempt_count >= _MAX_UPLOAD_ATTEMPTS:
+                        raise DesktopApiError(
+                            "face_analysis_attempts_exhausted",
+                            "A photo failed face analysis five times and needs review.",
+                        )
+                    try:
+                        self._process_asset_faces(
+                            event=event,
+                            batch_id=batch_id,
+                            item=item,
+                            engine=engine,
+                            cache_directory=cache_directory,
+                        )
+                    except (
+                        FaceAnalysisDocumentError,
+                        FaceEngineError,
+                        DesktopApiError,
+                        OSError,
+                    ) as exc:
+                        code = getattr(exc, "code", "face_engine_failed")
+                        conflict = code == "face_analysis_conflict"
+                        self.store.mark_face_analysis_failed(
+                            item.id,
+                            code,
+                            conflict=conflict,
+                        )
+                        if isinstance(exc, DesktopApiError) and code in _FATAL_FACE_CODES:
+                            raise
+                        self._report_face_failure(
+                            event.id,
+                            self.store.get_batch(batch_id).sub_event_id,
+                            item.id,
+                            code,
+                            attempt=self.store.get_face_analysis_checkpoint(item.id).attempt_count,
+                        )
+                        checkpoint = self.store.get_face_analysis_checkpoint(item.id)
+                        if checkpoint.attempt_count >= _MAX_UPLOAD_ATTEMPTS:
+                            raise DesktopApiError(
+                                "face_analysis_attempts_exhausted",
+                                "A photo failed face analysis five times and needs review.",
+                            ) from exc
+                        if isinstance(exc, DesktopApiError) and exc.retryable:
+                            self._face_backoff(checkpoint.attempt_count)
+                        continue
+                    self._sync_batch(event.id, batch_id)
+                    self._report_face_progress(batch_id, on_stage)
+                    checkpoint = self.store.get_face_analysis_checkpoint(item.id)
+                    if checkpoint.state in {
+                        LocalFaceState.INDEXED,
+                        LocalFaceState.NO_USABLE_FACE,
+                    }:
+                        break
+            if not self.store.face_analysis_complete(batch_id):
+                raise DesktopApiError(
+                    "face_analysis_state_unavailable",
+                    "Face indexing stopped before every photo reached a terminal state.",
+                    retryable=True,
+                )
+        finally:
+            self.store.cleanup_derivative_cache(batch_id)
+
+    def _process_asset_faces(
+        self,
+        *,
+        event: EventCache,
+        batch_id: UUID,
+        item,
+        engine: FaceEngine,
+        cache_directory: Path,
+    ) -> None:
+        self.store.mark_face_analysis_started(item.id)
+        source_path, downloaded = self._derivative_source(event.id, item, cache_directory)
+        try:
+            detected = tuple(engine.detect_and_embed(source_path.read_bytes()))
+            document = build_face_analysis_document(
+                asset_id=item.id,
+                source_sha256=item.sha256,
+                detected_faces=detected,
+                contract=ACCEPTED_FACE_MODEL_CONTRACT,
+                detector_floor=ACCEPTED_SFACE_DETECTOR_FLOOR,
+            )
+            sub_event_id = self.store.get_batch(batch_id).sub_event_id
+            response = self._request(
+                "POST",
+                f"/api/v1/events/{event.id}/sub-events/{sub_event_id}/assets/"
+                f"{item.id}/face-analysis/",
+                json=document.as_dict(),
+                idempotency_key=operation_key(item.id, f"face-analysis-{document.document_sha256}"),
+            )
+            try:
+                terminal = LocalFaceState(response["state"])
+                detected_count = int(response["detected_face_count"])
+                usable_count = int(response["usable_face_count"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise DesktopApiError(
+                    "invalid_server_response",
+                    "The server returned an invalid face-analysis state.",
+                ) from exc
+            if terminal not in {LocalFaceState.INDEXED, LocalFaceState.NO_USABLE_FACE}:
+                raise DesktopApiError(
+                    "invalid_server_response",
+                    "The server returned a nonterminal face-analysis state.",
+                )
+            self.store.mark_face_analysis_complete(
+                item.id,
+                state=terminal,
+                detected_face_count=detected_count,
+                usable_face_count=usable_count,
+            )
+        finally:
+            if downloaded:
+                source_path.unlink(missing_ok=True)
+
+    def _report_face_failure(
+        self,
+        event_id: UUID,
+        sub_event_id: UUID,
+        item_id: UUID,
+        code: str,
+        *,
+        attempt: int,
+    ) -> None:
+        stable_code = code if re.fullmatch(r"[a-z0-9_]{1,64}", code) else "face_engine_failed"
+        self._request(
+            "POST",
+            f"/api/v1/events/{event_id}/sub-events/{sub_event_id}/assets/"
+            f"{item_id}/face-analysis-failure/",
+            json={"code": stable_code},
+            idempotency_key=operation_key(item_id, f"face-analysis-failure-{attempt}"),
+        )
+
+    def _face_backoff(self, attempts: int) -> None:
+        maximum = min(16.0, 2.0 ** max(0, attempts - 1))
+        self._sleep(self._jitter(0.0, maximum))
+
+    def _report_face_progress(self, batch_id: UUID, on_stage) -> None:
+        if not on_stage:
+            return
+        checkpoints = self.store.list_face_analysis_checkpoints(batch_id)
+        complete = sum(
+            checkpoint.state
+            in {
+                LocalFaceState.INDEXED,
+                LocalFaceState.NO_USABLE_FACE,
+                LocalFaceState.EXCLUDED,
+            }
+            for checkpoint in checkpoints
+        )
+        on_stage("face-index", complete, len(checkpoints))
+
     def _item_derivative_checkpoints(self, item_id: UUID) -> dict[str, object]:
         return {
             variant.value: self.store.get_derivative_checkpoint(item_id, variant)
@@ -630,6 +860,8 @@ class BatchSyncService:
 
     def _sync_batch(self, event_id: UUID, batch_id: UUID) -> None:
         response = self._request("GET", f"/api/v1/events/{event_id}/batches/{batch_id}/")
+        if response.get("sub_event_id"):
+            self.store.update_batch_sub_event(batch_id, UUID(response["sub_event_id"]))
         local = {item.item_id: item for item in self.store.list_upload_checkpoints(batch_id)}
         for item in response.get("assets", []):
             item_id = UUID(item["asset_id"])
@@ -637,6 +869,16 @@ class BatchSyncService:
             if item_id not in local:
                 continue
             if variant == AssetVariant.ORIGINAL.value:
+                face_analysis = item.get("face_analysis")
+                if face_analysis is not None:
+                    self.store.sync_face_analysis(
+                        item_id,
+                        state=LocalFaceState(face_analysis["state"]),
+                        attempt_count=int(face_analysis["attempt_count"]),
+                        error_code=str(face_analysis["failure_code"]),
+                        detected_face_count=int(face_analysis["detected_face_count"]),
+                        usable_face_count=int(face_analysis["usable_face_count"]),
+                    )
                 if (
                     item["state"] == "verified"
                     and local[item_id].state is not LocalUploadState.VERIFIED
@@ -649,10 +891,14 @@ class BatchSyncService:
                 elif item["state"] == "excluded":
                     self.store.mark_upload_excluded(item_id)
                     self.store.mark_derivatives_excluded(item_id)
+                if item.get("gallery_excluded"):
+                    self.store.mark_derivatives_excluded(item_id)
+                    self.store.mark_face_analysis_excluded(item_id)
             elif variant in {value.value for value in DERIVATIVE_VARIANTS}:
                 derivative_variant = AssetVariant(variant)
                 if item.get("gallery_excluded"):
                     self.store.mark_derivatives_excluded(item_id)
+                    self.store.mark_face_analysis_excluded(item_id)
                 elif item["state"] == "verified":
                     self.store.mark_derivative_verified(item_id, derivative_variant)
                 elif item["state"] == "failed":

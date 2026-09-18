@@ -51,6 +51,7 @@ def transition_event(
                 pin_configured=bool(event.pin_hash),
                 expiry_is_future=event.expires_at is not None and event.expires_at > timezone.now(),
                 derivatives_ready_generation=event.derivatives_ready_generation,
+                face_index_ready_generation=event.face_index_ready_generation,
                 preview_policy_confirmed=(
                     hasattr(event, "preview_policy") if target is EventState.PUBLISHED else False
                 ),

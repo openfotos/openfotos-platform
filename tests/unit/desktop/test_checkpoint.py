@@ -11,6 +11,7 @@ from openfotos_desktop.ingestion import (
     CheckpointStore,
     EventCache,
     InventoryScanner,
+    LocalFaceState,
     LocalUploadState,
     PreviewPolicyCache,
     SubEventCache,
@@ -45,6 +46,9 @@ def test_session4_checkpoint_migrates_event_metadata_to_sub_event_schema(tmp_pat
         connection.execute("ALTER TABLE events ADD COLUMN role TEXT NOT NULL DEFAULT 'primary'")
         connection.execute("ALTER TABLE batches RENAME COLUMN installation_id TO device_id")
         connection.execute("ALTER TABLE batches DROP COLUMN sub_event_id")
+        connection.execute("ALTER TABLE events DROP COLUMN face_model_id")
+        connection.execute("ALTER TABLE events DROP COLUMN face_index_ready")
+        connection.execute("DROP TABLE face_analysis_checkpoints")
         connection.execute("DROP TABLE sub_events")
         connection.execute("PRAGMA user_version = 4")
 
@@ -118,6 +122,13 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
         assert len(store.list_derivative_checkpoints(batch_id)) == 2
         store.mark_derivative_started(item_id, "previews")
         store.mark_derivative_verified(item_id, AssetVariant.PREVIEW)
+        store.mark_face_analysis_started(item_id)
+        store.mark_face_analysis_complete(
+            item_id,
+            state=LocalFaceState.NO_USABLE_FACE,
+            detected_face_count=0,
+            usable_face_count=0,
+        )
 
     with CheckpointStore(database) as reopened:
         assert reopened.get_event(event_id).preview_policy == policy
@@ -128,6 +139,17 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
         assert preview.state is LocalUploadState.VERIFIED
         assert preview.attempt_count == 1
         assert thumbnail.state is LocalUploadState.PENDING
+        face = reopened.get_face_analysis_checkpoint(item_id)
+        assert face.state is LocalFaceState.NO_USABLE_FACE
+        assert face.attempt_count == 1
+        assert reopened.face_analysis_complete(batch_id)
+
+    with sqlite3.connect(database) as connection:
+        face_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(face_analysis_checkpoints)")
+        }
+    assert "vector" not in face_columns
+    assert "embedding" not in face_columns
 
 
 def test_photographer_exclusion_is_a_terminal_local_upload_state(tmp_path: Path) -> None:

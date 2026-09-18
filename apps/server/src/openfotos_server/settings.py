@@ -68,8 +68,8 @@ TEMPLATES = [
 WSGI_APPLICATION = "openfotos_server.wsgi.application"
 ASGI_APPLICATION = "openfotos_server.asgi.application"
 
-# SQLite keeps the skeleton immediately runnable; deployed environments provide PostgreSQL through
-# DATABASE_URL. Session 2 adds the application data model and PostgreSQL-specific migrations.
+# SQLite keeps local checks immediately runnable. Production uses PostgreSQL/pgvector through
+# DATABASE_URL for the face-search query boundary.
 DATABASES = {
     "default": dj_database_url.config(
         default=f"sqlite:///{BASE_DIR / 'openfotos.sqlite3'}",

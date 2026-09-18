@@ -26,6 +26,7 @@ class TransitionFacts:
     pin_configured: bool
     expiry_is_future: bool
     derivatives_ready_generation: int | None
+    face_index_ready_generation: int | None
     preview_policy_confirmed: bool
     has_active_sub_event: bool
 
@@ -114,6 +115,11 @@ def state_for_manual_transition(
             raise LifecycleViolation(
                 "derivatives_required",
                 "Complete private gallery derivatives before publication.",
+            )
+        if facts.face_index_ready_generation != facts.intake_generation:
+            raise LifecycleViolation(
+                "face_index_required",
+                "Complete face analysis for every visible photo before publication.",
             )
         if not facts.preview_policy_confirmed:
             raise LifecycleViolation(

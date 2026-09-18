@@ -9,10 +9,11 @@ from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from openfotos_contracts import EventState
+from openfotos_contracts import AssetVariant, EventState, UploadObjectState
 
 from .audit import record_audit
 from .cookies import delete_visitor_cookie, has_valid_visitor_cookie, set_visitor_cookie
+from .face_services import reset_face_analysis
 from .forms import (
     BatchReassignmentForm,
     EventPinForm,
@@ -35,6 +36,8 @@ from .models import (
     AuditResult,
     ContributionBatch,
     Event,
+    FaceAnalysis,
+    FaceAnalysisState,
     PhotographerMembership,
     PreviewPolicy,
     RateLimitPurpose,
@@ -245,6 +248,29 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
         derivative_failure_code__gt="",
         gallery_excluded_at__isnull=True,
     ).order_by("original_filename", "id")
+    visible_face_assets = Asset.objects.filter(
+        batch__installation__event=event,
+        batch__sub_event__is_archived=False,
+        variant_objects__variant=AssetVariant.ORIGINAL.value,
+        variant_objects__state=UploadObjectState.VERIFIED.value,
+        gallery_excluded_at__isnull=True,
+    ).distinct()
+    face_analyses = FaceAnalysis.objects.filter(asset__in=visible_face_assets)
+    face_total_count = visible_face_assets.count()
+    indexed_count = face_analyses.filter(state=FaceAnalysisState.INDEXED).count()
+    no_face_count = face_analyses.filter(state=FaceAnalysisState.NO_USABLE_FACE).count()
+    failed_face_count = face_analyses.filter(
+        state__in=(FaceAnalysisState.FAILED, FaceAnalysisState.CONFLICT)
+    ).count()
+    face_failed_assets = (
+        visible_face_assets.filter(
+            face_analysis__state__in=(FaceAnalysisState.FAILED, FaceAnalysisState.CONFLICT)
+        )
+        .select_related("face_analysis")
+        .order_by("id")
+    )
+    gallery_ready = event.derivatives_ready_generation == event.intake_generation
+    face_ready = event.face_index_ready_generation == event.intake_generation
     return _private_render(
         request,
         "openfotos_events/dashboard_event.html",
@@ -255,6 +281,15 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
             "images": images,
             "excluded_assets": excluded_assets,
             "failed_assets": failed_assets,
+            "face_failed_assets": face_failed_assets,
+            "face_total_count": face_total_count,
+            "face_indexed_count": indexed_count,
+            "face_no_usable_count": no_face_count,
+            "face_failed_count": failed_face_count,
+            "face_pending_count": max(
+                0,
+                face_total_count - indexed_count - no_face_count - failed_face_count,
+            ),
             "sub_events": event.sub_events.all(),
             "active_sub_events": event.sub_events.filter(is_archived=False),
             "selected_sub_event": selected_sub_event,
@@ -262,7 +297,9 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
             "batches": ContributionBatch.objects.filter(installation__event=event).select_related(
                 "sub_event", "installation"
             ),
-            "ready": event.derivatives_ready_generation == event.intake_generation,
+            "gallery_ready": gallery_ready,
+            "face_ready": face_ready,
+            "ready": gallery_ready and face_ready,
         },
     )
 
@@ -432,6 +469,23 @@ def restore_gallery_asset(request: HttpRequest, event_id, asset_id) -> HttpRespo
         messages.error(request, str(exc))
     else:
         messages.success(request, "The photo was restored to derivative processing.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def reset_asset_face_analysis(request: HttpRequest, event_id, asset_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    try:
+        reset_face_analysis(
+            event=event,
+            asset_id=asset_id,
+            actor=request.user,
+            request=request,
+        )
+    except IngestionError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(request, "Face analysis reset. Retry this photo on its workstation.")
     return redirect("events:photographer-event", event_id=event.id)
 
 

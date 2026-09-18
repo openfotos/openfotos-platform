@@ -1,6 +1,6 @@
 # ADR 0008: Main events, sub-events, and search-only face indexing
 
-- **Status:** Accepted
+- **Status:** Superseded in part by ADR 0009
 - **Date:** 2026-09-13
 - **Supersedes:** ADR 0003; parts of ADRs 0002, 0005, 0006, and 0007
 

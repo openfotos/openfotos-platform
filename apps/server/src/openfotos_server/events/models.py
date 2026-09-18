@@ -11,6 +11,7 @@ from django.core.validators import MaxValueValidator, MinValueValidator, RegexVa
 from django.db import models
 from django.db.models import F, Q
 from django.utils import timezone
+from pgvector.django import VectorField
 
 from openfotos_contracts import (
     DERIVATIVE_PROFILE_ID,
@@ -25,6 +26,7 @@ from openfotos_contracts import (
     WatermarkLogoKind,
     WatermarkTemplate,
 )
+from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT
 
 PILOT_STORAGE_LIMIT_BYTES = 25_000_000_000
 RESERVED_PHOTOGRAPHER_SLUGS = frozenset({"admin", "api", "media", "static", "www"})
@@ -91,6 +93,10 @@ class AuditAction(models.TextChoices):
     PREVIEW_POLICY_CONFIRMED = "preview_policy.confirmed", "Preview policy confirmed"
     DERIVATIVE_UPLOAD_VERIFIED = "derivative_upload.verified", "Derivative upload verified"
     DERIVATIVE_FAILED = "derivative.failed", "Derivative failed"
+    FACE_ANALYSIS_COMPLETED = "face_analysis.completed", "Face analysis completed"
+    FACE_ANALYSIS_FAILED = "face_analysis.failed", "Face analysis failed"
+    FACE_ANALYSIS_CONFLICT = "face_analysis.conflict", "Face analysis conflicted"
+    FACE_ANALYSIS_RESET = "face_analysis.reset", "Face analysis reset"
     ASSET_GALLERY_EXCLUDED = "asset.gallery_excluded", "Asset excluded from gallery"
     ASSET_GALLERY_RESTORED = "asset.gallery_restored", "Asset restored to gallery"
 
@@ -104,6 +110,14 @@ class AuditResult(models.TextChoices):
 class RateLimitPurpose(models.TextChoices):
     PHOTOGRAPHER_LOGIN = "photographer_login", "Photographer login"
     EVENT_PIN = "event_pin", "Event PIN"
+
+
+class FaceAnalysisState(models.TextChoices):
+    PENDING = "pending", "Pending"
+    FAILED = "failed", "Failed"
+    CONFLICT = "conflict", "Conflict"
+    INDEXED = "indexed", "Indexed"
+    NO_USABLE_FACE = "no_usable_face", "No usable face"
 
 
 class Photographer(models.Model):
@@ -216,6 +230,12 @@ class Event(models.Model):
     derivatives_ready_generation = models.PositiveIntegerField(
         blank=True, null=True, editable=False
     )
+    face_model_id = models.CharField(
+        max_length=128,
+        default=ACCEPTED_FACE_MODEL_CONTRACT.model.id,
+        editable=False,
+    )
+    face_index_ready_generation = models.PositiveIntegerField(blank=True, null=True, editable=False)
     current_ingestion_manifest = models.ForeignKey(
         "IngestionManifest",
         blank=True,
@@ -420,6 +440,106 @@ class Asset(models.Model):
 
     class Meta:
         indexes = [models.Index(fields=("batch",), name="asset_batch_idx")]
+
+
+class FaceAnalysis(models.Model):
+    asset = models.OneToOneField(
+        Asset,
+        primary_key=True,
+        on_delete=models.PROTECT,
+        related_name="face_analysis",
+    )
+    state = models.CharField(
+        max_length=24,
+        choices=FaceAnalysisState.choices,
+        default=FaceAnalysisState.PENDING,
+    )
+    source_sha256 = models.CharField(max_length=64, blank=True, validators=[SHA256_VALIDATOR])
+    model_id = models.CharField(max_length=128)
+    artifact_sha256 = models.JSONField(default=list)
+    document_sha256 = models.CharField(
+        max_length=64,
+        blank=True,
+        validators=[SHA256_VALIDATOR],
+    )
+    detected_face_count = models.PositiveSmallIntegerField(default=0)
+    usable_face_count = models.PositiveSmallIntegerField(default=0)
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    failure_code = models.CharField(max_length=64, blank=True)
+    completed_at = models.DateTimeField(blank=True, null=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(detected_face_count__gte=F("usable_face_count")),
+                name="face_detected_count_covers_usable",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(
+                        state=FaceAnalysisState.INDEXED,
+                        usable_face_count__gt=0,
+                        failure_code="",
+                    )
+                    | Q(
+                        state=FaceAnalysisState.NO_USABLE_FACE,
+                        usable_face_count=0,
+                        failure_code="",
+                    )
+                    | Q(
+                        state__in=(
+                            FaceAnalysisState.PENDING,
+                            FaceAnalysisState.FAILED,
+                            FaceAnalysisState.CONFLICT,
+                        ),
+                        usable_face_count=0,
+                    )
+                ),
+                name="face_analysis_state_matches_counts",
+            ),
+        ]
+
+
+class FaceEmbedding(models.Model):
+    analysis = models.ForeignKey(
+        FaceAnalysis,
+        on_delete=models.CASCADE,
+        related_name="embeddings",
+    )
+    event = models.ForeignKey(
+        Event,
+        on_delete=models.PROTECT,
+        related_name="face_embeddings",
+    )
+    face_ordinal = models.PositiveSmallIntegerField()
+    detector_confidence = models.FloatField()
+    bounding_box_width = models.PositiveIntegerField()
+    bounding_box_height = models.PositiveIntegerField()
+    model_id = models.CharField(max_length=128)
+    vector = VectorField(dimensions=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("analysis", "face_ordinal"),
+                name="unique_analysis_face_ordinal",
+            ),
+            models.CheckConstraint(
+                condition=Q(detector_confidence__gte=0.0) & Q(detector_confidence__lte=1.0),
+                name="face_confidence_between_zero_and_one",
+            ),
+            models.CheckConstraint(
+                condition=Q(bounding_box_width__gt=0) & Q(bounding_box_height__gt=0),
+                name="face_box_dimensions_positive",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=("event", "model_id"), name="face_event_model_idx"),
+            models.Index(fields=("analysis",), name="face_analysis_idx"),
+        ]
 
 
 class AssetObject(models.Model):

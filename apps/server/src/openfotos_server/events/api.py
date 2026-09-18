@@ -28,6 +28,12 @@ from openfotos_contracts import (
     PreviewPolicyInput,
     SubEventSnapshot,
 )
+from openfotos_vision import (
+    ACCEPTED_FACE_MODEL_CONTRACT,
+    ACCEPTED_SFACE_DETECTOR_FLOOR,
+    FaceAnalysisDocument,
+    FaceAnalysisDocumentError,
+)
 
 from .derivative_services import (
     confirm_preview_policy,
@@ -45,6 +51,7 @@ from .desktop_auth import (
     authenticate_photographer,
     refresh_session,
 )
+from .face_services import report_face_analysis_failure, submit_face_analysis
 from .ingestion_services import (
     IngestionError,
     cancel_batch,
@@ -63,6 +70,7 @@ from .models import (
     AssetObject,
     ContributionBatch,
     EventInstallation,
+    FaceAnalysis,
     IdempotencyRecord,
     PreviewPolicy,
     RateLimitPurpose,
@@ -312,6 +320,8 @@ def _event_data(event, *, session) -> dict:
         intake_state=IntakeState(event.intake_state),
         intake_generation=event.intake_generation,
         processing_profile_id=event.processing_profile_id,
+        face_model_id=event.face_model_id,
+        face_index_ready=(event.face_index_ready_generation == event.intake_generation),
         max_contribution_devices=event.max_contribution_devices,
         active_contribution_devices=active_devices,
         device_label=installation.label if installation else "",
@@ -766,6 +776,93 @@ def derivative_failure(request: HttpRequest, event_id: UUID, asset_id: UUID) -> 
 
 @csrf_exempt
 @require_POST
+def face_analysis(
+    request: HttpRequest,
+    event_id: UUID,
+    sub_event_id: UUID,
+    asset_id: UUID,
+) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+
+        def command() -> tuple[dict, int]:
+            body = _json_body(
+                request,
+                fields={
+                    "asset_id",
+                    "source_sha256",
+                    "model_contract",
+                    "detected_face_count",
+                    "usable_face_count",
+                    "status",
+                    "faces",
+                },
+            )
+            document = FaceAnalysisDocument.from_dict(
+                body,
+                accepted_contract=ACCEPTED_FACE_MODEL_CONTRACT,
+                accepted_detector_floor=ACCEPTED_SFACE_DETECTOR_FLOOR,
+            )
+            if document.asset_id != asset_id:
+                raise FaceAnalysisDocumentError(
+                    "invalid_face_analysis", "The body asset ID must match the route."
+                )
+            analysis = submit_face_analysis(
+                session=session,
+                event_id=event_id,
+                sub_event_id=sub_event_id,
+                document=document,
+                request=request,
+            )
+            return _face_analysis_data(analysis), 200
+
+        return _execute_mutation(
+            request,
+            session=session,
+            operation="submit_face_analysis",
+            command=command,
+        )
+    except FaceAnalysisDocumentError as exc:
+        return _error(exc.code, str(exc), status=400)
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+
+
+@csrf_exempt
+@require_POST
+def face_analysis_failure(
+    request: HttpRequest,
+    event_id: UUID,
+    sub_event_id: UUID,
+    asset_id: UUID,
+) -> JsonResponse:
+    try:
+        session = _bearer_session(request)
+
+        def command() -> tuple[dict, int]:
+            body = _json_body(request, fields={"code"})
+            analysis = report_face_analysis_failure(
+                session=session,
+                event_id=event_id,
+                sub_event_id=sub_event_id,
+                asset_id=asset_id,
+                code=str(body["code"]),
+                request=request,
+            )
+            return _face_analysis_data(analysis), 200
+
+        return _execute_mutation(
+            request,
+            session=session,
+            operation="report_face_analysis_failure",
+            command=command,
+        )
+    except (ContractError, DesktopAuthError, IngestionError) as exc:
+        return _domain_error(exc)
+
+
+@csrf_exempt
+@require_POST
 def complete_asset(request: HttpRequest, event_id: UUID, asset_id: UUID) -> JsonResponse:
     try:
         session = _bearer_session(request)
@@ -981,6 +1078,9 @@ def _batch_data(batch: ContributionBatch, *, session) -> dict:
         .filter(state="verified")
         .count(),
     }
+    analyses = {
+        analysis.asset_id: analysis for analysis in FaceAnalysis.objects.filter(asset__batch=batch)
+    }
     data["assets"] = list(
         objects.order_by("asset_id").values(
             "asset_id",
@@ -992,6 +1092,27 @@ def _batch_data(batch: ContributionBatch, *, session) -> dict:
         )
     )
     for item in data["assets"]:
-        item["asset_id"] = str(item["asset_id"])
+        asset_id = item["asset_id"]
+        item["asset_id"] = str(asset_id)
         item["gallery_excluded"] = item.pop("asset__gallery_excluded_at") is not None
+        if item["variant"] == AssetVariant.ORIGINAL.value:
+            item["face_analysis"] = _face_analysis_data(analyses.get(asset_id))
     return data
+
+
+def _face_analysis_data(analysis: FaceAnalysis | None) -> dict:
+    if analysis is None:
+        return {
+            "state": "pending",
+            "attempt_count": 0,
+            "failure_code": "",
+            "detected_face_count": 0,
+            "usable_face_count": 0,
+        }
+    return {
+        "state": analysis.state,
+        "attempt_count": analysis.attempt_count,
+        "failure_code": analysis.failure_code,
+        "detected_face_count": analysis.detected_face_count,
+        "usable_face_count": analysis.usable_face_count,
+    }

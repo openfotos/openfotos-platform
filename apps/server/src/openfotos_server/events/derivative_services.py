@@ -22,7 +22,6 @@ from openfotos_contracts import (
     AssetVariant,
     EventState,
     IngestionManifestState,
-    InstallationStatus,
     PreviewPolicyInput,
     PreviewPolicySnapshot,
     UploadObjectState,
@@ -34,7 +33,11 @@ from openfotos_storage.backend import ObjectAlreadyExists, ObjectStoreError, S3O
 
 from .audit import record_audit
 from .event_lifecycle import state_for_derivative_readiness
-from .ingestion_services import IngestionError, event_for_session
+from .ingestion_services import (
+    IngestionError,
+    asset_for_processing_session,
+    event_for_session,
+)
 from .models import (
     Asset,
     AssetObject,
@@ -42,7 +45,6 @@ from .models import (
     AuditResult,
     DesktopSession,
     Event,
-    EventInstallation,
     PreviewPolicy,
 )
 
@@ -535,11 +537,7 @@ def verify_derivative(
 
 @transaction.atomic
 def refresh_derivative_readiness(event_id: UUID) -> bool:
-    event = (
-        Event.objects.select_for_update()
-        .select_related("current_ingestion_manifest")
-        .get(pk=event_id)
-    )
+    event = Event.objects.select_for_update().get(pk=event_id)
     manifest = event.current_ingestion_manifest
     if (
         manifest is None
@@ -620,24 +618,12 @@ def _owned_asset(
     asset_id: UUID,
     for_update: bool = False,
 ) -> Asset:
-    query = Asset.objects.select_related("batch__installation", "batch__sub_event")
-    if for_update:
-        query = query.select_for_update()
-    try:
-        asset = query.get(pk=asset_id, batch__installation__event=event)
-    except Asset.DoesNotExist as exc:
-        raise IngestionError("asset_not_found", "The asset is unavailable.") from exc
-    installation = EventInstallation.objects.filter(
+    return asset_for_processing_session(
+        session=session,
         event=event,
-        user=session.user,
-        installation_id=session.installation_id,
-        status=InstallationStatus.ACTIVE.value,
-    ).first()
-    if installation is None or asset.batch.installation_id != installation.id:
-        raise IngestionError("asset_not_found", "The asset is unavailable.")
-    if asset.batch.sub_event.is_archived:
-        raise IngestionError("sub_event_archived", "The sub-event is archived.")
-    return asset
+        asset_id=asset_id,
+        for_update=for_update,
+    )
 
 
 def _validate_dimensions(asset: Asset, variant: AssetVariant, width: int, height: int) -> None:

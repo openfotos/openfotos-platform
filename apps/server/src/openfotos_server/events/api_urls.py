@@ -69,6 +69,18 @@ urlpatterns = [
         api.exclude_asset_view,
         name="exclude-asset",
     ),
+    path(
+        "events/<uuid:event_id>/sub-events/<uuid:sub_event_id>/assets/"
+        "<uuid:asset_id>/face-analysis/",
+        api.face_analysis,
+        name="face-analysis",
+    ),
+    path(
+        "events/<uuid:event_id>/sub-events/<uuid:sub_event_id>/assets/"
+        "<uuid:asset_id>/face-analysis-failure/",
+        api.face_analysis_failure,
+        name="face-analysis-failure",
+    ),
     path("events/<uuid:event_id>/intake/close/", api.intake_action, {"action": "close"}),
     path("events/<uuid:event_id>/intake/reopen/", api.intake_action, {"action": "reopen"}),
     path("events/<uuid:event_id>/finalize/", api.finalize, name="finalize"),

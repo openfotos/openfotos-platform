@@ -81,6 +81,43 @@ def event_for_session(session: DesktopSession, event_id: UUID) -> Event:
     return event
 
 
+def asset_for_processing_session(
+    *,
+    session: DesktopSession,
+    event: Event,
+    asset_id: UUID,
+    sub_event_id: UUID | None = None,
+    for_update: bool = False,
+) -> Asset:
+    """Resolve one active-child asset without widening tenant or installation scope."""
+    query = Asset.objects.select_related("batch__installation", "batch__sub_event")
+    if for_update:
+        query = query.select_for_update()
+    filters = {
+        "pk": asset_id,
+        "batch__installation__event": event,
+    }
+    if sub_event_id is not None:
+        filters["batch__sub_event_id"] = sub_event_id
+    try:
+        asset = query.get(**filters)
+    except Asset.DoesNotExist as exc:
+        raise IngestionError("asset_not_found", "The asset is unavailable.") from exc
+    installation = EventInstallation.objects.filter(
+        event=event,
+        user=session.user,
+        installation_id=session.installation_id,
+        status=InstallationStatus.ACTIVE.value,
+    ).first()
+    if installation is None:
+        raise IngestionError("asset_not_found", "The asset is unavailable.")
+    if asset.batch.installation_id != installation.id:
+        raise IngestionError("asset_not_found", "The asset is unavailable.")
+    if asset.batch.sub_event.is_archived:
+        raise IngestionError("sub_event_archived", "The sub-event is archived.")
+    return asset
+
+
 @transaction.atomic
 def reserve_contribution(
     *,
@@ -494,6 +531,7 @@ def reopen_intake(*, session: DesktopSession, event_id: UUID, request=None) -> E
     locked.intake_state = IntakeState.OPEN.value
     locked.current_ingestion_manifest = None
     locked.derivatives_ready_generation = None
+    locked.face_index_ready_generation = None
     locked.state = reopened_state.value
     locked.save(
         update_fields=(
@@ -501,6 +539,7 @@ def reopen_intake(*, session: DesktopSession, event_id: UUID, request=None) -> E
             "intake_state",
             "current_ingestion_manifest",
             "derivatives_ready_generation",
+            "face_index_ready_generation",
             "state",
             "updated_at",
         )
@@ -605,6 +644,7 @@ def finalize_ingestion(
     request=None,
 ) -> IngestionManifest:
     from .derivative_services import refresh_derivative_readiness
+    from .face_services import refresh_face_index_readiness
 
     event = _photographer_event(session, event_id)
     with transaction.atomic():
@@ -615,6 +655,7 @@ def finalize_ingestion(
             current = locked_event.current_ingestion_manifest
             if current and current.generation == locked_event.intake_generation:
                 transaction.on_commit(lambda: refresh_derivative_readiness(locked_event.id))
+                transaction.on_commit(lambda: refresh_face_index_readiness(locked_event.id))
                 return current
         try:
             finalized_state = state_for_finalized_ingestion(EventState(locked_event.state))
@@ -723,6 +764,7 @@ def finalize_ingestion(
         },
     )
     refresh_derivative_readiness(event.id)
+    refresh_face_index_readiness(event.id)
     return locked_manifest
 
 

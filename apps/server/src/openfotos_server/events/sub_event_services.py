@@ -8,6 +8,7 @@ from openfotos_contracts import EventState
 
 from .audit import record_audit
 from .derivative_services import refresh_derivative_readiness
+from .face_services import refresh_face_index_readiness
 from .ingestion_services import IngestionError
 from .models import (
     AuditAction,
@@ -131,7 +132,14 @@ def set_sub_event_archived(*, sub_event: SubEvent, archived: bool, actor, reques
     locked.is_archived = archived
     locked.save(update_fields=("is_archived", "updated_at"))
     locked_event.derivatives_ready_generation = None
-    locked_event.save(update_fields=("derivatives_ready_generation", "updated_at"))
+    locked_event.face_index_ready_generation = None
+    locked_event.save(
+        update_fields=(
+            "derivatives_ready_generation",
+            "face_index_ready_generation",
+            "updated_at",
+        )
+    )
     record_audit(
         photographer=locked_event.photographer,
         event=locked_event,
@@ -142,6 +150,7 @@ def set_sub_event_archived(*, sub_event: SubEvent, archived: bool, actor, reques
         metadata={"sub_event_id": str(locked.id)},
     )
     transaction.on_commit(lambda: refresh_derivative_readiness(locked_event.id))
+    transaction.on_commit(lambda: refresh_face_index_readiness(locked_event.id))
     return locked
 
 

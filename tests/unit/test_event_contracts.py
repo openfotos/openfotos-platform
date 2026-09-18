@@ -22,6 +22,8 @@ def _event_response() -> dict:
         "intake_state": "closed",
         "intake_generation": 2,
         "processing_profile_id": "pilot-profile-v1",
+        "face_model_id": "opencv-yunet-2023mar-sface-2021dec",
+        "face_index_ready": False,
         "max_contribution_devices": 10,
         "active_contribution_devices": 3,
         "device_label": "Studio workstation",

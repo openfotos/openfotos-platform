@@ -6,6 +6,7 @@ from pathlib import Path
 from uuid import UUID
 
 from openfotos_contracts import AssetVariant, WatermarkLogoKind, WatermarkTemplate
+from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT
 
 
 class BatchState(StrEnum):
@@ -35,6 +36,16 @@ class LocalUploadState(StrEnum):
     UPLOADING = "uploading"
     VERIFIED = "verified"
     FAILED = "failed"
+    EXCLUDED = "excluded"
+
+
+class LocalFaceState(StrEnum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    INDEXED = "indexed"
+    NO_USABLE_FACE = "no_usable_face"
+    FAILED = "failed"
+    CONFLICT = "conflict"
     EXCLUDED = "excluded"
 
 
@@ -94,6 +105,8 @@ class EventCache:
     name: str
     storage_limit_bytes: int
     processing_profile_id: str
+    face_model_id: str = ACCEPTED_FACE_MODEL_CONTRACT.model.id
+    face_index_ready: bool = False
     server_url: str = ""
     reserved_original_bytes: int = 0
     verified_original_bytes: int = 0
@@ -215,3 +228,13 @@ class DerivativeCheckpoint:
     state: LocalUploadState
     attempt_count: int
     last_error_code: str | None
+
+
+@dataclass(frozen=True)
+class FaceAnalysisCheckpoint:
+    item_id: UUID
+    state: LocalFaceState
+    attempt_count: int
+    last_error_code: str | None
+    detected_face_count: int
+    usable_face_count: int

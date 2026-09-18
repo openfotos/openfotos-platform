@@ -1,10 +1,10 @@
 # OpenFotos product and technical plan
 
-**Document status:** authoritative pilot plan, revised after Session 5
+**Document status:** authoritative pilot plan, revised through Session 7
 
-**Revision date:** 13 September 2026
+**Revision date:** 17 September 2026
 
-**Implementation status:** Sessions 1–5 are implemented and retrofitted; Sessions 6–9 are planned
+**Implementation status:** Sessions 1–7 are complete; Sessions 8–9 are planned
 
 ## 1. Purpose
 
@@ -13,9 +13,9 @@ main event, divides it into named sub-events such as Haldi, Reception, Marriage,
 uploads edited JPEGs through the desktop application, and publishes a private web gallery.
 
 The finished product will let the photographer hand the main customer an owner link. That customer
-can browse the full wedding or one sub-event and can create narrower guest links. A guest link can
-allow either full browsing of its scope or only photos found by submitting an ephemeral selfie or
-single-person reference photo.
+can browse the full wedding or one sub-event and can create narrower guest links. Every guest link
+allows full browsing within its event or sub-event scope. An ephemeral selfie or single-person
+reference photo filters that already-authorized gallery; face matches never grant new access.
 
 The product does **not** build or expose precomputed people collections. Face embeddings are a
 search index, not a customer-facing grouping system.
@@ -41,15 +41,26 @@ search index, not a customer-facing grouping system.
    never user-chosen, and stored only as a peppered Argon2 hash.
 10. Future owner and guest URLs are independent high-entropy capabilities. A PIN never provides
     security on its own.
-11. Future face processing creates embeddings for detected faces in each photo and uploads them
+11. Face processing creates embeddings for detected faces in each photo and uploads them
     directly to the server. It does not cluster them.
-12. Future selfie/reference search accepts exactly one usable face and reveals matched photos only
-    within the link's event or sub-event scope.
+12. Future selfie/reference search accepts exactly one usable face and returns every match above
+    the pinned threshold within the link's event or sub-event scope. Search is a convenience filter,
+    not an authorization boundary.
 13. Every authorized visitor may download original files within the set they can see. There is no
     separate download-policy setting.
+14. Session 7 face vectors use the exact YuNet/SFace model, artifact hashes, preprocessing, quality
+    rules, 128-dimensional L2 format, cosine metric, and threshold accepted in ADR 0010.
+15. Face analysis runs as a third resumable desktop stage on the batch's originating active
+    workstation. Identical result documents are idempotent; changed results conflict and require an
+    audited per-photo reset.
+16. Publication requires `indexed` or `no_usable_face` for every visible verified original in the
+    current generation. Archived and gallery-excluded assets remain stored but do not participate
+    in readiness or search.
 
 These decisions supersede conflicting text in ADRs 0002, 0003, 0005, 0006, and 0007. ADR 0008
-records the change.
+records the Session 5 retrofit, ADR 0009 records full-gallery recall-first search, and ADR 0010
+records the accepted face-model contract. ADR 0011 records the implemented direct index, recovery,
+readiness, and exact SQL scope.
 
 ## 3. Scope and release posture
 
@@ -59,7 +70,7 @@ records the change.
 - Wedding-sized main events with up to 50 sub-events.
 - Edited JPEG inputs, normally below 20–25 GB per main event.
 - One photographer account and up to ten active desktop installations per event.
-- Private originals, previews, thumbnails, manifests, and later face embeddings.
+- Private originals, previews, thumbnails, manifests, and face embeddings.
 - Server-rendered photographer and visitor web experiences.
 - Desktop-first ingestion and derivative processing.
 - A supervised launch with synthetic or explicitly consented test media only.
@@ -74,6 +85,7 @@ records the change.
 - RAW/video ingestion, photo editing, duplicate-photo merging, or automatic curation.
 - Per-photo sub-event reassignment.
 - A claim that four-digit PINs alone resist guessing.
+- Selfie-only capabilities or face-match-dependent photo authorization.
 
 ## 4. Vocabulary
 
@@ -91,9 +103,8 @@ records the change.
 | Thumbnail | Clean small gallery-grid image. |
 | Face index | Per-face embeddings attached to assets for scoped search. |
 | Owner link | Future photographer-to-main-customer capability for the event. |
-| Guest link | Future owner-created capability with explicit scope and view mode. |
-| Full view | Browse every visible photo in the link scope and optionally search. |
-| Selfie-only view | See only photos returned by an accepted face search. |
+| Guest link | Future owner-created capability with an event or sub-event scope. |
+| Face search | Best-effort filter over photos the current link may already browse. |
 
 ## 5. Roles and journeys
 
@@ -121,15 +132,14 @@ records the change.
 - Uses the owner capability plus its four-digit PIN.
 - Browses All Photos or a chosen sub-event.
 - Searches within the event or selected sub-event.
-- Creates and revokes guest links with an event/sub-event scope, view mode, and expiry.
+- Creates and revokes full-gallery guest links with an event/sub-event scope and expiry.
 - Shares guest links rather than forwarding the owner capability.
 
 ### Guest (future Session 8)
 
 - Opens a high-entropy guest URL and enters that link's four-digit PIN.
-- With full view, browses and downloads all visible photos in scope and may run face search.
-- With selfie-only view, submits an image containing exactly one usable face and sees/downloads
-  only returned matches.
+- Browses and downloads all visible photos in scope.
+- May submit an image containing exactly one usable face to filter that gallery to likely matches.
 
 ## 6. Product behavior
 
@@ -144,7 +154,7 @@ records the change.
   gallery queries, upload targets, and future share creation.
 - Structure changes are blocked while Published, Archived, or Cancelled. The photographer must
   unpublish before changing structure.
-- Archived sub-events and their assets do not participate in derivative readiness or future face
+- Archived sub-events and their assets do not participate in derivative readiness or face-index
   search/publication readiness.
 
 ### 6.2 Contribution batches
@@ -175,7 +185,7 @@ records the change.
 Sessions 2 and 5 contain one high-entropy event token plus a four-digit event PIN so the implemented
 gallery remains testable. Session 8 will replace or migrate that handoff into explicit owner and
 guest capability records. Until Session 8, the current event link must not be described as a guest
-link and cannot express sub-event/full/selfie-only sharing policy independently.
+link and cannot express independently revocable event/sub-event sharing policy.
 
 ## 7. Lifecycle
 
@@ -196,7 +206,7 @@ Important rules:
 - Publication requires a current committed ingestion manifest, confirmed preview policy, complete
   derivatives for every visible asset, at least one active sub-event, a configured PIN, and a
   future expiry.
-- After Session 7, publication also requires terminal face analysis for every visible asset:
+- Publication also requires terminal face analysis for every visible asset:
   `indexed` or `no_usable_face`.
 - Publishing/unpublishing is controlled only at main-event level.
 - Sub-events do not have independent lifecycle, quota, preview policy, or retention settings.
@@ -212,10 +222,10 @@ Important rules:
 | Reserve batch | Same tenant, active installation, open intake, active selected sub-event |
 | Upload/derivative lease | Same tenant, authorized installation, batch and active sub-event |
 | Manage sub-events/batches | Active photographer membership; main event unpublished |
-| Main gallery | Photographer membership or valid event/owner/full guest capability |
+| Main gallery | Photographer membership or valid event/owner/guest capability |
 | Filtered gallery | Main authorization plus exact sub-event scope |
-| Selfie result | Valid search-capable link plus returned match membership |
-| Original download | Valid authorization plus photo visibility in current scope/result set |
+| Face search | Valid gallery authorization plus exact event/sub-event scope |
+| Original download | Valid authorization plus photo visibility in current scope |
 
 All denials should be indistinguishable where revealing existence would widen access. Event,
 sub-event, batch, asset, face, and share queries must apply their tenant/scope filters in the
@@ -230,7 +240,7 @@ flowchart LR
     B[Photographer/customer browser] -->|private HTML + capabilities| W
     B -->|short signed GET| R
     W --> P[(PostgreSQL / Supabase)]
-    D -. Session 7: face vectors .-> W
+    D -->|strict face-analysis documents| W
     W -. Session 8: scoped vector search .-> P
 ```
 
@@ -239,7 +249,7 @@ flowchart LR
 - Local source discovery, JPEG validation, checksums, and durable SQLite checkpoints.
 - Explicit main-event and sub-event selection.
 - Original transfer and derivative generation/upload.
-- In Session 7, face detection and embedding generation using the event's pinned model contract.
+- Face detection and embedding generation using the event's pinned model contract.
 - No tenant authorization decision and no final object-key construction.
 
 ### Django owns
@@ -254,7 +264,7 @@ flowchart LR
 
 - Relational state and transactional counters.
 - Immutable manifest metadata and idempotency records.
-- In Session 7, model-versioned per-face vectors (pgvector) scoped by event and asset.
+- Model-versioned per-face vectors (pgvector) scoped by event and asset.
 
 ### R2 owns
 
@@ -288,7 +298,7 @@ Key invariants:
 - Asset objects are unique by asset and variant.
 - Event quota counters are changed only in transactional ingestion services.
 
-### Planned Session 7
+### Implemented through Session 7
 
 ```text
 Asset 1---1 FaceAnalysis
@@ -306,11 +316,10 @@ Collection table.
 Event 1---1 OwnerCapability
 OwnerCapability 1---* GuestCapability
 GuestCapability *---0..1 SubEvent
-Capability/SearchSession 1---* AuthorizedSearchResult *---1 Asset
 ```
 
-Capability secrets are stored as digests, PINs as peppered Argon2 hashes, and returned search sets
-as short-lived authorization records or equivalent signed server state. Raw selfies are not stored.
+Capability secrets are stored as digests and PINs as peppered Argon2 hashes. Raw selfies and face
+crops are not stored; search-result state, if retained for pagination, grants no photo access.
 
 ## 11. Object layout
 
@@ -362,14 +371,20 @@ Reliability rules:
 - Preview policy is event-scoped and immutable once processing begins; thumbnails stay clean and
   originals remain byte-identical.
 
-## 13. Face indexing plan (Sessions 6–7, not implemented)
+## 13. Face indexing (Session 7 implemented)
 
 ### Benchmark before dependency
 
-Session 6 must test the selected detector/recognizer on 500–1,000 consented representative photos.
-Record CPU, memory, face yield, false matches/misses, group-photo behavior, model files/hashes,
-embedding dimension/normalization, thresholds, and projected full-event time. The decision is a
-go/no-go gate, not an assumed library choice.
+Session 6 accepted YuNet/SFace in ADR 0010 after a candidate comparison, full LFW evaluation, and a
+complete 1,782-photo/31.51 GB consented representative run. On the pilot's i5-6200U/8 GB floor, the
+selected contract produced 98.204712% LFW holdout recall, 0.00318334% false accepts, zero
+representative processing failures, 797.8 MiB peak RSS, and a 6.022-hour projection for 10,000
+photos/100,000 usable faces. The evidence includes 119 dense photos with at least ten usable faces.
+
+The accepted contract pins model ID `opencv-yunet-2023mar-sface-2021dec`, ordered artifact hashes,
+EXIF/sRGB/letterbox preprocessing, 640×640 detection, 128-dimensional L2 vectors, quality rules,
+cosine distance, and maximum distance `0.55514365`. Any change requires a new benchmark/ADR/model
+ID and explicit index rebuild.
 
 ### Per-photo processing
 
@@ -381,8 +396,16 @@ go/no-go gate, not an assumed library choice.
 6. Django validates tenant, event, asset ownership, model ID/hash, vector dimension, finite values,
    normalization tolerance, ordinals, counts, and terminal status before persistence.
 
+The desktop downloads the two pinned OpenCV Zoo artifacts into its private application-data cache,
+or imports existing copies, and verifies both hashes before constructing the engine. Processing is
+sequential with one OpenCV thread. Only the originating active workstation can submit analysis for
+its batch. Desktop checkpoints contain state, counts, attempts, and stable error codes but never
+vectors.
+
 Zero detected/usable faces is a valid terminal result. A retry with the same model and content is
-idempotent; a different model contract or payload conflicts and requires an explicit rebuild path.
+idempotent; a different valid payload conflicts and requires an audited per-photo reset. Technical
+failures stop after five attempts and require reset/retry or a photographer-recorded gallery
+exclusion. There is no manual no-face override or event-wide rebuild control.
 
 ### Search
 
@@ -394,8 +417,15 @@ idempotent; a different model contract or payload conflicts and requires an expl
   removed before the response completes.
 - Vector queries always filter event first and optional sub-event second, then apply the calibrated
   similarity threshold.
-- Multiple matched faces on one asset collapse to one photo result.
+- Every photo above the pinned threshold is returned, ranked by its best matching face and paginated
+  without a fixed top-result cap. Multiple matched faces on one asset collapse to one photo result.
+- Search results are a best-effort filter and may contain extra photos or miss difficult faces. The
+  UI suggests retrying with another clear single-person image; users cannot change the threshold.
+- Every returned photo was already browsable through the current full-gallery capability.
 - No name, persistent identity, cluster, or collection is produced.
+
+Session 7 implements this exact event/sub-event PostgreSQL query boundary for internal use. The
+public reference-image endpoint and UI remain Session 8 work.
 
 ## 14. Sharing plan (Session 8, not implemented)
 
@@ -415,12 +445,10 @@ Each guest capability has:
 - an independent auto-generated four-digit PIN displayed once;
 - required expiry, capped by the event/owner expiry;
 - revocation/version state;
-- scope: whole event or exactly one active sub-event;
-- mode: `full` or `selfie_only`.
+- scope: whole event or exactly one active sub-event.
 
-Full mode can browse, search, and download all visible photos in scope. Selfie-only mode initially
-reveals no photos, accepts exactly-one-face searches, and can view/download only returned matches.
-A guest link cannot create another link or widen itself.
+Every guest can browse, search, and download all visible photos in scope. Face search filters that
+set and does not authorize photos. A guest link cannot create another link or widen itself.
 
 ### PIN security
 
@@ -442,13 +470,12 @@ make every link unverifiable.
 There is no download policy selector. Authorization is derived from visibility:
 
 - photographer and owner: every visible original in the event;
-- full event guest: every visible original in the event;
-- full sub-event guest: every visible original in that sub-event;
-- selfie-only guest: only originals corresponding to that search's authorized results.
+- event guest: every visible original in the event;
+- sub-event guest: every visible original in that sub-event.
 
 Django issues short-lived signed GET URLs with attachment disposition after re-evaluating link,
-scope, expiry, revocation, sub-event status, asset visibility, and (for selfie-only) result
-membership. Downloaded bytes must match the original upload checksum.
+scope, expiry, revocation, sub-event status, and asset visibility. Downloaded bytes must match the
+original upload checksum.
 
 ## 16. Privacy, consent, and retention
 
@@ -493,8 +520,8 @@ Secrets, model weights, customer media, selfies, crops, and embeddings must neve
 - Mutation retries use actor-scoped idempotency keys with request hashes.
 - Stable error codes distinguish correctable state without disclosing foreign objects.
 - Database enum values and shared Python contracts change together through forward migrations.
-- Future face/share endpoints must be versioned only after the Session 6 model contract and Session
-  8 capability schema are accepted.
+- Face endpoints must use the accepted Session 6 model contract; future share endpoints must be
+  versioned only after the Session 8 capability schema is accepted.
 
 ## 19. Operations and hosting
 
@@ -554,7 +581,7 @@ Official references checked for this revision:
 - Opt-in synthetic R2/MinIO contract test.
 - PostgreSQL migration and concurrent reservation test.
 - Windows/macOS desktop packaging and 10,000-photo rehearsal.
-- Session 6 consented face benchmark before face schema/API implementation.
+- Dedicated PostgreSQL/pgvector migration and SQL-scope tests in addition to the fast SQLite suite.
 - Session 8 end-to-end tests proving selfie cleanup and capability-scope enforcement.
 - Restore a production-shaped database backup into an isolated environment.
 
@@ -570,19 +597,23 @@ dedicated pepper, and updates migrations/contracts/tests.
 
 ### Session 6: face benchmark and contract
 
-No production embedding persistence. Benchmark the replaceable engine and freeze model ID/hash,
-preprocessing, vector dimension/normalization, quality rules, similarity metric, and thresholds.
+Complete. YuNet/SFace passed matching, dense-group, throughput, memory, privacy, and rights gates.
+ADR 0010 freezes model ID/hash, preprocessing, vector dimension/normalization, quality rules,
+similarity metric, and threshold. No production embedding persistence was added in this session.
 
 ### Session 7: direct face indexing and readiness
 
-Implement per-asset face-analysis state and per-face vector upload/validation. Add event/sub-event
-search indexes and the analysis publication gate. Do not add collections or clustering.
+Complete. Per-asset analysis state and pgvector embeddings are uploaded through strict,
+installation-owned, event/sub-event-scoped documents. The desktop has verified model acquisition,
+durable third-stage progress, five-attempt recovery, and no local vector persistence. Exact SQL
+search scope, per-photo audited reset, dashboard blockers, and the current-generation publication
+gate are implemented without collections or clustering.
 
 ### Session 8: owner/guest sharing, selfie search, and downloads
 
-Implement owner and independently revocable guest capabilities, four-digit generated PINs,
-event/sub-event and full/selfie-only scope, exactly-one-face ephemeral search, authorized result
-sets, and original downloads derived from visibility.
+Implement owner and independently revocable full-gallery guest capabilities, four-digit generated
+PINs, event/sub-event scope, exactly-one-face ephemeral search as a gallery filter, and original
+downloads derived from visibility.
 
 ### Session 9: hardening and launch rehearsal
 
@@ -592,7 +623,7 @@ and a clean end-to-end rehearsal.
 
 ## 23. Acceptance criteria for this revision
 
-The Sessions 1–5 retrofit is complete only when:
+The implemented Sessions 1–7 are complete only when:
 
 - a batch cannot exist or reserve without an active child belonging to its event;
 - event/sub-event snapshots and local checkpoints round-trip the child assignment;
@@ -605,13 +636,18 @@ The Sessions 1–5 retrofit is complete only when:
 - four-digit ASCII PINs are generated, peppered, Argon2-hashed, rate-limited, and absent from logs;
 - fresh forward migrations, tests, static checks, and Django checks pass;
 - current and future documentation contains no active collection/clustering design.
+- face documents with a wrong tenant, sub-event, installation, source, model, count, or vector fail
+  before vector persistence;
+- identical retries create no duplicate vectors and changed terminal results require audited reset;
+- PostgreSQL search applies event and optional sub-event scope in SQL and excludes archived or
+  gallery-excluded assets;
+- publication blocks until every visible current-generation asset is `indexed` or
+  `no_usable_face`.
 
 ## 24. Explicitly deferred decisions
 
-These require evidence or Session 8 design and must not be guessed in Sessions 1–5:
+These require later implementation evidence or Session 8 design:
 
-- final face model, redistributable weight licence, dimension, and thresholds;
-- exact face-analysis retry/rebuild UX;
 - owner/guest capability schema and default/max expiry durations;
 - whether the interim event token is migrated or replaced;
 - share-PIN pepper separation/rotation rollout;

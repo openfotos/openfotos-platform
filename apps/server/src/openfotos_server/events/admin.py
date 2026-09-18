@@ -136,6 +136,8 @@ class EventAdmin(admin.ModelAdmin):
         "intake_generation",
         "current_ingestion_manifest",
         "derivatives_ready_generation",
+        "face_model_id",
+        "face_index_ready_generation",
         "visitor_access_version",
         "created_at",
         "updated_at",

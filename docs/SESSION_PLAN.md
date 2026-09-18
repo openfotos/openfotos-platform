@@ -40,6 +40,15 @@ indexing, owner/guest sharing, selfie search, or original-download endpoints.
 - Fresh migrations, the deterministic suite, lint/type checks, and Django checks pass.
 - No active plan/session describes clustering or collections.
 
+## Session 6 product clarification
+
+**Status (2026-09-16): accepted and reflected in the completed Session 6 contract.**
+
+Photographer interviews removed the outsider/coworker sharing journey. Future guest capabilities
+grant full gallery access within an event or sub-event scope. Face search is a best-effort,
+recall-first filter over that already-authorized set, never a source of photo authorization.
+ADR 0009 records the decision and supersedes the `selfie_only` parts of ADR 0008.
+
 ## Session 1: repository foundation
 
 **Status:** complete.
@@ -129,14 +138,16 @@ requires current manifest/policy/derivatives and an active child.
 
 ## Session 6: face-engine benchmark and model contract
 
-**Status:** not started. No production face implementation belongs before this session passes.
+**Status:** complete; accepted on 2026-09-16 in ADR 0010.
 
 **Goal:** Prove CPU throughput and matching quality and freeze a compatible contract.
 
-**Work:** Benchmark replaceable detector/recognizer candidates on 500–1,000 consented representative
-photos. Exercise single portraits and dense group photos. Record hardware, latency/throughput,
-memory, detection/usable-face yield, false matches/misses, model files and licence, cryptographic
-hashes, preprocessing, vector dimension, normalization, distance metric, and candidate thresholds.
+**Delivered:** A deterministic redacted harness, strict model/result contract, candidate comparison,
+LFW calibration/holdout reports, and complete consented wedding/dense-group measurements on the
+i5-6200U/8 GB performance floor. Reports cover throughput, memory, detection/usable-face yield,
+false matches/misses, model rights and hashes, preprocessing, vector dimension/normalization,
+quality rules, metric, threshold, and the 10,000-photo/100,000-usable-face projection. ADR 0010
+accepts the passing YuNet/SFace contract.
 
 **Not in scope:** Database face rows, production upload endpoints, clustering, or collections.
 
@@ -144,12 +155,31 @@ hashes, preprocessing, vector dimension, normalization, distance metric, and can
 ID/hash/dimension/normalization/quality/threshold contract is accepted; model weights and test faces
 are not tracked.
 
+**LFW evidence (2026-09-14):** The frozen benchmark and redacted reports are in
+`docs/session6/`. YuNet + SFace passes the LFW recall/FAR, preliminary one-face timing, and memory
+gates and is the current lead. Buffalo-M fails end-to-end recall under the same quality rules despite
+strong conditional matching. This established the candidate before representative-data acceptance.
+
+**Representative evidence (2026-09-16):** All 361 consented full-resolution photos completed with
+zero processing failures, 2,343 usable face instances, and 74 photos containing at least ten usable
+faces. The 10,000-photo/100,000-usable-face projection is 7.183 hours with 781.4 MiB peak RSS. Every
+other technical gates pass, but the report remains a no-go because it does not meet the agreed
+minimum of 500 representative photos. Face-instance count is not treated as identity-labelled
+uniqueness.
+
+**Final acceptance evidence (2026-09-16):** A separate complete run processed 1,782 consented
+full-resolution photos (31.51 GB) with zero failures, 6,604 usable face instances, and 119 dense
+photos containing at least ten usable faces. It projected 6.022 hours for 10,000 photos/100,000
+usable faces at 797.8 MiB peak RSS. Combined with 98.204712% LFW holdout recall and 0.00318334%
+false accepts, every gate passes. ADR 0010 freezes YuNet/SFace, the ordered hashes, preprocessing,
+128-dimensional L2 vectors, quality rules, cosine metric, and maximum distance `0.55514365`.
+
 **First failing acceptance test:** Reject a result document whose model hash, dimension, finite
 values, or normalization differs from the accepted contract before any vector is persisted.
 
 ## Session 7: direct per-photo face indexing
 
-**Status:** not started; depends on Session 6.
+**Status:** complete; accepted on 2026-09-17 in ADR 0011.
 
 **Goal:** Create a conservative event-scoped face search index without grouping people.
 
@@ -165,34 +195,56 @@ asset to be `indexed` or `no_usable_face`.
 every query is event-filtered and optional child-filtered in SQL; archived-child faces are excluded;
 publication blocks on nonterminal visible assets.
 
+**Delivered:** Migration `0005_face_index` conditionally enables pgvector, refuses already-published
+events, and adds generation-scoped readiness, per-asset analysis state, and 128-dimensional
+per-face vectors. The server accepts only strict canonical documents from the batch's originating
+active workstation, validates event/sub-event/source/model/count/vector invariants before writes,
+keeps identical retries duplicate-free, and requires audited per-photo reset for conflicts or five
+failed attempts. Exact cosine search applies event and optional child predicates in SQL and excludes
+archived children and gallery-excluded assets.
+
+The desktop now has hash-verified Download/Verify and Locate Existing Files model setup, a third
+sequential resumable face-index stage, metadata-only SQLite checkpoints, five-attempt recovery, and
+face progress/blocker UI. The photographer dashboard reports indexed, no-face, pending, and blocked
+counts; supports audited per-photo reset; and publication requires current-generation terminal face
+analysis for every visible verified original. No clusters, people, crops, landmarks, filenames,
+local paths, runtime details, or vectors are added to desktop checkpoints.
+
+**Verification evidence:** The fast SQLite suite passes 159 tests with the pgvector-only query and
+opt-in S3 provider tests skipped. A separate PostgreSQL 18 cluster with the installed vector
+extension passes all eight Session 7 integration tests, including the exact cosine query. Ruff,
+migration drift, Django system checks, and the repository check script pass. CI has a dedicated
+`pgvector/pgvector:pg16` job. The first failing acceptance test now proves an otherwise-valid
+sibling-sub-event upload returns `asset_not_found` and writes zero analysis/vector rows.
+
 **First failing acceptance test:** Attempt to upload an otherwise valid face result to an asset in a
 different tenant or sub-event and prove that no analysis/vector row is written.
 
 ## Session 8: owner/guest sharing, ephemeral search, and downloads
 
-**Status:** not started; depends on Sessions 6–7.
+**Status:** ready; not started. Sessions 6–7 are accepted.
 
-**Goal:** Complete customer discovery and delivery with independently scoped links.
+**Goal:** Complete customer discovery and delivery with independently scoped full-gallery links.
 
 **Work:** Add a photographer-created owner capability for the main event. Let the owner create and
-revoke guest capabilities scoped to the whole event or one active sub-event and to `full` or
-`selfie_only` mode. Give every link an independent high-entropy URL, auto-generated four-digit PIN,
-required/capped expiry, throttling, audit, and revocation. Implement exactly-one-usable-face input,
-ephemeral processing/cleanup, scoped vector search, deduplicated results, and visibility-derived
-signed original downloads.
+revoke full-gallery guest capabilities scoped to the whole event or one active sub-event. Give every
+link an independent high-entropy URL, auto-generated four-digit PIN, required/capped expiry,
+throttling, audit, and revocation. Implement exactly-one-usable-face input, ephemeral
+processing/cleanup, scoped recall-first vector search as a gallery filter, deduplicated ranked
+results, and visibility-derived signed original downloads.
 
 **Done when:**
 
-- Owner, full guest, and selfie-only guest permissions cannot widen through changed identifiers.
+- Owner and guest permissions cannot widen through changed identifiers.
 - Zero-face and multiple-face inputs are rejected clearly; exactly one usable face is required.
 - Raw input/crop is absent from object storage, database, logs, diagnostics, analytics, and error
   paths after every success/failure/cancellation.
-- Full links can browse/download all scoped visible photos; selfie-only links can view/download only
-  their returned result set.
+- Every guest can browse/download all scoped visible photos; search returns only photos in that same
+  scope and never changes download authorization.
 - Expired/revoked links and residual sessions fail; downloaded original hashes match uploads.
 
-**First failing acceptance test:** Use a valid selfie-only sub-event capability to request a matched
-photo from another sub-event and prove it returns not found and no signed URL.
+**First failing acceptance test:** Use a valid sub-event capability to search with an embedding that
+would match a photo in another sub-event and prove the photo is absent and no signed URL is issued.
 
 ## Session 9: production hardening and launch rehearsal
 
@@ -219,5 +271,5 @@ At the end of every session record:
 4. Known limitations and preserved invariants.
 5. The next session's first failing acceptance test.
 
-Do not begin Session 7 until Session 6 accepts the model contract. Do not begin a later session while
-an earlier authorization, privacy-cleanup, tenant, sub-event, checksum, or lifecycle test is failing.
+Session 8 may begin against ADRs 0009–0011. Do not begin a later session while an earlier authorization,
+privacy-cleanup, tenant, sub-event, checksum, or lifecycle test is failing.

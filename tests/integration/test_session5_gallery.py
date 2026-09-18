@@ -167,8 +167,15 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
     )
     haldi_asset = _gallery_asset(event, haldi_batch, position=2)
     event.derivatives_ready_generation = 1
+    event.face_index_ready_generation = 1
     event.state = EventState.REVIEW.value
-    event.save(update_fields=("derivatives_ready_generation", "state"))
+    event.save(
+        update_fields=(
+            "derivatives_ready_generation",
+            "face_index_ready_generation",
+            "state",
+        )
+    )
     monkeypatch.setattr(views, "configured_object_store", SigningStore)
 
     photographer_client = Client()

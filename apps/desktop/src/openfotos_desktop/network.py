@@ -3,6 +3,7 @@
 import base64
 import random
 import time
+from collections.abc import Callable
 from urllib.parse import urlparse
 from uuid import UUID
 
@@ -14,6 +15,7 @@ from openfotos_contracts import (
     WatermarkLogoKind,
     WatermarkTemplate,
 )
+from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT, FaceEngine
 
 from .api_client import AuthenticatedApiClient
 from .batch_sync import BatchSyncService
@@ -37,6 +39,7 @@ class DesktopNetworkService:
         storage_client: httpx.Client | None = None,
         sleeper=time.sleep,
         jitter=random.uniform,
+        face_engine_factory: Callable[[], FaceEngine] | None = None,
     ) -> None:
         self.store = store
         self._api = AuthenticatedApiClient(
@@ -52,6 +55,11 @@ class DesktopNetworkService:
             objects=self._objects,
             sleeper=sleeper,
             jitter=jitter,
+            **(
+                {"face_engine_factory": face_engine_factory}
+                if face_engine_factory is not None
+                else {}
+            ),
         )
         # Retain these attributes for callers that supplied and inspected custom clients.
         self.token_store = self._api.token_store
@@ -188,6 +196,11 @@ class DesktopNetworkService:
             ) from exc
         events = []
         for snapshot in snapshots:
+            if snapshot.face_model_id != ACCEPTED_FACE_MODEL_CONTRACT.model.id:
+                raise DesktopApiError(
+                    "face_model_mismatch",
+                    "This desktop version cannot process the event's face model.",
+                )
             policy = snapshot.preview_policy
             events.append(
                 EventCache(
@@ -195,6 +208,8 @@ class DesktopNetworkService:
                     name=snapshot.name,
                     storage_limit_bytes=snapshot.storage_limit_bytes,
                     processing_profile_id=snapshot.processing_profile_id,
+                    face_model_id=snapshot.face_model_id,
+                    face_index_ready=snapshot.face_index_ready,
                     server_url=origin,
                     reserved_original_bytes=snapshot.reserved_original_bytes,
                     verified_original_bytes=snapshot.verified_original_bytes,

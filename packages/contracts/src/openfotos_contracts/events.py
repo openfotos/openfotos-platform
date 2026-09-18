@@ -144,6 +144,8 @@ class EventSnapshot:
     intake_state: IntakeState
     intake_generation: int
     processing_profile_id: str
+    face_model_id: str
+    face_index_ready: bool
     max_contribution_devices: int
     active_contribution_devices: int
     device_label: str
@@ -165,6 +167,8 @@ class EventSnapshot:
                 "intake_state",
                 "intake_generation",
                 "processing_profile_id",
+                "face_model_id",
+                "face_index_ready",
                 "max_contribution_devices",
                 "active_contribution_devices",
                 "device_label",
@@ -205,6 +209,8 @@ class EventSnapshot:
         )
         if active_devices > maximum_devices:
             raise ContractError("invalid_response", "The event device totals are inconsistent.")
+        if not isinstance(value["face_index_ready"], bool):
+            raise ContractError("invalid_response", "face_index_ready must be a boolean.")
         policy = (
             PreviewPolicySnapshot.from_dict(value["preview_policy"])
             if value["preview_policy"] is not None
@@ -238,6 +244,12 @@ class EventSnapshot:
                 field="processing_profile_id",
                 maximum_length=100,
             ),
+            face_model_id=_text(
+                value["face_model_id"],
+                field="face_model_id",
+                maximum_length=128,
+            ),
+            face_index_ready=value["face_index_ready"],
             max_contribution_devices=maximum_devices,
             active_contribution_devices=active_devices,
             device_label=_text(
@@ -259,6 +271,8 @@ class EventSnapshot:
             "intake_state": self.intake_state.value,
             "intake_generation": self.intake_generation,
             "processing_profile_id": self.processing_profile_id,
+            "face_model_id": self.face_model_id,
+            "face_index_ready": self.face_index_ready,
             "max_contribution_devices": self.max_contribution_devices,
             "active_contribution_devices": self.active_contribution_devices,
             "device_label": self.device_label,

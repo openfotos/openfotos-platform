@@ -68,6 +68,11 @@ urlpatterns = [
         views.restore_gallery_asset,
         name="restore-gallery-asset",
     ),
+    path(
+        "dashboard/events/<uuid:event_id>/photos/<uuid:asset_id>/face-analysis/reset/",
+        views.reset_asset_face_analysis,
+        name="reset-face-analysis",
+    ),
     path("e/<str:token>/", views.event_access, name="event-access"),
     path(
         "e/<str:token>/sub-events/<uuid:sub_event_id>/",

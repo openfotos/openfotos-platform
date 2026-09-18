@@ -20,5 +20,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version-file: .python-version
-      - run: uv sync --frozen --extra server --extra desktop
+      - run: uv sync --frozen --extra server --extra desktop --extra vision
       - run: ./scripts/check.sh
+
+  pgvector:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: openfotos
+          POSTGRES_USER: openfotos
+          POSTGRES_PASSWORD: openfotos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openfotos -d openfotos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://openfotos:openfotos@127.0.0.1:5432/openfotos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version-file: .python-version
+      - run: uv sync --frozen --extra server --extra vision
+      - run: uv run pytest tests/integration/test_session7_face_index.py
