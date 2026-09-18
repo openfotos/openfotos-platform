@@ -67,6 +67,11 @@ class AuditAction(models.TextChoices):
     EVENT_CREATED = "event.created", "Event created"
     EVENT_CHANGED = "event.changed", "Event changed"
     EVENT_STATE_CHANGED = "event.state_changed", "Event state changed"
+    PORTFOLIO_PROFILE_CHANGED = "portfolio.profile_changed", "Portfolio profile changed"
+    PORTAL_PIN_ISSUED = "portal_capability.issued", "Portfolio PIN issued"
+    PORTAL_PIN_ROTATED = "portal_capability.rotated", "Portfolio PIN rotated"
+    PORTAL_PIN_UNLOCK = "portal_capability.pin_unlock", "Portfolio PIN unlock"
+    EVENT_MEDIA_PURGED = "event.media_purged", "Event media purged"
     PHOTOGRAPHER_LOGIN = "photographer.login", "Photographer login"
     PHOTOGRAPHER_LOGOUT = "photographer.logout", "Photographer logout"
     OWNER_CAPABILITY_ISSUED = "owner_capability.issued", "Owner capability issued"
@@ -122,6 +127,7 @@ class RateLimitPurpose(models.TextChoices):
     PHOTOGRAPHER_LOGIN = "photographer_login", "Photographer login"
     OWNER_PIN = "owner_pin", "Owner PIN"
     GUEST_PIN = "guest_pin", "Guest PIN"
+    PORTAL_PIN = "portal_pin", "Portfolio PIN"
     FACE_SEARCH_CLIENT = "face_search_client", "Face search by client"
     FACE_SEARCH_CAPABILITY = "face_search_capability", "Face search by capability"
 
@@ -147,6 +153,12 @@ class Photographer(models.Model):
         ],
     )
     display_name = models.CharField(max_length=200)
+    contact_phone = models.CharField(max_length=32, blank=True)
+    instagram_url = models.URLField(max_length=300, blank=True)
+    logo_object_key = models.CharField(max_length=255, blank=True)
+    logo_sha256 = models.CharField(max_length=64, blank=True, validators=[SHA256_VALIDATOR])
+    logo_width = models.PositiveIntegerField(blank=True, null=True)
+    logo_height = models.PositiveIntegerField(blank=True, null=True)
     status = models.CharField(
         max_length=16,
         choices=PhotographerStatus.choices,
@@ -213,6 +225,10 @@ class Event(models.Model):
         related_name="events",
     )
     name = models.CharField(max_length=200)
+    cover_object_key = models.CharField(max_length=255, blank=True)
+    cover_sha256 = models.CharField(max_length=64, blank=True, validators=[SHA256_VALIDATOR])
+    cover_width = models.PositiveIntegerField(blank=True, null=True)
+    cover_height = models.PositiveIntegerField(blank=True, null=True)
     share_access_version = models.UUIDField(default=uuid4, editable=False)
     state = models.CharField(
         max_length=16,
@@ -252,6 +268,9 @@ class Event(models.Model):
         related_name="current_for_events",
     )
     expires_at = models.DateTimeField(blank=True, null=True)
+    first_published_at = models.DateTimeField(blank=True, null=True, editable=False)
+    purge_after = models.DateTimeField(blank=True, null=True, editable=False)
+    media_purged_at = models.DateTimeField(blank=True, null=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -286,7 +305,26 @@ class Event(models.Model):
             and self.state == EventState.PUBLISHED.value
             and self.expires_at is not None
             and self.expires_at > checked_at
+            and self.media_purged_at is None
         )
+
+
+class ConsentAttestation(models.Model):
+    event = models.OneToOneField(
+        Event,
+        on_delete=models.PROTECT,
+        related_name="consent_attestation",
+    )
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="openfotos_consent_attestations",
+    )
+    notice_version = models.CharField(max_length=64)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self) -> str:
+        return f"{self.notice_version} for {self.event}"
 
 
 class SubEvent(models.Model):
@@ -311,11 +349,10 @@ class SubEvent(models.Model):
         return f"{self.event}: {self.name}"
 
 
-class ShareCapability(models.Model):
-    """Security state shared by owner and guest URL capabilities."""
+class PinCapability(models.Model):
+    """PIN and revocation state shared by visitor capabilities."""
 
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    secret_digest = models.CharField(max_length=64, unique=True, validators=[SHA256_VALIDATOR])
     pin_hash = models.CharField(max_length=256, editable=False)
     access_version = models.UUIDField(default=uuid4, editable=False)
     expires_at = models.DateTimeField()
@@ -341,6 +378,26 @@ class ShareCapability(models.Model):
     def has_live_credentials(self, *, at=None) -> bool:
         checked_at = at or timezone.now()
         return self.revoked_at is None and self.expires_at > checked_at
+
+
+class ShareCapability(PinCapability):
+    """High-entropy URL secret state shared by owner and guest capabilities."""
+
+    secret_digest = models.CharField(max_length=64, unique=True, validators=[SHA256_VALIDATOR])
+
+    class Meta:
+        abstract = True
+
+
+class PortalCapability(PinCapability):
+    event = models.OneToOneField(
+        Event,
+        on_delete=models.PROTECT,
+        related_name="portal_capability",
+    )
+
+    def __str__(self) -> str:
+        return f"Portfolio access for {self.event}"
 
 
 class OwnerCapability(ShareCapability):
@@ -398,6 +455,13 @@ class FaceSearchResultSet(models.Model):
         on_delete=models.CASCADE,
         related_name="face_search_results",
     )
+    portal_capability = models.ForeignKey(
+        PortalCapability,
+        blank=True,
+        null=True,
+        on_delete=models.CASCADE,
+        related_name="face_search_results",
+    )
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="face_search_results")
     sub_event = models.ForeignKey(
         SubEvent,
@@ -414,8 +478,21 @@ class FaceSearchResultSet(models.Model):
         constraints = [
             models.CheckConstraint(
                 condition=(
-                    Q(owner_capability__isnull=False, guest_capability__isnull=True)
-                    | Q(owner_capability__isnull=True, guest_capability__isnull=False)
+                    Q(
+                        owner_capability__isnull=False,
+                        guest_capability__isnull=True,
+                        portal_capability__isnull=True,
+                    )
+                    | Q(
+                        owner_capability__isnull=True,
+                        guest_capability__isnull=False,
+                        portal_capability__isnull=True,
+                    )
+                    | Q(
+                        owner_capability__isnull=True,
+                        guest_capability__isnull=True,
+                        portal_capability__isnull=False,
+                    )
                 ),
                 name="face_search_has_one_capability",
             )
@@ -659,6 +736,7 @@ class AssetObject(models.Model):
     expected_bytes = models.PositiveBigIntegerField()
     sha256 = models.CharField(max_length=64, validators=[SHA256_VALIDATOR])
     content_md5 = models.CharField(max_length=24, validators=[MD5_VALIDATOR])
+    content_type = models.CharField(max_length=32, default="image/jpeg")
     width = models.PositiveIntegerField()
     height = models.PositiveIntegerField()
     state = models.CharField(

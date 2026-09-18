@@ -1,5 +1,6 @@
 """Server-rendered photographer and private gallery flows."""
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import authenticate, login, logout
 from django.core.exceptions import ImproperlyConfigured, ValidationError
@@ -10,13 +11,16 @@ from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from openfotos_contracts import AssetVariant, EventState, UploadObjectState
+from openfotos_storage.backend import ObjectStoreError
 
 from .audit import record_audit
 from .face_services import reset_face_analysis
 from .forms import (
     BatchReassignmentForm,
+    EventCreateForm,
     GalleryExclusionForm,
     PhotographerLoginForm,
+    PortfolioProfileForm,
     SubEventForm,
 )
 from .gallery_services import (
@@ -40,17 +44,26 @@ from .models import (
     GuestCapability,
     OwnerCapability,
     PhotographerMembership,
+    PortalCapability,
     PreviewPolicy,
     RateLimitPurpose,
     SubEvent,
 )
 from .object_store import configured_object_store
+from .portfolio_services import (
+    PortfolioError,
+    create_event_with_cover,
+    publish_event_with_portal,
+    rotate_portal_pin,
+    update_portfolio_profile,
+)
 from .rate_limits import clear_failures, rate_limit_status, register_failure
 from .services import transition_event
 from .sharing_services import (
     ShareAccessError,
     issue_owner_capability,
     owner_is_available,
+    portal_is_available,
     revoke_guest_capability,
     revoke_owner_capability,
 )
@@ -194,8 +207,126 @@ def dashboard(request: HttpRequest) -> HttpResponse:
     return _private_render(
         request,
         "openfotos_events/dashboard.html",
-        {"photographer": photographer, "events": events},
+        {
+            "photographer": photographer,
+            "events": events,
+            "event_form": EventCreateForm(),
+            "profile_form": PortfolioProfileForm(
+                initial={
+                    "display_name": photographer.display_name,
+                    "contact_phone": photographer.contact_phone,
+                    "instagram_url": photographer.instagram_url,
+                }
+            ),
+        },
     )
+
+
+@require_GET
+def portfolio(request: HttpRequest) -> HttpResponse:
+    photographer = _tenant(request)
+    search = request.GET.get("q", "").strip()[:100]
+    events = Event.objects.filter(
+        photographer=photographer,
+        state=EventState.PUBLISHED.value,
+        cover_object_key__gt="",
+    ).select_related("portal_capability")
+    if search:
+        events = events.filter(name__icontains=search)
+    try:
+        object_store = configured_object_store()
+        logo_url = (
+            object_store.presign_get(
+                key=photographer.logo_object_key,
+                expires_in_seconds=settings.SIGNED_URL_TTL_SECONDS,
+            ).url
+            if photographer.logo_object_key
+            else ""
+        )
+        cards = []
+        for event in events:
+            cover_url = object_store.presign_get(
+                key=event.cover_object_key,
+                expires_in_seconds=settings.SIGNED_URL_TTL_SECONDS,
+            ).url
+            portal = getattr(event, "portal_capability", None)
+            cards.append(
+                {
+                    "event": event,
+                    "cover_url": cover_url,
+                    "portal": portal if portal and portal_is_available(portal) else None,
+                }
+            )
+    except (ImproperlyConfigured, ObjectStoreError):
+        return HttpResponse("The portfolio is temporarily unavailable.", status=503)
+    response = render(
+        request,
+        "openfotos_events/portfolio.html",
+        {
+            "photographer": photographer,
+            "logo_url": logo_url,
+            "cards": cards,
+            "search": search,
+        },
+    )
+    response.headers["Cache-Control"] = "public, max-age=60"
+    response.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive"
+    return response
+
+
+@require_POST
+def create_event(request: HttpRequest) -> HttpResponse:
+    photographer = _tenant(request)
+    if _active_membership(request, photographer) is None:
+        raise Http404
+    form = EventCreateForm(request.POST, request.FILES)
+    if not form.is_valid():
+        messages.error(request, "Enter an event name, cover photo, and consent attestation.")
+        return redirect("events:dashboard")
+    try:
+        event = create_event_with_cover(
+            photographer=photographer,
+            name=form.cleaned_data["name"],
+            cover_upload=form.cleaned_data["cover_photo"],
+            actor=request.user,
+            object_store=configured_object_store(),
+            request=request,
+        )
+    except (ImproperlyConfigured, PortfolioError) as exc:
+        messages.error(request, str(exc))
+        return redirect("events:dashboard")
+    messages.success(request, "Event created. Add at least one sub-event before uploading.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def update_portfolio(request: HttpRequest) -> HttpResponse:
+    photographer = _tenant(request)
+    if _active_membership(request, photographer) is None:
+        raise Http404
+    form = PortfolioProfileForm(request.POST, request.FILES)
+    if not form.is_valid():
+        messages.error(request, "Check the portfolio profile fields and try again.")
+        return redirect("events:dashboard")
+    logo = form.cleaned_data.get("logo")
+    try:
+        update_portfolio_profile(
+            photographer=photographer,
+            display_name=form.cleaned_data["display_name"],
+            contact_phone=form.cleaned_data["contact_phone"],
+            instagram_url=form.cleaned_data["instagram_url"],
+            logo_upload=logo,
+            actor=request.user,
+            object_store=configured_object_store() if logo else None,
+            request=request,
+        )
+    except (ImproperlyConfigured, PortfolioError, ValidationError) as exc:
+        messages.error(
+            request, "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
+        )
+    else:
+        messages.success(request, "Portfolio profile updated.")
+    return redirect("events:dashboard")
 
 
 def _photographer_event(request: HttpRequest, event_id) -> Event:
@@ -279,6 +410,7 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
     gallery_ready = event.derivatives_ready_generation == event.intake_generation
     face_ready = event.face_index_ready_generation == event.intake_generation
     owner_capability = OwnerCapability.objects.filter(event=event).first()
+    portal_capability = PortalCapability.objects.filter(event=event).first()
     return _private_render(
         request,
         "openfotos_events/dashboard_event.html",
@@ -309,6 +441,10 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
             "face_ready": face_ready,
             "ready": gallery_ready and face_ready,
             "owner_capability": owner_capability,
+            "portal_capability": portal_capability,
+            "portal_capability_active": (
+                portal_is_available(portal_capability) if portal_capability else False
+            ),
             "owner_capability_active": (
                 owner_is_available(owner_capability) if owner_capability else False
             ),
@@ -418,17 +554,55 @@ def reassign_event_batch(request: HttpRequest, event_id, batch_id) -> HttpRespon
 def publish_event(request: HttpRequest, event_id) -> HttpResponse:
     event = _photographer_event(request, event_id)
     try:
-        transition_event(
-            event_id=event.id,
-            target=EventState.PUBLISHED,
+        published = publish_event_with_portal(
+            event=event,
             actor=request.user,
             request=request,
         )
     except ValidationError as exc:
         messages.error(request, "; ".join(exc.messages))
     else:
-        messages.success(request, "The private gallery is published.")
+        if published.pin is not None:
+            path = reverse("events:portal-gallery", args=(published.capability.id,))
+            return _private_render(
+                request,
+                "openfotos_events/credential_reveal.html",
+                {
+                    "event": published.event,
+                    "share_url": request.build_absolute_uri(path),
+                    "pin": published.pin,
+                    "capability_label": "Portfolio gallery",
+                    "link_label": "Portfolio link",
+                    "expires_at": published.capability.expires_at,
+                    "return_url": reverse("events:photographer-event", args=(event.id,)),
+                },
+            )
+        messages.success(request, "The private gallery and portfolio card are published.")
     return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def rotate_event_portal_pin(request: HttpRequest, event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    try:
+        published = rotate_portal_pin(event=event, actor=request.user, request=request)
+    except PortfolioError as exc:
+        messages.error(request, str(exc))
+        return redirect("events:photographer-event", event_id=event.id)
+    path = reverse("events:portal-gallery", args=(published.capability.id,))
+    return _private_render(
+        request,
+        "openfotos_events/credential_reveal.html",
+        {
+            "event": published.event,
+            "share_url": request.build_absolute_uri(path),
+            "pin": published.pin,
+            "capability_label": "Portfolio gallery",
+            "link_label": "Portfolio link",
+            "expires_at": published.capability.expires_at,
+            "return_url": reverse("events:photographer-event", args=(event.id,)),
+        },
+    )
 
 
 @require_POST

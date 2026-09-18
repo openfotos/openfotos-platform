@@ -57,8 +57,10 @@ class MemoryObjectStore:
     def __init__(self) -> None:
         self.objects: dict[str, tuple[bytes, str, dict[str, str]]] = {}
 
-    def presign_put(self, *, key, content_length, content_md5, sha256, expires_in_seconds):
-        del content_length, content_md5
+    def presign_put(
+        self, *, key, content_length, content_md5, sha256, content_type, expires_in_seconds
+    ):
+        del content_length, content_md5, content_type
         return PresignedPut(
             url=f"https://storage.invalid/{key}",
             headers={"x-amz-meta-openfotos-sha256": sha256},
@@ -156,6 +158,7 @@ def _verified_original(event, installation, storage, *, content=b"original jpeg 
                 {
                     "id": str(asset_id),
                     "filename": "IMG_10.jpg",
+                    "content_type": "image/jpeg",
                     "size_bytes": len(content),
                     "sha256": hashlib.sha256(content).hexdigest(),
                     "content_md5": _md5(content),

@@ -15,6 +15,13 @@ def decode_srgb_bgr(image_bytes: bytes) -> object:
     from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
 
     try:
+        from pillow_heif import register_heif_opener
+    except ImportError:
+        register_heif_opener = None
+    if register_heif_opener is not None:
+        register_heif_opener()
+
+    try:
         with Image.open(BytesIO(image_bytes)) as opened:
             opened.load()
             oriented = ImageOps.exif_transpose(opened)

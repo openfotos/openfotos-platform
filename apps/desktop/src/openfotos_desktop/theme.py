@@ -49,6 +49,12 @@ QFrame#AppHeader {
     border-bottom: 1px solid #dfe4ea;
 }
 
+QLabel#HeaderBrand {
+    color: #101828;
+    font-size: 20px;
+    font-weight: 700;
+}
+
 QLabel#HeaderProduct {
     color: #344054;
     font-size: 14px;

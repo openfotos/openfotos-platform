@@ -9,7 +9,12 @@ from django.db import transaction
 from django.db.models import Exists, OuterRef, QuerySet
 from django.utils import timezone
 
-from openfotos_contracts import AssetVariant, EventState, UploadObjectState
+from openfotos_contracts import (
+    ORIGINAL_EXTENSION_BY_CONTENT_TYPE,
+    AssetVariant,
+    EventState,
+    UploadObjectState,
+)
 from openfotos_storage.backend import ObjectStoreError, S3ObjectStore
 
 from .audit import record_audit
@@ -159,12 +164,13 @@ def original_download(
     except (Asset.DoesNotExist, AssetObject.DoesNotExist) as exc:
         raise IngestionError("asset_not_found", "The gallery photo is unavailable.") from exc
     try:
+        extension = ORIGINAL_EXTENSION_BY_CONTENT_TYPE[original.content_type]
         signed = object_store.presign_get(
             key=original.object_key,
             expires_in_seconds=settings.SIGNED_URL_TTL_SECONDS,
-            content_disposition=f'attachment; filename="photo-{asset.id}.jpg"',
+            content_disposition=f'attachment; filename="photo-{asset.id}{extension}"',
         )
-    except ObjectStoreError as exc:
+    except (KeyError, ObjectStoreError) as exc:
         raise IngestionError(
             "object_store_unavailable",
             "The original photo is temporarily unavailable.",

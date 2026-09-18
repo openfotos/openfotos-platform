@@ -15,6 +15,33 @@ class PhotographerLoginForm(forms.Form):
     )
 
 
+class EventCreateForm(forms.Form):
+    name = forms.CharField(max_length=200, strip=True, label="Event name")
+    cover_photo = forms.FileField(
+        label="Portfolio cover photo",
+        widget=forms.FileInput(
+            attrs={"accept": "image/jpeg,image/png,image/webp,image/heic,image/heif,.heic,.heif"}
+        ),
+    )
+    consent_attested = forms.BooleanField(
+        label=(
+            "I confirm that the studio has the necessary customer permission to upload and "
+            "privately share these photos, create the event face-search index, and display this "
+            "event name and sanitized cover on the studio portfolio."
+        )
+    )
+
+
+class PortfolioProfileForm(forms.Form):
+    display_name = forms.CharField(max_length=200, strip=True, label="Studio display name")
+    contact_phone = forms.CharField(max_length=32, strip=True, required=False)
+    instagram_url = forms.URLField(max_length=300, required=False, assume_scheme="https")
+    logo = forms.FileField(
+        required=False,
+        widget=forms.FileInput(attrs={"accept": "image/jpeg,image/png,image/webp"}),
+    )
+
+
 class SharePinForm(forms.Form):
     pin = forms.RegexField(
         regex=r"^[0-9]{4}$",

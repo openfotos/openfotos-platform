@@ -13,13 +13,8 @@
 
 {% if share_kind == "owner" or not capability.sub_event_id %}
   <nav class="sub-event-filters" aria-label="Gallery sub-events">
-    {% if share_kind == "owner" %}
-      <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:owner-gallery' capability_id=capability.id %}">All</a>
-      {% for sub_event in sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:owner-sub-event' capability_id=capability.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
-    {% else %}
-      <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:guest-gallery' capability_id=capability.id %}">All</a>
-      {% for sub_event in sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:guest-sub-event' capability_id=capability.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
-    {% endif %}
+    <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url gallery_route capability_id=capability.id %}">All</a>
+    {% for sub_event in sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url sub_event_route capability_id=capability.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
   </nav>
 {% elif selected_sub_event %}
   <p class="status-pill ready">{{ selected_sub_event.name }}</p>
@@ -32,20 +27,12 @@
       <h2>{{ page.paginator.count }} matching photo{{ page.paginator.count|pluralize }}</h2>
       <p class="muted">Results are ranked by the closest match. Difficult photos may be missed and extra photos may appear.</p>
     </div>
-    {% if share_kind == "owner" %}
-      <form method="post" action="{% url 'events:owner-clear-search' capability_id=capability.id result_id=search_result.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Clear search</button></form>
-    {% else %}
-      <form method="post" action="{% url 'events:guest-clear-search' capability_id=capability.id result_id=search_result.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Clear search</button></form>
-    {% endif %}
+    <form method="post" action="{% url clear_search_route capability_id=capability.id result_id=search_result.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Clear search</button></form>
   {% else %}
     <p class="eyebrow">Find my photos</p>
     <h2>Search with one clear face</h2>
     <p class="muted">Use a camera photo or choose JPEG, PNG, WebP, HEIC, or HEIF up to 20 MB. The image, crop, and one-time search vector are discarded after processing.</p>
-    {% if share_kind == "owner" %}
-      {% if selected_sub_event %}<form method="post" enctype="multipart/form-data" action="{% url 'events:owner-sub-event-search' capability_id=capability.id sub_event_id=selected_sub_event.id %}" novalidate>{% else %}<form method="post" enctype="multipart/form-data" action="{% url 'events:owner-search' capability_id=capability.id %}" novalidate>{% endif %}
-    {% else %}
-      {% if selected_sub_event %}<form method="post" enctype="multipart/form-data" action="{% url 'events:guest-sub-event-search' capability_id=capability.id sub_event_id=selected_sub_event.id %}" novalidate>{% else %}<form method="post" enctype="multipart/form-data" action="{% url 'events:guest-search' capability_id=capability.id %}" novalidate>{% endif %}
-    {% endif %}
+    {% if selected_sub_event %}<form method="post" enctype="multipart/form-data" action="{% url sub_event_search_route capability_id=capability.id sub_event_id=selected_sub_event.id %}" novalidate>{% else %}<form method="post" enctype="multipart/form-data" action="{% url search_route capability_id=capability.id %}" novalidate>{% endif %}
       {% csrf_token %}
       {% if search_form.non_field_errors %}<div class="form-error" role="alert">{{ search_form.non_field_errors }}</div>{% endif %}
       {{ search_form.reference_photo.label_tag }} {{ search_form.reference_photo }}

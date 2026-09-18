@@ -58,9 +58,10 @@ class MemoryObjectStore:
         content_length,
         content_md5,
         sha256,
+        content_type,
         expires_in_seconds,
     ) -> PresignedPut:
-        del content_length, content_md5
+        del content_length, content_md5, content_type
         return PresignedPut(
             url=f"https://storage.invalid/{key}",
             headers={"x-amz-meta-openfotos-sha256": sha256},
@@ -137,7 +138,14 @@ def setup_event(*, storage_limit=25_000_000_000):
     return event, first.session, second.session
 
 
-def contribution(content: bytes, *, batch_id=None, asset_id=None) -> ContributionInput:
+def contribution(
+    content: bytes,
+    *,
+    batch_id=None,
+    asset_id=None,
+    filename="edited-photo.jpg",
+    content_type="image/jpeg",
+) -> ContributionInput:
     sub_event = SubEvent.objects.get(is_archived=False)
     payload = {
         "batch_id": str(batch_id or uuid4()),
@@ -148,7 +156,8 @@ def contribution(content: bytes, *, batch_id=None, asset_id=None) -> Contributio
         "assets": [
             {
                 "id": str(asset_id or uuid4()),
-                "filename": "edited-photo.jpg",
+                "filename": filename,
+                "content_type": content_type,
                 "size_bytes": len(content),
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "content_md5": base64.b64encode(
@@ -175,6 +184,7 @@ def contribution_many(contents: list[bytes]) -> ContributionInput:
                 {
                     "id": str(uuid4()),
                     "filename": f"edited-photo-{index}.jpg",
+                    "content_type": "image/jpeg",
                     "size_bytes": len(content),
                     "sha256": hashlib.sha256(content).hexdigest(),
                     "content_md5": base64.b64encode(
@@ -294,6 +304,40 @@ def test_lost_response_recovery_verifies_object_and_finalizes_immutable_generati
     assert reopened.current_ingestion_manifest is None
     assert reopened.state == EventState.UPLOADING.value
     assert finalized.object_key in storage.objects
+
+
+def test_png_original_keeps_its_mime_type_and_server_owned_extension() -> None:
+    content = b"synthetic png bytes"
+    event, _primary, installation = setup_event()
+    batch = reserve_contribution(
+        session=installation,
+        event_id=event.id,
+        contribution=contribution(
+            content,
+            filename="edited-photo.png",
+            content_type="image/png",
+        ),
+    )
+    storage = MemoryObjectStore()
+
+    [lease] = issue_upload_leases(
+        session=installation,
+        event_id=event.id,
+        batch_id=batch.id,
+        object_store=storage,
+    )
+    upload = AssetObject.objects.get(asset_id=lease["asset_id"])
+    storage.upload(upload.object_key, content, content_type="image/png")
+    verified = verify_uploaded_object(
+        session=installation,
+        event_id=event.id,
+        asset_id=upload.asset_id,
+        object_store=storage,
+    )
+
+    assert upload.object_key.endswith(".png")
+    assert upload.content_type == "image/png"
+    assert verified.state == UploadObjectState.VERIFIED.value
 
 
 def test_finalization_fails_retryably_when_existing_manifest_cannot_be_read() -> None:

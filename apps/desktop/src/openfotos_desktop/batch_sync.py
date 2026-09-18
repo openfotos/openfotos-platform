@@ -129,6 +129,7 @@ class BatchSyncService:
                     {
                         "id": str(item.id),
                         "filename": item.basename,
+                        "content_type": item.content_type,
                         "size_bytes": item.snapshot.size_bytes,
                         "sha256": item.sha256,
                         "content_md5": item.content_md5,
@@ -538,7 +539,9 @@ class BatchSyncService:
             json={},
         )
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix=f"{item.id}-source-", suffix=".jpg", dir=cache_directory
+            prefix=f"{item.id}-source-",
+            suffix=Path(item.basename).suffix.lower(),
+            dir=cache_directory,
         )
         os.close(descriptor)
         destination = Path(temporary_name)

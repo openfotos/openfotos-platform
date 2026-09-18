@@ -23,6 +23,7 @@ from .models import (
     GuestCapability,
     OwnerCapability,
     Photographer,
+    PortalCapability,
     SubEvent,
     generate_share_pin,
 )
@@ -67,6 +68,26 @@ def guest_is_available(guest: GuestCapability, *, at=None) -> bool:
         and owner_is_available(guest.owner, at=checked_at)
         and (guest.sub_event_id is None or not guest.sub_event.is_archived)
     )
+
+
+def portal_is_available(portal: PortalCapability, *, at=None) -> bool:
+    checked_at = at or timezone.now()
+    return portal.has_live_credentials(at=checked_at) and portal.event.is_publicly_available(
+        at=checked_at
+    )
+
+
+def portal_for_tenant(*, photographer: Photographer, capability_id: UUID) -> PortalCapability:
+    try:
+        portal = PortalCapability.objects.select_related("event__photographer").get(
+            pk=capability_id,
+            event__photographer=photographer,
+        )
+    except PortalCapability.DoesNotExist as exc:
+        raise ShareAccessError("capability_not_found", "This gallery is unavailable.") from exc
+    if not portal_is_available(portal):
+        raise ShareAccessError("capability_not_found", "This gallery is unavailable.")
+    return portal
 
 
 def owner_for_tenant(*, photographer: Photographer, capability_id: UUID) -> OwnerCapability:

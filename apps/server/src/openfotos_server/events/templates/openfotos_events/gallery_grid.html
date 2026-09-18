@@ -7,10 +7,8 @@
         {% else %}
           <a class="gallery-tile" href="{% url 'events:photographer-photo' event_id=event.id asset_id=image.asset.id %}">
         {% endif %}
-      {% elif share_kind == "owner" %}
-        {% if selected_sub_event %}<a class="gallery-tile" href="{% url 'events:owner-sub-event-photo' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">{% else %}<a class="gallery-tile" href="{% url 'events:owner-photo' capability_id=capability.id asset_id=image.asset.id %}">{% endif %}
       {% else %}
-        {% if selected_sub_event %}<a class="gallery-tile" href="{% url 'events:guest-sub-event-photo' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">{% else %}<a class="gallery-tile" href="{% url 'events:guest-photo' capability_id=capability.id asset_id=image.asset.id %}">{% endif %}
+        {% if selected_sub_event %}<a class="gallery-tile" href="{% url sub_event_photo_route capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">{% else %}<a class="gallery-tile" href="{% url photo_route capability_id=capability.id asset_id=image.asset.id %}">{% endif %}
       {% endif %}
         <img src="{{ image.url }}" width="{{ image.width }}" height="{{ image.height }}" loading="lazy" alt="Photo {{ image.asset.gallery_position }} from {{ event.name }}">
       </a>

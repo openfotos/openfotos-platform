@@ -72,9 +72,38 @@ def test_mixed_nested_inventory_reports_exact_counts_and_bytes(tmp_path: Path) -
         assert summary.state is BatchState.NEEDS_REVIEW
         reasons = {item.reason for item in store.list_items(batch_id) if item.reason}
         assert reasons == {
-            RejectionReason.CONTENT_TYPE_MISMATCH,
+            RejectionReason.INVALID_IMAGE,
             RejectionReason.UNSUPPORTED_EXTENSION,
         }
+
+
+@pytest.mark.parametrize(
+    ("suffix", "image_format", "content_type"),
+    [
+        (".jpg", "JPEG", "image/jpeg"),
+        (".png", "PNG", "image/png"),
+        (".webp", "WEBP", "image/webp"),
+    ],
+)
+def test_common_non_raw_image_formats_are_accepted(
+    tmp_path: Path, suffix: str, image_format: str, content_type: str
+) -> None:
+    source = tmp_path / f"photo{suffix}"
+    Image.new("RGB", (8, 6), color="navy").save(source, format=image_format)
+
+    result = InventoryValidator().validate(source, size_bytes=source.stat().st_size)
+
+    assert result.status.value == "accepted"
+    assert result.content_type == content_type
+
+
+def test_decoded_format_must_match_extension(tmp_path: Path) -> None:
+    source = tmp_path / "photo.png"
+    Image.new("RGB", (8, 6), color="navy").save(source, format="JPEG")
+
+    result = InventoryValidator().validate(source, size_bytes=source.stat().st_size)
+
+    assert result.reason is RejectionReason.CONTENT_TYPE_MISMATCH
 
 
 def test_forced_exit_resumes_without_revalidating_unchanged_items(tmp_path: Path) -> None:
@@ -320,4 +349,4 @@ def test_jpeg_signature_with_invalid_structure_has_decode_reason(tmp_path: Path)
         store.add_files(batch_id, [invalid])
         InventoryScanner(store).scan(batch_id)
 
-        assert store.list_items(batch_id)[0].reason is RejectionReason.INVALID_JPEG
+        assert store.list_items(batch_id)[0].reason is RejectionReason.INVALID_IMAGE

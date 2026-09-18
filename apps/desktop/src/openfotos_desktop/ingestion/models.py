@@ -53,6 +53,7 @@ class RejectionReason(StrEnum):
     UNSUPPORTED_EXTENSION = "unsupported_extension"
     CONTENT_TYPE_MISMATCH = "content_type_mismatch"
     INVALID_JPEG = "invalid_jpeg"
+    INVALID_IMAGE = "invalid_image"
     FILE_TOO_LARGE = "file_too_large"
     IMAGE_TOO_LARGE = "image_too_large"
     SYMBOLIC_LINK = "symbolic_link"
@@ -77,7 +78,7 @@ class ScanLimits:
 
     def __post_init__(self) -> None:
         if self.max_file_bytes <= 0 or self.max_pixels <= 0:
-            raise ValueError("JPEG limits must be positive.")
+            raise ValueError("Image limits must be positive.")
 
 
 @dataclass(frozen=True)

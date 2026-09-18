@@ -57,6 +57,7 @@ def test_presigned_original_and_immutable_manifest_against_live_object_store() -
             content_length=len(original),
             content_md5=original_md5,
             sha256=original_sha256,
+            content_type="image/jpeg",
             expires_in_seconds=300,
         )
         try:

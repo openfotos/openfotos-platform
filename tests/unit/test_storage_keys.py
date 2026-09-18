@@ -19,6 +19,12 @@ def test_asset_key_is_event_scoped_and_uses_uuid_not_filename() -> None:
         "events/12345678-1234-5678-1234-567812345678/"
         "previews/87654321-4321-8765-4321-876543218765.jpg"
     )
+    assert asset_key(
+        EVENT_ID,
+        ASSET_ID,
+        AssetVariant.ORIGINAL,
+        content_type="image/webp",
+    ).endswith("/originals/87654321-4321-8765-4321-876543218765.webp")
 
 
 def test_manifest_key_is_event_scoped() -> None:

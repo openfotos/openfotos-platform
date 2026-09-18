@@ -35,6 +35,7 @@ class MemoryObjectStore:
         content_length,
         content_md5,
         sha256,
+        content_type,
         expires_in_seconds,
     ):
         return PresignedPut(
@@ -42,7 +43,7 @@ class MemoryObjectStore:
             headers={
                 "Content-Length": str(content_length),
                 "Content-MD5": content_md5,
-                "Content-Type": "image/jpeg",
+                "Content-Type": content_type,
                 "If-None-Match": "*",
                 "x-amz-meta-openfotos-sha256": sha256,
             },
@@ -137,6 +138,7 @@ def manifest(content: bytes, *, batch_id=None, asset_id=None):
             {
                 "id": str(asset_id or uuid4()),
                 "filename": "photo.jpg",
+                "content_type": "image/jpeg",
                 "size_bytes": len(content),
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "content_md5": base64.b64encode(

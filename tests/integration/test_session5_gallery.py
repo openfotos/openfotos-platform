@@ -22,6 +22,7 @@ from openfotos_server.events.models import (
     Asset,
     AssetObject,
     AuditAction,
+    ConsentAttestation,
     ContributionBatch,
     Event,
     EventInstallation,
@@ -80,6 +81,15 @@ def _tenant(slug="alpha"):
         expires_at=timezone.now() + timedelta(days=10),
         state=EventState.PROCESSING.value,
         intake_state="closed",
+        cover_object_key=f"events/{uuid4()}/portfolio/cover.jpg",
+        cover_sha256="a" * 64,
+        cover_width=1200,
+        cover_height=800,
+    )
+    ConsentAttestation.objects.create(
+        event=event,
+        actor=user,
+        notice_version="portfolio-face-index-consent-v1",
     )
     installation = EventInstallation.objects.create(
         event=event,
@@ -208,7 +218,9 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
         reverse("events:publish-event", args=(event.id,)),
         headers={"host": "alpha.localhost"},
     )
-    assert published.status_code == 302
+    assert published.status_code == 200
+    assert b"Portfolio gallery" in published.content
+    assert b"Four-digit" in published.content
     event.refresh_from_db()
     assert event.state == EventState.PUBLISHED.value
 

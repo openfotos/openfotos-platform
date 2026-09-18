@@ -1,16 +1,17 @@
 # OpenFotos product and technical plan
 
-**Document status:** authoritative pilot plan, revised through Session 8
+**Document status:** authoritative pilot plan, revised through the pre-Session 9 gate
 
 **Revision date:** 18 September 2026
 
-**Implementation status:** Sessions 1–8 are complete; Session 9 is planned
+**Implementation status:** Sessions 1–8 and the pre-Session 9 gate are complete; Session 9 is planned
 
 ## 1. Purpose
 
 OpenFotos is a private wedding-photo delivery system. A photographer organizes one wedding as a
 main event, divides it into named sub-events such as Haldi, Reception, Marriage, or Pre-wedding,
-uploads edited JPEGs through the desktop application, and publishes a private web gallery.
+uploads edited JPEG/JPG, PNG, WebP, HEIC, or HEIF images through the desktop application, and
+publishes a private web gallery plus a PIN-gated event portal on the studio portfolio.
 
 The product lets the photographer hand the main customer an owner link. That customer
 can browse the full wedding or one sub-event and can create narrower guest links. Every guest link
@@ -61,14 +62,27 @@ search index, not a customer-facing grouping system.
 18. Search inputs require explicit consent, are capped at 20 MiB/40 megapixels, and leave only
     non-authorizing ordered asset IDs for one hour; raw input, crops, and query vectors are not
     retained.
-19. Capability expiry disables access but does not delete event media. Retention deletion remains
-    a controlled, audited Session 9 operation.
+19. Capability expiry disables access but does not itself delete event media.
+20. Photographers create main events in the tenant web dashboard with a mandatory name, sanitized
+    cover derivative, and versioned customer-consent attestation.
+21. Published events appear automatically on the photographer's public subdomain. Each card opens
+    a separate whole-event portal with browse/search/download authority and no owner controls.
+22. The photographer issues one private owner link; only the owner creates ordinary whole-event or
+    sub-event guest links. The photographer can inspect and revoke them.
+23. Event retention is 365 days from first publication plus a 30-day grace period. Purge removes
+    private media, face/search state, manifests, and capabilities while retaining the consented
+    title and sanitized cover as a non-clickable showcase card.
+24. One private R2 bucket serves each environment. Event UUID prefixes and server-issued exact
+    leases—not bucket-per-event administration—are the storage authorization boundary.
+25. The public portal's UUID plus four-digit PIN is accepted only for the supervised first studio.
+    Distributed abuse protection and global per-event throttling are required before studio two.
 
 These decisions supersede conflicting text in ADRs 0002, 0003, 0005, 0006, and 0007. ADR 0008
 records the Session 5 retrofit, ADR 0009 records full-gallery recall-first search, and ADR 0010
 records the accepted face-model contract. ADR 0011 records the implemented direct index, recovery,
 readiness, and exact SQL scope. ADR 0012 records the implemented capability, credential, ephemeral
-search, and download contract.
+search, and download contract. ADR 0013 records the studio workflow, portfolio portal, formats,
+storage, and retention decisions.
 
 ## 3. Scope and release posture
 
@@ -76,7 +90,7 @@ search, and download contract.
 
 - One initial photographer business, with tenant boundaries retained for safe expansion.
 - Wedding-sized main events with up to 50 sub-events.
-- Edited JPEG inputs, normally below 20–25 GB per main event.
+- Edited JPEG/JPG, PNG, WebP, HEIC, or HEIF inputs, normally below 20–25 GB per main event.
 - One photographer account and up to ten active desktop installations per event.
 - Private originals, previews, thumbnails, manifests, and face embeddings.
 - Server-rendered photographer and visitor web experiences.
@@ -89,7 +103,7 @@ search, and download contract.
 - Face clustering, naming people, identity enrollment, or demographic inference.
 - Nested sub-events.
 - Upload-only users or outside contributor invitations.
-- Mobile applications, social features, public discovery, or public indexing.
+- Mobile applications, social features, directory-wide public discovery, or public indexing.
 - RAW/video ingestion, photo editing, duplicate-photo merging, or automatic curation.
 - Per-photo sub-event reassignment.
 - A claim that four-digit PINs alone resist guessing.
@@ -106,7 +120,7 @@ search, and download contract.
 | Sub-event | One ordered, non-nested section inside an event. |
 | Contribution batch | Immutable local/server batch assigned to one sub-event. |
 | Asset | One uploaded photo record. |
-| Original | Exact uploaded JPEG bytes. |
+| Original | Exact uploaded bytes in one accepted edited-image format. |
 | Preview | Gallery-sized image, optionally watermarked. |
 | Thumbnail | Clean small gallery-grid image. |
 | Face index | Per-face embeddings attached to assets for scoped search. |
@@ -118,14 +132,15 @@ search, and download contract.
 
 ### Administrator
 
-- Provisions photographer accounts and main events.
+- Provisions Django users, photographer tenants, and active memberships.
 - Sets storage/retention limits and operational configuration.
 - Can rotate event security material and revoke access during support incidents.
 - Does not need access to customer media for ordinary operation.
 
 ### Photographer
 
-1. Creates a main event such as `ABC Wedding`.
+1. Creates a main event such as `ABC Wedding` with its mandatory portfolio cover and customer
+   consent attestation in the web dashboard.
 2. Creates active sub-events such as `Haldi`, `Reception`, and `Marriage`.
 3. Signs into the desktop with the photographer account.
 4. Chooses the main event and then exactly one sub-event.
@@ -196,6 +211,15 @@ capability; the owner creates independently revocable whole-event or sub-event g
 Each credential combines a high-entropy fragment secret with a generated four-digit PIN. Only
 digests/hashes are stored, credentials are shown once, and every protected request rechecks tenant,
 publication, expiry, revocation, access version, and immutable scope.
+
+### 6.5 Portfolio portal
+
+The photographer subdomain root is a public, noindex portfolio with studio branding, optional
+contact/Instagram fields, title search, and cards for Published events only. Covers and logos are
+metadata-stripped bounded derivatives served from the private bucket through short-lived signed
+GETs. A card opens a dedicated `PortalCapability`; it never reuses owner authority. The portal uses
+a generated four-digit PIN and provides whole-event browse/search/download without guest
+management. After retention purge, the title/cover card remains but no longer links anywhere.
 
 ## 7. Lifecycle
 
@@ -643,15 +667,22 @@ throttling, and audit. Exactly-one-face search is an ephemeral, consented galler
 one-hour result state never authorizes a photo. Photographer/owner/guest original downloads derive
 from current visibility.
 
+### Pre-Session 9: studio workflow, portfolio, formats, and retention
+
+Complete. Photographers create attested events with sanitized covers in the web dashboard.
+Published cards, separate PIN-gated portfolio portals, branding/search, five accepted edited-image
+formats, MIME-aware exact-object ingestion, 365+30-day controlled purge, OneNodeAI Studio desktop
+branding, and the PySide6 CI system dependency are implemented under ADR 0013.
+
 ### Session 9: hardening and launch rehearsal
 
-Complete deployment, wildcard domains, proxies/security headers, monitoring, backups/restores,
-retention deletion, packaging, incident runbooks, cost limits, performance, legal/licence review,
+Complete deployment, wildcard domains, proxies/security headers, monitoring, backup restore,
+cleanup scheduling, packaging, incident runbooks, cost limits, performance, legal/licence notices,
 and a clean end-to-end rehearsal.
 
 ## 23. Acceptance criteria for this revision
 
-The implemented Sessions 1–8 are complete only when:
+The implemented Sessions 1–8 and pre-Session 9 gate are complete only when:
 
 - a batch cannot exist or reserve without an active child belonging to its event;
 - event/sub-event snapshots and local checkpoints round-trip the child assignment;
@@ -678,17 +709,22 @@ The implemented Sessions 1–8 are complete only when:
 - reference uploads are closed on success/failure, no image/crop/query vector is persisted, and
   expired ordered-ID results are purged;
 - signed original downloads recheck current visibility and address the verified immutable object.
+- draft/review events stay off the portfolio and a portal session never gains owner controls;
+- supported original formats preserve validated MIME/key/download behavior while RAW and mismatched
+  content fail closed;
+- a retention purge before its deadline changes nothing, while a due confirmed purge verifies
+  private-object deletion and retains only the non-clickable consented card.
 
 ## 24. Explicitly deferred decisions
 
 These require Session 9 implementation evidence or launch decisions:
 
-- face-index and media retention duration agreed with the client;
-- controlled/audited manual retention purge and deletion verification;
 - scheduling the expired face-search cleanup command at least every 15 minutes;
 - launch jurisdiction/data-region/legal basis and customer notice text;
 - production scale/cost limits after representative measurements;
-- application source licence before any public repository release.
+- Turnstile or equivalent plus global per-event portal throttling before a second studio;
+- AGPL-3.0 licence files and third-party notices before release packaging;
+- native signing/notarization after the unsigned supervised pilot.
 
 No later session may reintroduce upload-only identities, customer collections, or pre-clustering
 without a new product decision and ADR.

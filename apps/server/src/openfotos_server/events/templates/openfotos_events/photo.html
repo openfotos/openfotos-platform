@@ -6,10 +6,8 @@
 <div class="photo-toolbar">
   {% if dashboard_mode %}
     {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>{% else %}<a href="{% url 'events:photographer-event' event_id=event.id %}">← Gallery review</a>{% endif %}
-  {% elif share_kind == "owner" %}
-    {% if selected_sub_event %}<a href="{% url 'events:owner-sub-event' capability_id=capability.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>{% else %}<a href="{% url 'events:owner-gallery' capability_id=capability.id %}">← Gallery</a>{% endif %}
   {% else %}
-    {% if selected_sub_event %}<a href="{% url 'events:guest-sub-event' capability_id=capability.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>{% else %}<a href="{% url 'events:guest-gallery' capability_id=capability.id %}">← Gallery</a>{% endif %}
+    {% if selected_sub_event %}<a href="{% url sub_event_route capability_id=capability.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>{% else %}<a href="{% url gallery_route capability_id=capability.id %}">← Gallery</a>{% endif %}
   {% endif %}
   <span>Photo {{ image.asset.gallery_position }}</span>
 </div>
@@ -19,29 +17,23 @@
 <p class="download-row">
     {% if dashboard_mode %}
       {% if selected_sub_event %}<a class="button-link" href="{% url 'events:photographer-sub-event-download' event_id=event.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">Download exact original</a>{% else %}<a class="button-link" href="{% url 'events:photographer-download' event_id=event.id asset_id=image.asset.id %}">Download exact original</a>{% endif %}
-    {% elif share_kind == "owner" %}
-      {% if selected_sub_event %}<a class="button-link" href="{% url 'events:owner-sub-event-download' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">Download exact original</a>{% else %}<a class="button-link" href="{% url 'events:owner-download' capability_id=capability.id asset_id=image.asset.id %}">Download exact original</a>{% endif %}
     {% else %}
-      {% if selected_sub_event %}<a class="button-link" href="{% url 'events:guest-sub-event-download' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">Download exact original</a>{% else %}<a class="button-link" href="{% url 'events:guest-download' capability_id=capability.id asset_id=image.asset.id %}">Download exact original</a>{% endif %}
+      {% if selected_sub_event %}<a class="button-link" href="{% url sub_event_download_route capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">Download exact original</a>{% else %}<a class="button-link" href="{% url download_route capability_id=capability.id asset_id=image.asset.id %}">Download exact original</a>{% endif %}
     {% endif %}
 </p>
 <nav class="photo-navigation" aria-label="Photo navigation">
   {% if previous_asset %}
     {% if dashboard_mode %}
       {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url 'events:photographer-photo' event_id=event.id asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
-    {% elif share_kind == "owner" %}
-      {% if selected_sub_event %}<a href="{% url 'events:owner-sub-event-photo' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url 'events:owner-photo' capability_id=capability.id asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
     {% else %}
-      {% if selected_sub_event %}<a href="{% url 'events:guest-sub-event-photo' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url 'events:guest-photo' capability_id=capability.id asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
+      {% if selected_sub_event %}<a href="{% url sub_event_photo_route capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url photo_route capability_id=capability.id asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
     {% endif %}
   {% else %}<span></span>{% endif %}
   {% if next_asset %}
     {% if dashboard_mode %}
       {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url 'events:photographer-photo' event_id=event.id asset_id=next_asset.id %}">Next photo</a>{% endif %}
-    {% elif share_kind == "owner" %}
-      {% if selected_sub_event %}<a href="{% url 'events:owner-sub-event-photo' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url 'events:owner-photo' capability_id=capability.id asset_id=next_asset.id %}">Next photo</a>{% endif %}
     {% else %}
-      {% if selected_sub_event %}<a href="{% url 'events:guest-sub-event-photo' capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url 'events:guest-photo' capability_id=capability.id asset_id=next_asset.id %}">Next photo</a>{% endif %}
+      {% if selected_sub_event %}<a href="{% url sub_event_photo_route capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url photo_route capability_id=capability.id asset_id=next_asset.id %}">Next photo</a>{% endif %}
     {% endif %}
   {% endif %}
 </nav>

@@ -205,10 +205,16 @@ def reserve_contribution(
             AssetObject(
                 asset=asset,
                 variant=AssetVariant.ORIGINAL.value,
-                object_key=asset_key(locked_event.id, asset.id, AssetVariant.ORIGINAL),
+                object_key=asset_key(
+                    locked_event.id,
+                    asset.id,
+                    AssetVariant.ORIGINAL,
+                    content_type=item.content_type,
+                ),
                 expected_bytes=item.size_bytes,
                 sha256=item.sha256,
                 content_md5=item.content_md5,
+                content_type=item.content_type,
                 width=item.width,
                 height=item.height,
             )
@@ -282,6 +288,7 @@ def issue_upload_leases(
                 content_length=upload.expected_bytes,
                 content_md5=upload.content_md5,
                 sha256=upload.asset.sha256,
+                content_type=upload.content_type,
                 expires_in_seconds=settings.UPLOAD_LEASE_TTL_SECONDS,
             )
         except ObjectStoreError as exc:
@@ -862,7 +869,7 @@ def _object_mismatch(upload: AssetObject, head) -> str:
     expected_etag = base64.b64decode(upload.content_md5).hex()
     if head.content_length != upload.expected_bytes:
         return "asset_size_mismatch"
-    if head.content_type.lower().partition(";")[0] != "image/jpeg":
+    if head.content_type.lower().partition(";")[0] != upload.content_type:
         return "asset_content_type_mismatch"
     if head.metadata.get("openfotos-sha256") != upload.sha256:
         return "asset_checksum_mismatch"
@@ -915,6 +922,7 @@ def _aggregate_manifest_document(event: Event) -> dict:
             "asset_id": str(upload.asset_id),
             "batch_id": str(upload.asset.batch_id),
             "filename": upload.asset.original_filename,
+            "content_type": upload.content_type,
             "width": upload.asset.width,
             "height": upload.asset.height,
             "original_bytes": upload.expected_bytes,
@@ -936,7 +944,7 @@ def _aggregate_manifest_document(event: Event) -> dict:
         excluded_asset_count=Count("id", filter=Q(state=UploadObjectState.EXCLUDED.value)),
     )
     return {
-        "format": "openfotos-ingestion-manifest-v1",
+        "format": "openfotos-ingestion-manifest-v2",
         "event_id": str(event.id),
         "generation": event.intake_generation,
         "created_at": timezone.now().isoformat(),

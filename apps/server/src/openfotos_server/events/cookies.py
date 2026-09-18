@@ -7,35 +7,46 @@ from django.core import signing
 from django.http import HttpRequest, HttpResponse
 from django.utils import timezone
 
-from .models import GuestCapability, OwnerCapability
+from .models import GuestCapability, OwnerCapability, PortalCapability
+
+VisitorCapability = OwnerCapability | GuestCapability | PortalCapability
 
 ACCESS_COOKIE_PREFIX = "openfotos_share_"
 PRESENTED_COOKIE_PREFIX = "openfotos_presented_"
 
 
-def capability_kind(capability: OwnerCapability | GuestCapability) -> str:
-    return "owner" if isinstance(capability, OwnerCapability) else "guest"
+def capability_kind(capability: VisitorCapability) -> str:
+    if isinstance(capability, OwnerCapability):
+        return "owner"
+    if isinstance(capability, PortalCapability):
+        return "portal"
+    return "guest"
 
 
-def capability_cookie_path(capability: OwnerCapability | GuestCapability) -> str:
+def capability_cookie_path(capability: VisitorCapability) -> str:
+    if isinstance(capability, PortalCapability):
+        return f"/portfolio/events/{capability.id}/"
     return f"/share/{capability_kind(capability)}/{capability.id}/"
 
 
-def access_cookie_name(capability: OwnerCapability | GuestCapability) -> str:
+def access_cookie_name(capability: VisitorCapability) -> str:
     return f"{ACCESS_COOKIE_PREFIX}{capability_kind(capability)}_{capability.id.hex}"
 
 
-def presented_cookie_name(capability: OwnerCapability | GuestCapability) -> str:
+def presented_cookie_name(capability: VisitorCapability) -> str:
     return f"{PRESENTED_COOKIE_PREFIX}{capability_kind(capability)}_{capability.id.hex}"
 
 
-def _session_ttl(capability: OwnerCapability | GuestCapability) -> int:
-    configured = (
-        settings.OWNER_SESSION_TTL_SECONDS
-        if isinstance(capability, OwnerCapability)
-        else settings.GUEST_SESSION_TTL_SECONDS
+def _session_ttl(capability: VisitorCapability) -> int:
+    if isinstance(capability, OwnerCapability):
+        configured = settings.OWNER_SESSION_TTL_SECONDS
+    elif isinstance(capability, PortalCapability):
+        configured = settings.PORTAL_SESSION_TTL_SECONDS
+    else:
+        configured = settings.GUEST_SESSION_TTL_SECONDS
+    event = (
+        capability.event if not isinstance(capability, GuestCapability) else capability.owner.event
     )
-    event = capability.event if isinstance(capability, OwnerCapability) else capability.owner.event
     expiries = [capability.expires_at, event.expires_at]
     if isinstance(capability, GuestCapability):
         expiries.append(capability.owner.expires_at)
@@ -43,8 +54,10 @@ def _session_ttl(capability: OwnerCapability | GuestCapability) -> int:
     return max(0, min(configured, remaining))
 
 
-def _payload(capability: OwnerCapability | GuestCapability) -> dict[str, str]:
-    event = capability.event if isinstance(capability, OwnerCapability) else capability.owner.event
+def _payload(capability: VisitorCapability) -> dict[str, str]:
+    event = (
+        capability.event if not isinstance(capability, GuestCapability) else capability.owner.event
+    )
     return {
         "capability": str(capability.id),
         "event": str(event.id),
@@ -54,13 +67,11 @@ def _payload(capability: OwnerCapability | GuestCapability) -> dict[str, str]:
     }
 
 
-def _salt(capability: OwnerCapability | GuestCapability, purpose: str) -> str:
+def _salt(capability: VisitorCapability, purpose: str) -> str:
     return f"openfotos.share.{capability_kind(capability)}.{purpose}.v1"
 
 
-def has_valid_access_cookie(
-    request: HttpRequest, capability: OwnerCapability | GuestCapability
-) -> bool:
+def has_valid_access_cookie(request: HttpRequest, capability: VisitorCapability) -> bool:
     signed_value = request.COOKIES.get(access_cookie_name(capability))
     if not signed_value:
         return False
@@ -71,7 +82,11 @@ def has_valid_access_cookie(
             max_age=(
                 settings.OWNER_SESSION_TTL_SECONDS
                 if isinstance(capability, OwnerCapability)
-                else settings.GUEST_SESSION_TTL_SECONDS
+                else (
+                    settings.PORTAL_SESSION_TTL_SECONDS
+                    if isinstance(capability, PortalCapability)
+                    else settings.GUEST_SESSION_TTL_SECONDS
+                )
             ),
         )
     except signing.BadSignature:
@@ -79,9 +94,7 @@ def has_valid_access_cookie(
     return payload == _payload(capability)
 
 
-def has_valid_presented_cookie(
-    request: HttpRequest, capability: OwnerCapability | GuestCapability
-) -> bool:
+def has_valid_presented_cookie(request: HttpRequest, capability: VisitorCapability) -> bool:
     signed_value = request.COOKIES.get(presented_cookie_name(capability))
     if not signed_value:
         return False
@@ -96,9 +109,7 @@ def has_valid_presented_cookie(
     return payload == _payload(capability)
 
 
-def set_access_cookie(
-    response: HttpResponse, capability: OwnerCapability | GuestCapability
-) -> None:
+def set_access_cookie(response: HttpResponse, capability: VisitorCapability) -> None:
     ttl = _session_ttl(capability)
     if ttl <= 0:
         return
@@ -117,9 +128,7 @@ def set_access_cookie(
     )
 
 
-def set_presented_cookie(
-    response: HttpResponse, capability: OwnerCapability | GuestCapability
-) -> None:
+def set_presented_cookie(response: HttpResponse, capability: VisitorCapability) -> None:
     response.set_cookie(
         presented_cookie_name(capability),
         signing.dumps(
@@ -135,17 +144,13 @@ def set_presented_cookie(
     )
 
 
-def delete_share_cookies(
-    response: HttpResponse, capability: OwnerCapability | GuestCapability
-) -> None:
+def delete_share_cookies(response: HttpResponse, capability: VisitorCapability) -> None:
     path = capability_cookie_path(capability)
     for name in (access_cookie_name(capability), presented_cookie_name(capability)):
         response.delete_cookie(name, path=path, samesite="Lax")
 
 
-def delete_presented_cookie(
-    response: HttpResponse, capability: OwnerCapability | GuestCapability
-) -> None:
+def delete_presented_cookie(response: HttpResponse, capability: VisitorCapability) -> None:
     response.delete_cookie(
         presented_cookie_name(capability),
         path=capability_cookie_path(capability),

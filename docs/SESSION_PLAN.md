@@ -267,6 +267,83 @@ test. No customer media, model weights, or provider credentials are used.
 **First failing acceptance test:** Use a valid sub-event capability to search with an embedding that
 would match a photo in another sub-event and prove the photo is absent and no signed URL is issued.
 
+## Pre-Session 9: studio workflow, portfolio, formats, and retention
+
+**Status:** complete in the current worktree; accepted in ADR 0013.
+
+**Goal:** Close the photographer-workflow decisions discovered after Session 8 before production
+hardening starts.
+
+**Product workflow:** One small studio shares one photographer account across no more than ten
+tracked desktop installations per event. A photographer creates the main event in the web
+dashboard, supplies the mandatory event name, sanitized portfolio cover, and versioned customer
+consent attestation, then creates sub-events. One or more workstations can contribute individual
+files, folders, or mixtures to a selected sub-event. The desktop validates and hashes supported
+edited images, uploads exact originals through server-issued leases, renders derivatives, and
+creates the direct per-photo face index. The web dashboard reviews readiness, failures, gallery
+visibility, publication, links, and revocation.
+
+Publication automatically lists the event at `<studio>.onenodeai.com` and reveals one generated
+four-digit PIN for a dedicated whole-event portfolio portal. That portal can browse, search, and
+download but has no owner or guest-management authority. Separately, the photographer issues one
+private owner capability. Only the owner creates ordinary whole-event or sub-event guest links;
+the photographer can inspect and revoke them. PINs are always exactly four generated ASCII digits.
+
+**Delivered:**
+
+- Photographer dashboard event creation with mandatory name, metadata-stripped bounded cover, and
+  `portfolio-face-index-consent-v1` attestation. The submitted cover original is not retained.
+- Tenant portfolio branding for display name, optional phone, Instagram URL, and sanitized logo;
+  searchable responsive published-event cards; draft/review events remain hidden.
+- A separate whole-event `PortalCapability`, first-publication one-time PIN reveal, PIN rotation,
+  path-scoped session, throttling/audit, strict event/sub-event routes, and browse/search/download
+  behavior without owner controls.
+- First-publication retention timestamps: 365 days followed by a 30-day grace period. The
+  confirmed manual purge deletes and verifies private asset/manifest/watermark objects, face/search
+  state, and visitor capabilities; redacts retained asset metadata; and keeps only the consented
+  title/cover as a non-clickable showcase card.
+- Original ingestion for JPEG/JPG, PNG, WebP, HEIC, and HEIF. RAW, TIFF, animated images, video,
+  and extension/content mismatches fail closed. Object keys, signed PUT content types, manifests,
+  verification, and exact-download extensions preserve the accepted original format; previews and
+  thumbnails remain deterministic JPEGs.
+- Desktop shell branding changed from the top-left OFTS mark to `OneNodeAI Studio`.
+- CI installs Ubuntu `libegl1` before importing PySide6, fixing the GitHub Actions collection
+  failure without skipping desktop UI tests.
+
+**Verification evidence:** `./scripts/check.sh` passes formatting, Ruff, 175 tests, and Django
+system checks. SQLite skips only the two PostgreSQL pgvector query-boundary cases and the opt-in
+live-S3 contract. A fresh SQLite database applies migrations `0001` through `0009` successfully.
+Local Docker access was unavailable for a fresh PostgreSQL rerun, so the existing CI pgvector job
+remains the required PostgreSQL migration/query check before deployment.
+
+**Fixed operations decisions:** Use one private R2 bucket per environment—not a bucket per event.
+The server owns `events/<event UUID>/...` keys and issues narrow signed leases, so neither the
+desktop nor a photographer receives bucket-administration credentials. The initial launch uses
+Railway Singapore, Supabase Singapore, and R2 automatic/APAC placement where available. The current
+Railway USD 20 and Supabase USD 25 subscriptions are a reasonable supervised-pilot starting
+envelope, not a capacity guarantee; Session 9 still records measured storage, egress, compute, and
+database limits. Supabase daily backups imply an accepted approximately 24-hour RPO until a loss
+proves the need to improve it, but Session 9 must still perform a separate restore rehearsal.
+
+**Pilot boundary:** The first real studio remains a supervised pilot. A four-digit PIN is a UX
+decision, not a stand-alone security control. The owner/guest fragment secret remains the strong
+factor for private links, while the public portfolio portal intentionally has only its UUID and PIN.
+Current per-client and per-capability throttling is accepted for the first studio; distributed
+abuse protection (Turnstile or equivalent plus global per-event throttling) is a hard gate before a
+second studio. Windows and macOS packages may be unsigned only for this supervised pilot. The source
+licence decision is AGPL-3.0; licence text, third-party notices, signing/notarization, and public
+release packaging remain Session 9 release work.
+
+**Admin provisioning:** A superuser uses `/admin/` on the base domain to create, in order, a Django
+user, a Photographer tenant with its permanent DNS slug, and an active Photographer membership
+joining the two. Main events are then created by the photographer on the tenant dashboard, not in
+admin. The same username/password may be installed on the studio's machines; installation records
+remain individually tracked and revocable even though actor attribution is shared.
+
+**First failing acceptance test:** Create a draft and a published event for one tenant, prove only
+the published card appears, unlock its four-digit portal, and prove the resulting session can
+browse/search/download but cannot render or invoke owner controls.
+
 ## Session 9: production hardening and launch rehearsal
 
 **Status:** not started.
@@ -274,9 +351,9 @@ would match a photo in another sub-event and prove the photo is absent and no si
 **Goal:** Turn the feature-complete pilot into an operable release.
 
 **Work:** Finalize Railway/R2/Supabase regions and secrets, wildcard DNS/TLS, trusted proxies,
-headers/cookies, secret scanning, monitoring, cost limits, backups/restores, retention deletion,
-privacy/legal notices, incident runbooks, native packaging, performance tuning, licence decisions,
-and a clean end-to-end rehearsal.
+headers/cookies, secret scanning, monitoring, cost limits, backups/restores, retention-purge rehearsal,
+privacy/legal notices, incident runbooks, native packaging, performance tuning, AGPL-3.0 licence
+text and third-party notices, and a clean end-to-end rehearsal.
 
 **Done when:** Empty-database/bucket deployment passes; backup restores separately; upload outage,
 link leak/revocation, pepper rotation, and retention deletion are rehearsed; Windows/macOS packages
@@ -292,6 +369,6 @@ At the end of every session record:
 4. Known limitations and preserved invariants.
 5. The next session's first failing acceptance test.
 
-Session 9 may begin against ADR 0012 only after the Session 8 repository-wide check is green. Do not
+Session 9 may begin against ADR 0013 only after the pre-Session 9 repository-wide check is green. Do not
 begin a later session while an earlier authorization, privacy-cleanup, tenant, sub-event, checksum,
 or lifecycle test is failing.

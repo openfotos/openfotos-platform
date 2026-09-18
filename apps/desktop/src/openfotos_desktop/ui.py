@@ -12,7 +12,6 @@ from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal, Slot
 from PySide6.QtGui import QColor, QIcon, QPixmap
-from PySide6.QtSvgWidgets import QSvgWidget
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -147,13 +146,13 @@ class BrandHeader(QFrame):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(28, 12, 28, 12)
         layout.setSpacing(16)
-        self.logo = QSvgWidget(str(asset_path("ofts.svg")))
-        self.logo.setFixedSize(118, 36)
-        layout.addWidget(self.logo)
+        self.product_name = QLabel("OneNodeAI Studio")
+        self.product_name.setObjectName("HeaderBrand")
+        layout.addWidget(self.product_name)
 
         product = QVBoxLayout()
         product.setSpacing(1)
-        name = QLabel("Desktop")
+        name = QLabel("Photographer desktop")
         name.setObjectName("HeaderProduct")
         self.context = QLabel("Private event ingestion")
         self.context.setObjectName("HeaderContext")
@@ -835,7 +834,10 @@ class PreviewPolicyPage(QWidget):
     @Slot()
     def _choose_sample(self) -> None:
         filename, _ = QFileDialog.getOpenFileName(
-            self, "Choose a local preview sample", "", "JPEG photos (*.jpg *.jpeg)"
+            self,
+            "Choose a local preview sample",
+            "",
+            "Supported photos (*.jpg *.jpeg *.png *.webp *.heic *.heif)",
         )
         if filename:
             self._sample_path = Path(filename)
@@ -1577,8 +1579,7 @@ class MainWindow(QMainWindow):
             self.stack.addWidget(page)
         shell_layout.addWidget(self.stack, 1)
         self.setCentralWidget(shell)
-        self.setWindowTitle("OpenFotos • Desktop Ingestion")
-        self.setWindowIcon(QIcon(str(asset_path("ofts.svg"))))
+        self.setWindowTitle("OneNodeAI Studio")
         self.setMinimumSize(900, 650)
         self.resize(1180, 780)
         self._connect_actions()
@@ -1769,7 +1770,12 @@ class MainWindow(QMainWindow):
     def _add_files(self) -> None:
         if self.current_batch_id is None:
             return
-        paths, _ = QFileDialog.getOpenFileNames(self, "Choose source files", "", "All files (*)")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Choose source files",
+            "",
+            "Supported photos (*.jpg *.jpeg *.png *.webp *.heic *.heif);;All files (*)",
+        )
         if paths:
             try:
                 self.store.add_files(self.current_batch_id, paths)

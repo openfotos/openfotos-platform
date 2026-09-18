@@ -100,8 +100,8 @@ def test_desktop_shell_packages_corporate_brand_and_source_actions(tmp_path: Pat
         demo_event=DEMO_EVENT,
     )
 
-    assert window.header.logo.renderer().isValid()
-    assert not window.windowIcon().isNull()
+    assert window.header.product_name.text() == "OneNodeAI Studio"
+    assert window.windowTitle() == "OneNodeAI Studio"
     assert app.palette().color(QPalette.ColorRole.Window).name() == "#ffffff"
 
     window.events.open_button.click()

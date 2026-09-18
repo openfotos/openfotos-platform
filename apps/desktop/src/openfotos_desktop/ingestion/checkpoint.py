@@ -1542,7 +1542,7 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
         if summary.blocking_item_count or summary.blocking_issue_count:
             raise ValueError("Resolve every blocking scan issue before approval.")
         if summary.accepted_count == 0:
-            raise ValueError("A contribution batch must contain at least one accepted JPEG.")
+            raise ValueError("A contribution batch must contain at least one accepted image.")
         event = self.get_event(batch.event_id)
         if event.processing_profile_id != supported_profile_id:
             raise ValueError("The desktop processing profile does not match the event.")

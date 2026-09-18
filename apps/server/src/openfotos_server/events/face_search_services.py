@@ -12,7 +12,13 @@ from django.utils import timezone
 from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT, FaceEngineError
 
 from .face_services import search_face_index
-from .models import FaceSearchResultSet, GuestCapability, OwnerCapability, SubEvent
+from .models import (
+    FaceSearchResultSet,
+    GuestCapability,
+    OwnerCapability,
+    PortalCapability,
+    SubEvent,
+)
 
 _ACCEPTED_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "HEIF", "HEIC"})
 
@@ -25,7 +31,7 @@ class FaceSearchError(ValueError):
 
 def create_face_search(
     *,
-    capability: OwnerCapability | GuestCapability,
+    capability: OwnerCapability | GuestCapability | PortalCapability,
     sub_event: SubEvent | None,
     uploaded_photo,
     engine,
@@ -59,7 +65,7 @@ def create_face_search(
                 "More than one usable face was found. Choose a photo containing one person.",
             )
         event = (
-            capability.event if isinstance(capability, OwnerCapability) else capability.owner.event
+            capability.owner.event if isinstance(capability, GuestCapability) else capability.event
         )
         results = search_face_index(
             event_id=event.id,
@@ -75,8 +81,10 @@ def create_face_search(
         }
         if isinstance(capability, OwnerCapability):
             values["owner_capability"] = capability
-        else:
+        elif isinstance(capability, GuestCapability):
             values["guest_capability"] = capability
+        else:
+            values["portal_capability"] = capability
         return FaceSearchResultSet.objects.create(**values)
     finally:
         image_bytes = b""
@@ -85,13 +93,15 @@ def create_face_search(
 def delete_face_search(
     *,
     result_id,
-    capability: OwnerCapability | GuestCapability,
+    capability: OwnerCapability | GuestCapability | PortalCapability,
 ) -> None:
     query = FaceSearchResultSet.objects.filter(pk=result_id)
     if isinstance(capability, OwnerCapability):
         query = query.filter(owner_capability=capability)
-    else:
+    elif isinstance(capability, GuestCapability):
         query = query.filter(guest_capability=capability)
+    else:
+        query = query.filter(portal_capability=capability)
     query.delete()
 
 

@@ -10,6 +10,16 @@ from uuid import UUID
 MAX_BATCH_ASSETS = 10_000
 MAX_ORIGINAL_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_PIXELS = 120_000_000
+SUPPORTED_ORIGINAL_CONTENT_TYPES = frozenset(
+    {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
+)
+ORIGINAL_EXTENSION_BY_CONTENT_TYPE = {
+    "image/jpeg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/heic": ".heic",
+    "image/heif": ".heif",
+}
 _SHA256_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -48,6 +58,7 @@ def _positive_integer(value: object, *, field: str) -> int:
 class OriginalAssetInput:
     id: UUID
     filename: str
+    content_type: str
     size_bytes: int
     sha256: str
     content_md5: str
@@ -58,7 +69,16 @@ class OriginalAssetInput:
     def from_dict(cls, raw: object) -> "OriginalAssetInput":
         value = _strict_fields(
             raw,
-            {"id", "filename", "size_bytes", "sha256", "content_md5", "width", "height"},
+            {
+                "id",
+                "filename",
+                "content_type",
+                "size_bytes",
+                "sha256",
+                "content_md5",
+                "width",
+                "height",
+            },
             context="Each asset",
         )
         filename = unicodedata.normalize("NFC", str(value["filename"]).strip())
@@ -71,6 +91,20 @@ class OriginalAssetInput:
             or any(ord(character) < 32 for character in filename)
         ):
             raise ContractError("invalid_filename", "Asset filenames must be safe basenames.")
+        content_type = str(value["content_type"]).strip().lower()
+        if content_type not in SUPPORTED_ORIGINAL_CONTENT_TYPES:
+            raise ContractError(
+                "unsupported_image_format",
+                "Originals must be JPEG, PNG, WebP, HEIC, or HEIF images.",
+            )
+        allowed_extensions = {ORIGINAL_EXTENSION_BY_CONTENT_TYPE[content_type]}
+        if content_type == "image/jpeg":
+            allowed_extensions.add(".jpeg")
+        if not any(filename.lower().endswith(extension) for extension in allowed_extensions):
+            raise ContractError(
+                "content_type_mismatch",
+                "The original filename extension does not match its image content type.",
+            )
         size_bytes = _positive_integer(value["size_bytes"], field="size_bytes")
         if size_bytes > MAX_ORIGINAL_BYTES:
             raise ContractError("asset_too_large", "An original exceeds the 100 MiB limit.")
@@ -91,6 +125,7 @@ class OriginalAssetInput:
         return cls(
             id=_uuid(value["id"], field="asset id"),
             filename=filename,
+            content_type=content_type,
             size_bytes=size_bytes,
             sha256=sha256,
             content_md5=content_md5,
@@ -102,6 +137,7 @@ class OriginalAssetInput:
         return {
             "id": str(self.id),
             "filename": self.filename,
+            "content_type": self.content_type,
             "size_bytes": self.size_bytes,
             "sha256": self.sha256,
             "content_md5": self.content_md5,
@@ -174,7 +210,7 @@ class ContributionInput:
 
     def canonical_document(self) -> dict:
         return {
-            "format": "openfotos-contribution-v1",
+            "format": "openfotos-contribution-v2",
             "batch_id": str(self.batch_id),
             "sub_event_id": str(self.sub_event_id),
             "label": self.label,

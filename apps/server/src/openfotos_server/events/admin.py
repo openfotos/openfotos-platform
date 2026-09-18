@@ -13,6 +13,7 @@ from .models import (
     AuditAction,
     AuditEvent,
     AuditResult,
+    ConsentAttestation,
     ContributionBatch,
     Event,
     EventInstallation,
@@ -21,6 +22,7 @@ from .models import (
     OwnerCapability,
     Photographer,
     PhotographerMembership,
+    PortalCapability,
     PreviewPolicy,
     SubEvent,
 )
@@ -57,7 +59,7 @@ class EventAdminForm(forms.ModelForm):
 
 @admin.register(Photographer)
 class PhotographerAdmin(admin.ModelAdmin):
-    list_display = ("display_name", "slug", "status", "created_at")
+    list_display = ("display_name", "slug", "contact_phone", "status", "created_at")
     list_filter = ("status",)
     search_fields = ("display_name", "slug")
     readonly_fields = ("id", "created_at", "updated_at")
@@ -132,6 +134,13 @@ class EventAdmin(admin.ModelAdmin):
         "face_model_id",
         "face_index_ready_generation",
         "share_access_version",
+        "cover_object_key",
+        "cover_sha256",
+        "cover_width",
+        "cover_height",
+        "first_published_at",
+        "purge_after",
+        "media_purged_at",
         "created_at",
         "updated_at",
     )
@@ -139,7 +148,6 @@ class EventAdmin(admin.ModelAdmin):
         "move_to_uploading",
         "move_to_processing",
         "move_to_review",
-        "move_to_published",
         "move_to_archived",
         "move_to_failed",
         "move_to_cancelled",
@@ -153,6 +161,9 @@ class EventAdmin(admin.ModelAdmin):
         return fields
 
     def has_delete_permission(self, request, obj=None):
+        return False
+
+    def has_add_permission(self, request):
         return False
 
     def save_model(self, request, obj, form, change):
@@ -189,10 +200,6 @@ class EventAdmin(admin.ModelAdmin):
     @admin.action(description="Move selected events to Review")
     def move_to_review(self, request, queryset):
         self._transition(request, queryset, EventState.REVIEW)
-
-    @admin.action(description="Move selected events to Published")
-    def move_to_published(self, request, queryset):
-        self._transition(request, queryset, EventState.PUBLISHED)
 
     @admin.action(description="Move selected events to Archived")
     def move_to_archived(self, request, queryset):
@@ -239,6 +246,41 @@ class EventAdmin(admin.ModelAdmin):
                 changed += 1
         if changed:
             self.message_user(request, f"Moved {changed} event(s) to {target.value.title()}.")
+
+
+@admin.register(ConsentAttestation)
+class ConsentAttestationAdmin(admin.ModelAdmin):
+    list_display = ("event", "notice_version", "actor", "created_at")
+    search_fields = ("event__name", "event__photographer__display_name", "actor__username")
+    readonly_fields = ("event", "notice_version", "actor", "created_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PortalCapability)
+class PortalCapabilityAdmin(admin.ModelAdmin):
+    list_display = ("event", "expires_at", "revoked_at", "created_at")
+    search_fields = ("event__name", "event__photographer__display_name")
+    readonly_fields = (
+        "id",
+        "event",
+        "pin_hash",
+        "access_version",
+        "expires_at",
+        "revoked_at",
+        "created_at",
+        "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(AuditEvent)

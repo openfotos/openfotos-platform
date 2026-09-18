@@ -14,6 +14,32 @@
   </form>
 </div>
 
+<div class="settings-grid">
+  <section class="card compact-card">
+    <h2>Create event</h2>
+    <p class="muted">The event name and sanitized cover become its portfolio card only after publication.</p>
+    <form method="post" enctype="multipart/form-data" action="{% url 'events:create-event' %}">
+      {% csrf_token %}
+      {{ event_form.name.label_tag }} {{ event_form.name }}
+      {{ event_form.cover_photo.label_tag }} {{ event_form.cover_photo }}
+      <label class="checkbox-label">{{ event_form.consent_attested }} <span>{{ event_form.consent_attested.label }}</span></label>
+      <button type="submit">Create event</button>
+    </form>
+  </section>
+  <section class="card compact-card">
+    <h2>Portfolio profile</h2>
+    <p class="muted">Shown at <a href="{% url 'events:portfolio' %}">{{ photographer.slug }} portfolio</a>.</p>
+    <form method="post" enctype="multipart/form-data" action="{% url 'events:update-portfolio' %}">
+      {% csrf_token %}
+      {{ profile_form.display_name.label_tag }} {{ profile_form.display_name }}
+      {{ profile_form.contact_phone.label_tag }} {{ profile_form.contact_phone }}
+      {{ profile_form.instagram_url.label_tag }} {{ profile_form.instagram_url }}
+      {{ profile_form.logo.label_tag }} {{ profile_form.logo }}
+      <button type="submit">Save portfolio</button>
+    </form>
+  </section>
+</div>
+
 <section class="card">
   <h2>Events</h2>
   {% if events %}
@@ -36,7 +62,7 @@
       {% endfor %}
     </div>
   {% else %}
-    <p>No events have been assigned to this photographer yet.</p>
+    <p>No events have been created yet.</p>
   {% endif %}
 </section>
 {% endblock %}

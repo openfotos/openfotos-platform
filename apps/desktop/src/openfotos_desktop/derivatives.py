@@ -10,7 +10,15 @@ from pathlib import Path
 
 from PIL import Image, ImageCms, ImageDraw, ImageOps, UnidentifiedImageError
 
+try:
+    from pillow_heif import register_heif_opener
+except ImportError:  # pragma: no cover - dependency is installed in packaged desktop builds
+    register_heif_opener = None
+
 from openfotos_contracts import DERIVATIVE_PROFILE, AssetVariant, WatermarkTemplate
+
+if register_heif_opener is not None:
+    register_heif_opener()
 
 
 class DerivativeError(RuntimeError):
@@ -82,7 +90,7 @@ class DerivativeRenderer:
                 source = _to_srgb(oriented)
         except (OSError, UnidentifiedImageError) as exc:
             raise DerivativeError(
-                "invalid_jpeg", "The verified source can no longer be decoded."
+                "invalid_image", "The verified source can no longer be decoded."
             ) from exc
 
         cache_directory.mkdir(parents=True, exist_ok=True, mode=0o700)

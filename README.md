@@ -1,8 +1,9 @@
 # OpenFotos
 
 OpenFotos is a supervised pilot for private wedding photo delivery and event-scoped face-based
-photo discovery. A photographer organizes one main wedding into sub-events such as Haldi, Reception, and
-Marriage, then processes edited JPEGs with one account across tracked desktop installations.
+photo discovery. A photographer organizes one main wedding into sub-events such as Haldi,
+Reception, and Marriage, then processes edited JPEG/JPG, PNG, WebP, HEIC, or HEIF images with one
+account across tracked desktop installations. RAW formats are intentionally unsupported.
 
 The pilot deliberately targets one photographer, wedding-sized events below roughly 20–25 GB, up
 to 50 sub-events, one to ten active desktop installations, and a supervised delivery window. The complete product and
@@ -32,6 +33,9 @@ desktop-to-server document, retry/reset behavior, publication gate, and exact SQ
 [Session 8 sharing decision](docs/adr/0012-owner-guest-capabilities-ephemeral-search-and-downloads.md)
 records owner/guest authority, fragment-secret/PIN delivery, expiry/revocation, ephemeral search,
 and visibility-derived exact-original downloads.
+The [pre-Session 9 workflow decision](docs/adr/0013-studio-portfolio-portal-formats-and-retention.md)
+records photographer-created events, portfolio/portal authority, accepted image formats, one-bucket
+storage, and 365+30-day retention.
 
 ## Repository map
 
@@ -88,7 +92,7 @@ uv run python -m openfotos_desktop --demo
 ```
 
 The demo accepts recursive folders, one or multiple files, and mixed selections. It validates and
-checkpoints JPEGs locally; it does not transfer anything to object storage. To collect a redacted
+checkpoints supported edited-image formats locally; it does not transfer anything to object storage. To collect a redacted
 timing report on representative, consented local data without retaining a benchmark checkpoint:
 
 ```bash
@@ -97,13 +101,14 @@ uv run python -m openfotos_desktop.benchmark_inventory /path/to/representative/f
 ```
 
 For the browser flow, open `http://localhost:8000/admin/` and provision records in this order:
-Django user, photographer, photographer membership, then event. Create at least one sub-event in
-the photographer dashboard before upload/publication. Use the event admin actions to move a sample
-through its legal lifecycle. A photographer with slug `demo` signs in at
-`http://demo.localhost:8000/login/`; after publication the dashboard can issue the one owner link.
-Its fragment-secret URL and generated four-digit PIN are shown once. The owner uses that private
-management link to create whole-event or sub-event guest links; it should not be forwarded as the
-family guest link.
+Django user, Photographer tenant with permanent DNS slug, then an active Photographer membership
+joining them. A photographer with slug `demo` signs in at `http://demo.localhost:8000/login/` and
+creates the main event—with mandatory name, cover, and consent attestation—from the dashboard.
+Create at least one sub-event before upload/publication. The portfolio is the tenant root at
+`http://demo.localhost:8000/`. First publication lists its card and reveals the dedicated portal's
+generated four-digit PIN once. The photographer separately issues the one private owner link; its
+fragment-secret URL and four-digit PIN are also shown once. Only that owner creates whole-event or
+sub-event guest links.
 
 For development checks:
 
@@ -130,8 +135,8 @@ Copy `.env.example` to `.env` for local values and set `SHARE_PIN_PEPPER` indepe
 `DJANGO_SECRET_KEY`. Configure `FACE_DETECTOR_MODEL_PATH` and `FACE_RECOGNIZER_MODEL_PATH` to the
 accepted hash-verified YuNet/SFace files; weights stay outside the repository. Never commit `.env`,
 model weights, customer photos, reference images, face embeddings, or production credentials. The
-application-source licence is still an explicit pre-publication decision; pretrained model weights
-retain separate terms.
+application-source licence decision is AGPL-3.0; adding the final licence text and third-party
+notices is a Session 9 packaging gate. Pretrained model weights retain separate terms.
 
 Search-result rows contain only ordered asset IDs and expire after one hour. Run the idempotent
 cleanup command manually in development; Session 9 must schedule it at least every 15 minutes:
@@ -142,13 +147,24 @@ uv run python apps/server/manage.py purge_expired_face_searches
 
 `reset_share_access --confirm RESET-ALL-SHARE-ACCESS` is an emergency-only operation to revoke all
 owner/guest links before replacing a suspected-compromised `SHARE_PIN_PEPPER`. Capability expiry
-does not delete event media; a controlled, audited retention purge is Session 9 work.
+does not itself delete event media. After an event's 365-day lifetime and 30-day grace period, an
+operator verifies the exact event and backup state, then runs the audited purge:
 
-Session 8 does not need production Railway or Supabase accounts. Local/CI PostgreSQL with pgvector
-and the storage abstraction are sufficient. Live regions, secrets, schedules, domains, backups,
-retention deletion, and deployment rehearsal begin in Session 9.
+```bash
+uv run python apps/server/manage.py purge_expired_event_media \
+  --event-id 00000000-0000-4000-8000-000000000000 --confirm
+```
 
-The server needs an S3-compatible bucket plus object read/write credentials. For Cloudflare R2,
+The purge verifies deletion of private media/manifests/marks, removes face/search/capability state,
+and keeps the consented event title and sanitized cover as a non-clickable portfolio card.
+
+The pre-Session 9 slice does not need production Railway or Supabase accounts. Live secrets,
+wildcard DNS/TLS, schedules, restore rehearsal, monitoring, cost measurements, and deployment
+rehearsal begin in Session 9.
+
+The server needs one private S3-compatible bucket per environment plus object read/write
+credentials. It never creates a bucket per event: server-owned `events/<UUID>/...` keys and narrow
+signed leases provide event isolation. For Cloudflare R2,
 set the account ID, bucket name, access key ID, and secret; the endpoint is derived automatically.
 No account API token is used at runtime. For MinIO, start a local server and create a private test
 bucket in its console, then set `OBJECT_STORAGE_ENDPOINT_URL`, `R2_BUCKET_NAME`, and the MinIO

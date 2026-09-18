@@ -60,6 +60,7 @@ def contribution(sub_event_id):
                 {
                     "id": str(uuid4()),
                     "filename": "photo.jpg",
+                    "content_type": "image/jpeg",
                     "size_bytes": len(content),
                     "sha256": hashlib.sha256(content).hexdigest(),
                     "content_md5": base64.b64encode(

@@ -102,6 +102,21 @@
 </section>
 
 <section class="card compact-card">
+  <h2>Portfolio access</h2>
+  {% if portal_capability_active %}
+    <p>This published event is listed on the studio portfolio. Its public gallery PIN cannot be recovered.</p>
+    <p><a href="{% url 'events:portal-gallery' capability_id=portal_capability.id %}">Open portfolio gallery</a> · expires {{ portal_capability.expires_at }}</p>
+    <form method="post" action="{% url 'events:rotate-portal-pin' event_id=event.id %}">
+      {% csrf_token %}<button type="submit" class="button-secondary">Generate a new portfolio PIN</button>
+    </form>
+  {% elif event.state == "published" %}
+    <p class="muted">Portfolio access is unavailable. Return the event to Review and publish it again.</p>
+  {% else %}
+    <p class="muted">Publication lists this event automatically and reveals its generated four-digit portfolio PIN once.</p>
+  {% endif %}
+</section>
+
+<section class="card compact-card">
   <h2>Customer access</h2>
   <p class="muted">Exact-original downloads can retain camera EXIF or GPS metadata. Review source files before sharing access.</p>
   {% if owner_capability_active %}

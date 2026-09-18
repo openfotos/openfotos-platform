@@ -5,9 +5,12 @@ from . import share_views, views
 app_name = "events"
 
 urlpatterns = [
+    path("", views.portfolio, name="portfolio"),
     path("login/", views.photographer_login, name="login"),
     path("logout/", views.photographer_logout, name="logout"),
     path("dashboard/", views.dashboard, name="dashboard"),
+    path("dashboard/events/create/", views.create_event, name="create-event"),
+    path("dashboard/portfolio/", views.update_portfolio, name="update-portfolio"),
     path(
         "dashboard/events/<uuid:event_id>/",
         views.photographer_event,
@@ -42,6 +45,11 @@ urlpatterns = [
         "dashboard/events/<uuid:event_id>/unpublish/",
         views.unpublish_event,
         name="unpublish-event",
+    ),
+    path(
+        "dashboard/events/<uuid:event_id>/portal-pin/rotate/",
+        views.rotate_event_portal_pin,
+        name="rotate-portal-pin",
     ),
     path(
         "dashboard/events/<uuid:event_id>/sub-events/<uuid:sub_event_id>/",
@@ -227,5 +235,60 @@ urlpatterns = [
         "share/guest/<uuid:capability_id>/search/<uuid:result_id>/clear/",
         share_views.guest_clear_search,
         name="guest-clear-search",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/",
+        share_views.portal_gallery,
+        name="portal-gallery",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/unlock/",
+        share_views.portal_unlock,
+        name="portal-unlock",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/",
+        share_views.portal_gallery,
+        name="portal-sub-event",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/photos/<uuid:asset_id>/",
+        share_views.portal_photo,
+        name="portal-photo",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/",
+        share_views.portal_photo,
+        name="portal-sub-event-photo",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/photos/<uuid:asset_id>/download/",
+        share_views.portal_download,
+        name="portal-download",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/download/",
+        share_views.portal_download,
+        name="portal-sub-event-download",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/search/",
+        share_views.portal_search,
+        name="portal-search",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/search/",
+        share_views.portal_search,
+        name="portal-sub-event-search",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/search/<uuid:result_id>/",
+        share_views.portal_search_results,
+        name="portal-search-results",
+    ),
+    path(
+        "portfolio/events/<uuid:capability_id>/search/<uuid:result_id>/clear/",
+        share_views.portal_clear_search,
+        name="portal-clear-search",
     ),
 ]

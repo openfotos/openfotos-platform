@@ -74,6 +74,7 @@ class S3ObjectStore:
         content_length: int,
         content_md5: str,
         sha256: str,
+        content_type: str,
         expires_in_seconds: int,
     ) -> PresignedPut:
         if content_length <= 0 or expires_in_seconds <= 0:
@@ -84,7 +85,7 @@ class S3ObjectStore:
             "Key": key,
             "ContentLength": content_length,
             "ContentMD5": content_md5,
-            "ContentType": "image/jpeg",
+            "ContentType": content_type,
             "IfNoneMatch": "*",
             "Metadata": metadata,
         }
@@ -102,7 +103,7 @@ class S3ObjectStore:
             headers={
                 "Content-Length": str(content_length),
                 "Content-MD5": content_md5,
-                "Content-Type": "image/jpeg",
+                "Content-Type": content_type,
                 "If-None-Match": "*",
                 "x-amz-meta-openfotos-sha256": sha256,
             },

@@ -341,6 +341,7 @@ def register_asset_derivatives(
             "expected_bytes": item.size_bytes,
             "sha256": item.sha256,
             "content_md5": item.content_md5,
+            "content_type": "image/jpeg",
             "width": item.width,
             "height": item.height,
         }
@@ -421,6 +422,7 @@ def issue_derivative_leases(
                 content_length=upload.expected_bytes,
                 content_md5=upload.content_md5,
                 sha256=upload.sha256,
+                content_type=upload.content_type,
                 expires_in_seconds=settings.UPLOAD_LEASE_TTL_SECONDS,
             )
         except ObjectStoreError as exc:
@@ -662,7 +664,7 @@ def _validate_capture_time(value: datetime | None) -> None:
 def _object_mismatch(upload: AssetObject, head) -> str:
     if head.content_length != upload.expected_bytes:
         return "derivative_size_mismatch"
-    if head.content_type.lower().partition(";")[0] != "image/jpeg":
+    if head.content_type.lower().partition(";")[0] != upload.content_type:
         return "derivative_content_type_mismatch"
     if head.metadata.get("openfotos-sha256") != upload.sha256:
         return "derivative_checksum_mismatch"

@@ -18,7 +18,13 @@ from .derivatives import (
     normalized_watermark_text,
 )
 from .events import EventSnapshot, PreviewPolicySnapshot, SubEventSnapshot
-from .ingestion import ContractError, ContributionInput, OriginalAssetInput
+from .ingestion import (
+    ORIGINAL_EXTENSION_BY_CONTENT_TYPE,
+    SUPPORTED_ORIGINAL_CONTENT_TYPES,
+    ContractError,
+    ContributionInput,
+    OriginalAssetInput,
+)
 from .states import (
     ContributionState,
     EventState,
@@ -48,10 +54,12 @@ __all__ = [
     "IngestionManifestState",
     "IntakeState",
     "MAX_WATERMARK_TEXT_LENGTH",
+    "ORIGINAL_EXTENSION_BY_CONTENT_TYPE",
     "OriginalAssetInput",
     "PreviewPolicyInput",
     "PreviewPolicySnapshot",
     "SubEventSnapshot",
+    "SUPPORTED_ORIGINAL_CONTENT_TYPES",
     "UploadObjectState",
     "WATERMARK_RENDERER_ID",
     "WatermarkLogoKind",

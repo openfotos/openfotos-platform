@@ -19,6 +19,7 @@ from openfotos_vision import FaceEngineError
 from .audit import record_audit
 from .cookies import (
     access_cookie_name,
+    capability_kind,
     delete_presented_cookie,
     delete_share_cookies,
     has_valid_access_cookie,
@@ -48,6 +49,7 @@ from .models import (
     FaceSearchResultSet,
     GuestCapability,
     OwnerCapability,
+    PortalCapability,
     RateLimitPurpose,
     SubEvent,
 )
@@ -58,6 +60,7 @@ from .sharing_services import (
     create_guest_capability,
     guest_for_tenant,
     owner_for_tenant,
+    portal_for_tenant,
     revoke_guest_capability,
     secret_matches,
 )
@@ -97,12 +100,19 @@ def _guest(request: HttpRequest, capability_id: UUID) -> GuestCapability:
         raise Http404 from exc
 
 
-def _event(capability: OwnerCapability | GuestCapability):
-    return capability.event if isinstance(capability, OwnerCapability) else capability.owner.event
+def _portal(request: HttpRequest, capability_id: UUID) -> PortalCapability:
+    try:
+        return portal_for_tenant(photographer=_tenant(request), capability_id=capability_id)
+    except ShareAccessError as exc:
+        raise Http404 from exc
+
+
+def _event(capability: OwnerCapability | GuestCapability | PortalCapability):
+    return capability.owner.event if isinstance(capability, GuestCapability) else capability.event
 
 
 def _scope(
-    capability: OwnerCapability | GuestCapability,
+    capability: OwnerCapability | GuestCapability | PortalCapability,
     requested_sub_event_id: UUID | None,
 ) -> SubEvent | None:
     event = _event(capability)
@@ -122,9 +132,23 @@ def _route(kind: str, suffix: str) -> str:
     return f"events:{kind}-{suffix}"
 
 
-def _root_redirect(capability: OwnerCapability | GuestCapability) -> HttpResponse:
-    kind = "owner" if isinstance(capability, OwnerCapability) else "guest"
-    return redirect(_route(kind, "gallery"), capability_id=capability.id)
+def _root_redirect(capability) -> HttpResponse:
+    return redirect(_route(capability_kind(capability), "gallery"), capability_id=capability.id)
+
+
+def _route_context(capability) -> dict[str, str]:
+    kind = capability_kind(capability)
+    return {
+        "gallery_route": _route(kind, "gallery"),
+        "sub_event_route": _route(kind, "sub-event"),
+        "photo_route": _route(kind, "photo"),
+        "sub_event_photo_route": _route(kind, "sub-event-photo"),
+        "download_route": _route(kind, "download"),
+        "sub_event_download_route": _route(kind, "sub-event-download"),
+        "search_route": _route(kind, "search"),
+        "sub_event_search_route": _route(kind, "sub-event-search"),
+        "clear_search_route": _route(kind, "clear-search"),
+    }
 
 
 def _gallery_listing(event, request, *, sub_event=None):
@@ -145,7 +169,7 @@ def _gallery_listing(event, request, *, sub_event=None):
 
 def _render_gallery(
     request: HttpRequest,
-    capability: OwnerCapability | GuestCapability,
+    capability: OwnerCapability | GuestCapability | PortalCapability,
     *,
     selected_sub_event: SubEvent | None,
     search_form: FaceSearchForm | None = None,
@@ -153,7 +177,7 @@ def _render_gallery(
 ) -> HttpResponse:
     event = _event(capability)
     page, images = _gallery_listing(event, request, sub_event=selected_sub_event)
-    kind = "owner" if isinstance(capability, OwnerCapability) else "guest"
+    kind = capability_kind(capability)
     return _private_render(
         request,
         "openfotos_events/event.html",
@@ -176,6 +200,7 @@ def _render_gallery(
                 if isinstance(capability, OwnerCapability)
                 else None
             ),
+            **_route_context(capability),
         },
         status=status,
     )
@@ -189,6 +214,10 @@ def guest_gallery(request: HttpRequest, capability_id, sub_event_id=None) -> Htt
     return _gallery_access(request, _guest(request, capability_id), sub_event_id=sub_event_id)
 
 
+def portal_gallery(request: HttpRequest, capability_id, sub_event_id=None) -> HttpResponse:
+    return _gallery_access(request, _portal(request, capability_id), sub_event_id=sub_event_id)
+
+
 @require_GET
 def _gallery_access(request, capability, *, sub_event_id=None):
     if has_valid_access_cookie(request, capability):
@@ -197,17 +226,14 @@ def _gallery_access(request, capability, *, sub_event_id=None):
             capability,
             selected_sub_event=_scope(capability, sub_event_id),
         )
-    if has_valid_presented_cookie(request, capability):
+    if isinstance(capability, PortalCapability) or has_valid_presented_cookie(request, capability):
         return _private_render(
             request,
             "openfotos_events/unlock.html",
             {
                 "form": SharePinForm(),
                 "unlock_url": reverse(
-                    _route(
-                        "owner" if isinstance(capability, OwnerCapability) else "guest",
-                        "unlock",
-                    ),
+                    _route(capability_kind(capability), "unlock"),
                     args=(capability.id,),
                 ),
             },
@@ -266,12 +292,27 @@ def guest_unlock(request: HttpRequest, capability_id) -> HttpResponse:
     return _unlock(request, _guest(request, capability_id))
 
 
+@sensitive_post_parameters("pin")
+@require_POST
+def portal_unlock(request: HttpRequest, capability_id) -> HttpResponse:
+    return _unlock(request, _portal(request, capability_id))
+
+
 def _unlock(request: HttpRequest, capability) -> HttpResponse:
-    if not has_valid_presented_cookie(request, capability):
+    if not isinstance(capability, PortalCapability) and not has_valid_presented_cookie(
+        request, capability
+    ):
         raise Http404
     is_owner = isinstance(capability, OwnerCapability)
-    purpose = RateLimitPurpose.OWNER_PIN if is_owner else RateLimitPurpose.GUEST_PIN
-    action = AuditAction.OWNER_PIN_UNLOCK if is_owner else AuditAction.GUEST_PIN_UNLOCK
+    if is_owner:
+        purpose = RateLimitPurpose.OWNER_PIN
+        action = AuditAction.OWNER_PIN_UNLOCK
+    elif isinstance(capability, PortalCapability):
+        purpose = RateLimitPurpose.PORTAL_PIN
+        action = AuditAction.PORTAL_PIN_UNLOCK
+    else:
+        purpose = RateLimitPurpose.GUEST_PIN
+        action = AuditAction.GUEST_PIN_UNLOCK
     form = SharePinForm(request.POST)
     subject = str(capability.id)
     current_limit = rate_limit_status(purpose=purpose, subject=subject, request=request)
@@ -297,7 +338,8 @@ def _unlock(request: HttpRequest, capability) -> HttpResponse:
         )
         response = _root_redirect(capability)
         set_access_cookie(response, capability)
-        delete_presented_cookie(response, capability)
+        if not isinstance(capability, PortalCapability):
+            delete_presented_cookie(response, capability)
         return _private_response(response)
     failed_limit = register_failure(purpose=purpose, subject=subject, request=request)
     record_audit(
@@ -350,6 +392,16 @@ def guest_photo(request: HttpRequest, capability_id, asset_id, sub_event_id=None
     )
 
 
+@require_GET
+def portal_photo(request: HttpRequest, capability_id, asset_id, sub_event_id=None) -> HttpResponse:
+    return _photo(
+        request,
+        _portal(request, capability_id),
+        asset_id=asset_id,
+        sub_event_id=sub_event_id,
+    )
+
+
 def _photo(request, capability, *, asset_id, sub_event_id=None):
     if not has_valid_access_cookie(request, capability):
         raise Http404
@@ -377,12 +429,13 @@ def _photo(request, capability, *, asset_id, sub_event_id=None):
         {
             "event": _event(capability),
             "capability": capability,
-            "share_kind": "owner" if isinstance(capability, OwnerCapability) else "guest",
+            "share_kind": capability_kind(capability),
             "image": image,
             "previous_asset": previous_asset,
             "next_asset": next_asset,
             "dashboard_mode": False,
             "selected_sub_event": selected_sub_event,
+            **_route_context(capability),
         },
     )
 
@@ -406,6 +459,18 @@ def guest_download(
     return _download(
         request,
         _guest(request, capability_id),
+        asset_id=asset_id,
+        sub_event_id=sub_event_id,
+    )
+
+
+@require_GET
+def portal_download(
+    request: HttpRequest, capability_id, asset_id, sub_event_id=None
+) -> HttpResponse:
+    return _download(
+        request,
+        _portal(request, capability_id),
         asset_id=asset_id,
         sub_event_id=sub_event_id,
     )
@@ -517,6 +582,16 @@ def guest_search(request: HttpRequest, capability_id, sub_event_id=None) -> Http
     )
 
 
+@sensitive_post_parameters("reference_photo")
+@require_POST
+def portal_search(request: HttpRequest, capability_id, sub_event_id=None) -> HttpResponse:
+    return _search(
+        request,
+        _portal(request, capability_id),
+        sub_event_id=sub_event_id,
+    )
+
+
 def _search(request, capability, *, sub_event_id=None):
     if not has_valid_access_cookie(request, capability):
         raise Http404
@@ -624,7 +699,7 @@ def _search(request, capability, *, sub_event_id=None):
             "sub_event_id": str(selected_sub_event.id) if selected_sub_event else None,
         },
     )
-    kind = "owner" if isinstance(capability, OwnerCapability) else "guest"
+    kind = capability_kind(capability)
     return redirect(
         _route(kind, "search-results"),
         capability_id=capability.id,
@@ -642,6 +717,11 @@ def guest_search_results(request: HttpRequest, capability_id, result_id) -> Http
     return _search_results(request, _guest(request, capability_id), result_id=result_id)
 
 
+@require_GET
+def portal_search_results(request: HttpRequest, capability_id, result_id) -> HttpResponse:
+    return _search_results(request, _portal(request, capability_id), result_id=result_id)
+
+
 def _search_results(request, capability, *, result_id):
     if not has_valid_access_cookie(request, capability):
         raise Http404
@@ -651,9 +731,23 @@ def _search_results(request, capability, *, result_id):
         expires_at__gt=timezone.now(),
     )
     if isinstance(capability, OwnerCapability):
-        query = query.filter(owner_capability=capability, guest_capability__isnull=True)
+        query = query.filter(
+            owner_capability=capability,
+            guest_capability__isnull=True,
+            portal_capability__isnull=True,
+        )
+    elif isinstance(capability, GuestCapability):
+        query = query.filter(
+            guest_capability=capability,
+            owner_capability__isnull=True,
+            portal_capability__isnull=True,
+        )
     else:
-        query = query.filter(guest_capability=capability, owner_capability__isnull=True)
+        query = query.filter(
+            portal_capability=capability,
+            owner_capability__isnull=True,
+            guest_capability__isnull=True,
+        )
     result_set = query.first()
     if result_set is None:
         raise Http404
@@ -681,7 +775,7 @@ def _search_results(request, capability, *, result_id):
         {
             "event": _event(capability),
             "capability": capability,
-            "share_kind": "owner" if isinstance(capability, OwnerCapability) else "guest",
+            "share_kind": capability_kind(capability),
             "page": page,
             "images": images,
             "sub_events": _event(capability).sub_events.filter(is_archived=False),
@@ -689,6 +783,7 @@ def _search_results(request, capability, *, result_id):
             "search_form": FaceSearchForm(),
             "search_mode": True,
             "search_result": result_set,
+            **_route_context(capability),
         },
     )
 
@@ -701,6 +796,11 @@ def owner_clear_search(request: HttpRequest, capability_id, result_id) -> HttpRe
 @require_POST
 def guest_clear_search(request: HttpRequest, capability_id, result_id) -> HttpResponse:
     return _clear_search(request, _guest(request, capability_id), result_id=result_id)
+
+
+@require_POST
+def portal_clear_search(request: HttpRequest, capability_id, result_id) -> HttpResponse:
+    return _clear_search(request, _portal(request, capability_id), result_id=result_id)
 
 
 def _clear_search(request, capability, *, result_id):
