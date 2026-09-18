@@ -13,7 +13,7 @@ from django.urls import reverse
 from django.utils import timezone
 from PIL import Image
 
-from openfotos_contracts import EventState
+from openfotos_contracts import EventState, IntakeState
 from openfotos_server.events.models import (
     Asset,
     AssetObject,
@@ -21,6 +21,8 @@ from openfotos_server.events.models import (
     ContributionBatch,
     Event,
     EventInstallation,
+    FaceAnalysis,
+    FaceSearchResultSet,
     GuestCapability,
     IngestionManifest,
     OwnerCapability,
@@ -33,7 +35,11 @@ from openfotos_server.events.portfolio_services import (
     CONSENT_NOTICE_VERSION,
     publish_event_with_portal,
 )
-from openfotos_server.events.retention_services import RetentionError, purge_event_media
+from openfotos_server.events.retention_services import (
+    RetentionError,
+    erase_event_for_privacy,
+    purge_event_media,
+)
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectHead, PresignedGet
 
 pytestmark = pytest.mark.django_db
@@ -266,6 +272,9 @@ def test_due_retention_purge_removes_private_media_and_keeps_cover_card(tenant) 
         width=1,
         height=1,
         sha256="e" * 64,
+        gallery_excluded_at=now,
+        gallery_exclusion_reason="Participant requested removal",
+        gallery_excluded_by=user,
     )
     private_key = f"events/{event.id}/originals/{asset.id}.png"
     AssetObject.objects.create(
@@ -325,6 +334,9 @@ def test_due_retention_purge_removes_private_media_and_keeps_cover_card(tenant) 
     assert event.media_purged_at == now
     assert asset.original_filename == "purged"
     assert asset.sha256 == "0" * 64
+    assert asset.gallery_excluded_at is None
+    assert asset.gallery_exclusion_reason == ""
+    assert asset.gallery_excluded_by is None
     assert batch.declared_original_bytes == 0
     assert not AssetObject.objects.filter(asset=asset).exists()
     assert not IngestionManifest.objects.filter(event=event).exists()
@@ -355,3 +367,190 @@ def test_retention_command_requires_explicit_confirmation(tenant) -> None:
 
     with pytest.raises(CommandError, match="--confirm"):
         call_command("purge_expired_event_media", event_id=str(event.id))
+
+
+def test_retention_report_is_non_destructive_and_omits_event_names(tenant, capsys) -> None:
+    photographer, _user = tenant
+    now = timezone.now()
+    due = Event.objects.create(
+        photographer=photographer,
+        name="Private client name",
+        purge_after=now - timedelta(minutes=1),
+    )
+    upcoming = Event.objects.create(
+        photographer=photographer,
+        name="Another private name",
+        purge_after=now + timedelta(days=3),
+    )
+    Event.objects.create(
+        photographer=photographer,
+        name="Already purged",
+        purge_after=now - timedelta(days=1),
+        media_purged_at=now,
+    )
+
+    call_command("report_event_retention", days_ahead=7)
+
+    report = capsys.readouterr().out
+    assert str(due.id) in report
+    assert str(upcoming.id) in report
+    assert "Private client name" not in report
+    assert "Another private name" not in report
+    assert Event.objects.filter(pk__in=(due.id, upcoming.id)).count() == 2
+
+
+def test_privacy_erasure_quarantines_then_removes_the_entire_event(tenant) -> None:
+    photographer, user = tenant
+    now = timezone.now()
+    cover_key = "events/private/portfolio/cover.jpg"
+    event = Event.objects.create(
+        photographer=photographer,
+        name="Removal Requested Wedding",
+        state=EventState.PUBLISHED.value,
+        cover_object_key=cover_key,
+        cover_sha256="c" * 64,
+        cover_width=1200,
+        cover_height=800,
+        expires_at=now + timedelta(days=300),
+        first_published_at=now - timedelta(days=65),
+        purge_after=now + timedelta(days=330),
+        reserved_original_bytes=1,
+        verified_original_bytes=1,
+        reserved_original_count=1,
+        verified_original_count=1,
+    )
+    ConsentAttestation.objects.create(
+        event=event,
+        actor=user,
+        notice_version=CONSENT_NOTICE_VERSION,
+    )
+    sub_event = SubEvent.objects.create(event=event, name="Private Ceremony", position=1)
+    installation = EventInstallation.objects.create(
+        event=event,
+        user=user,
+        installation_id="00000000-0000-4000-8000-000000000040",
+        label="Personally named workstation",
+    )
+    batch = ContributionBatch.objects.create(
+        id="00000000-0000-4000-8000-000000000041",
+        installation=installation,
+        sub_event=sub_event,
+        intake_generation=1,
+        label="Private folder label",
+        processing_profile_id="pilot-profile-v1",
+        declared_asset_count=1,
+        declared_original_bytes=1,
+        manifest_sha256="d" * 64,
+    )
+    asset = Asset.objects.create(
+        id="00000000-0000-4000-8000-000000000042",
+        batch=batch,
+        original_filename="private-person-name.jpg",
+        width=1,
+        height=1,
+        sha256="e" * 64,
+        gallery_excluded_at=now,
+        gallery_exclusion_reason="Participant requested removal",
+        gallery_excluded_by=user,
+    )
+    original_key = f"events/{event.id}/originals/{asset.id}.jpg"
+    upload = AssetObject.objects.create(
+        asset=asset,
+        variant="original",
+        object_key=original_key,
+        expected_bytes=1,
+        sha256="e" * 64,
+        content_md5="ndTkYSaMgDT1yFZOFVxnpg==",
+        content_type="image/jpeg",
+        width=1,
+        height=1,
+        state="verified",
+        lease_expires_at=now + timedelta(minutes=5),
+    )
+    FaceAnalysis.objects.create(asset=asset, model_id=event.face_model_id)
+    owner = OwnerCapability(
+        event=event,
+        created_by=user,
+        secret_digest="1" * 64,
+        expires_at=now + timedelta(days=1),
+    )
+    owner.set_pin("1234")
+    owner.save()
+    FaceSearchResultSet.objects.create(
+        owner_capability=owner,
+        event=event,
+        ordered_asset_ids=[str(asset.id)],
+        expires_at=now + timedelta(minutes=10),
+    )
+    store = MemoryObjectStore()
+    store.objects[cover_key] = (b"cover", "image/jpeg", "c" * 64)
+    store.objects[original_key] = (b"x", "image/jpeg", "e" * 64)
+
+    with pytest.raises(RetentionError) as active_lease:
+        erase_event_for_privacy(
+            event_id=event.id,
+            instruction_reference="studio-email-20260918",
+            object_store=store,
+            at=now,
+        )
+
+    assert active_lease.value.code == "upload_lease_active"
+    event.refresh_from_db()
+    assert event.state == EventState.CANCELLED.value
+    assert event.intake_state == IntakeState.CLOSED.value
+    assert event.erasure_requested_at == now
+    assert not OwnerCapability.objects.filter(event=event).exists()
+    assert not FaceSearchResultSet.objects.filter(event=event).exists()
+    assert set(store.objects) == {cover_key, original_key}
+
+    AssetObject.objects.filter(pk=upload.pk).update(lease_expires_at=now - timedelta(seconds=1))
+    result = erase_event_for_privacy(
+        event_id=event.id,
+        instruction_reference="studio-email-20260918",
+        object_store=store,
+        at=now + timedelta(minutes=6),
+    )
+
+    event.refresh_from_db()
+    asset.refresh_from_db()
+    batch.refresh_from_db()
+    installation.refresh_from_db()
+    sub_event.refresh_from_db()
+    assert result.deleted_object_count == 2
+    assert store.objects == {}
+    assert event.name == "Erased event"
+    assert event.cover_object_key == ""
+    assert event.privacy_erased_at == now + timedelta(minutes=6)
+    assert event.reserved_original_count == event.verified_original_count == 0
+    assert asset.original_filename == "purged"
+    assert asset.gallery_excluded_at is None
+    assert asset.gallery_exclusion_reason == ""
+    assert asset.gallery_excluded_by is None
+    assert batch.label == "" and batch.declared_asset_count == 0
+    assert installation.user is None and installation.status == "revoked"
+    assert sub_event.name.startswith("Erased ")
+    assert not ConsentAttestation.objects.filter(event=event).exists()
+    assert not FaceAnalysis.objects.filter(asset=asset).exists()
+    assert not AssetObject.objects.filter(asset=asset).exists()
+
+
+def test_privacy_erasure_command_requires_confirmation_and_exact_name(tenant) -> None:
+    photographer, _user = tenant
+    event = Event.objects.create(photographer=photographer, name="Exact event")
+
+    with pytest.raises(CommandError, match="--confirm"):
+        call_command(
+            "erase_event_for_privacy",
+            event_id=str(event.id),
+            confirm_event_name=event.name,
+            instruction_reference="studio-email-20260918",
+        )
+
+    with pytest.raises(CommandError, match="does not match"):
+        call_command(
+            "erase_event_for_privacy",
+            event_id=str(event.id),
+            confirm_event_name="Wrong event",
+            instruction_reference="studio-email-20260918",
+            confirm=True,
+        )

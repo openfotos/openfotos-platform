@@ -10,7 +10,13 @@ from django.contrib.auth import get_user_model
 from django.db import OperationalError, close_old_connections, connections
 from django.utils import timezone
 
-from openfotos_contracts import ContributionInput, EventState, UploadObjectState
+from openfotos_contracts import (
+    EVENT_ORIGINAL_ASSET_LIMIT,
+    EVENT_ORIGINAL_BYTES_LIMIT,
+    ContributionInput,
+    EventState,
+    UploadObjectState,
+)
 from openfotos_server.events.desktop_auth import (
     authenticate_photographer,
 )
@@ -29,6 +35,7 @@ from openfotos_server.events.ingestion_services import (
 )
 from openfotos_server.events.models import (
     AssetObject,
+    AuditAction,
     DesktopSession,
     Event,
     IngestionManifest,
@@ -109,7 +116,7 @@ class MemoryObjectStore:
         self.upload(key, content, content_type=content_type, sha256=sha256)
 
 
-def setup_event(*, storage_limit=25_000_000_000):
+def setup_event(*, storage_limit=EVENT_ORIGINAL_BYTES_LIMIT):
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     user = get_user_model().objects.create_user(
         username="photographer",
@@ -199,6 +206,79 @@ def contribution_many(contents: list[bytes]) -> ContributionInput:
     )
 
 
+def contribution_sizes(sizes: list[int]) -> ContributionInput:
+    sub_event = SubEvent.objects.get(is_archived=False)
+    return ContributionInput.from_dict(
+        {
+            "batch_id": str(uuid4()),
+            "sub_event_id": str(sub_event.id),
+            "label": "Capacity boundary",
+            "processing_profile_id": "pilot-profile-v1",
+            "device_label": "Installation workstation",
+            "assets": [
+                {
+                    "id": str(uuid4()),
+                    "filename": f"capacity-{index}.jpg",
+                    "content_type": "image/jpeg",
+                    "size_bytes": size,
+                    "sha256": hashlib.sha256(str(index).encode()).hexdigest(),
+                    "content_md5": base64.b64encode(
+                        hashlib.md5(str(index).encode(), usedforsecurity=False).digest()
+                    ).decode(),
+                    "width": 8,
+                    "height": 6,
+                }
+                for index, size in enumerate(sizes, start=1)
+            ],
+        }
+    )
+
+
+def test_default_event_accepts_exactly_fifty_billion_original_bytes() -> None:
+    event, _, installation = setup_event()
+
+    reserve_contribution(
+        session=installation,
+        event_id=event.id,
+        contribution=contribution_sizes([100_000_000] * 500),
+    )
+
+    event.refresh_from_db()
+    assert event.storage_limit_bytes == 50_000_000_000
+    assert event.reserved_original_bytes == 50_000_000_000
+    with pytest.raises(IngestionError) as exceeded:
+        reserve_contribution(
+            session=installation,
+            event_id=event.id,
+            contribution=contribution(b"x"),
+        )
+    assert exceeded.value.code == "event_storage_limit"
+
+
+def test_event_accepts_photo_ten_thousand_but_rejects_the_next() -> None:
+    event, _, installation = setup_event()
+    Event.objects.filter(pk=event.pk).update(
+        reserved_original_bytes=EVENT_ORIGINAL_ASSET_LIMIT - 1,
+        reserved_original_count=EVENT_ORIGINAL_ASSET_LIMIT - 1,
+    )
+
+    reserve_contribution(
+        session=installation,
+        event_id=event.id,
+        contribution=contribution(b"x"),
+    )
+
+    event.refresh_from_db()
+    assert event.reserved_original_count == 10_000
+    with pytest.raises(IngestionError) as exceeded:
+        reserve_contribution(
+            session=installation,
+            event_id=event.id,
+            contribution=contribution(b"y"),
+        )
+    assert exceeded.value.code == "event_asset_limit"
+
+
 def test_reservation_is_immutable_all_or_nothing_and_device_scoped() -> None:
     content = b"one complete synthetic jpeg payload"
     event, _, first_installation = setup_event(storage_limit=len(content))
@@ -223,6 +303,7 @@ def test_reservation_is_immutable_all_or_nothing_and_device_scoped() -> None:
     assert repeated.id == batch.id
     event.refresh_from_db()
     assert event.reserved_original_bytes == len(content)
+    assert event.reserved_original_count == 1
     assert event.state == EventState.UPLOADING.value
 
     with pytest.raises(IngestionError) as quota_error:
@@ -278,6 +359,7 @@ def test_lost_response_recovery_verifies_object_and_finalizes_immutable_generati
     assert verified.state == repeated.state == UploadObjectState.VERIFIED.value
     event.refresh_from_db()
     assert event.verified_original_bytes == len(content)
+    assert event.verified_original_count == 1
 
     close_intake(session=primary, event_id=event.id)
     finalized = finalize_ingestion(
@@ -477,6 +559,7 @@ def test_batch_cancellation_waits_for_leases_deletes_objects_and_releases_quota(
     assert cancelled.state == "cancelled"
     assert upload.state == UploadObjectState.EXCLUDED.value
     assert event.reserved_original_bytes == event.verified_original_bytes == 0
+    assert event.reserved_original_count == event.verified_original_count == 0
     assert upload.object_key in storage.deleted
 
 
@@ -555,6 +638,10 @@ def test_partial_batch_requires_reasoned_exclusion_and_keeps_verified_bytes_char
     assert batch.state == "complete"
     assert event.reserved_original_bytes == len(contents[0])
     assert event.verified_original_bytes == len(contents[0])
+    assert event.reserved_original_count == 1
+    assert event.verified_original_count == 1
+    exclusion_audit = event.audit_events.get(action=AuditAction.ASSET_EXCLUDED)
+    assert exclusion_audit.metadata == {"asset_id": str(second_asset.id)}
     with pytest.raises(IngestionError) as cancellation:
         cancel_batch(
             session=primary,
@@ -677,4 +764,65 @@ def test_ten_devices_racing_reservations_never_exceed_event_allowance() -> None:
     assert results.count("reserved") == 5
     assert results.count("event_storage_limit") == 5
     assert event.reserved_original_bytes == event.storage_limit_bytes
+    assert AssetObject.objects.filter(asset__batch__installation__event=event).count() == 5
+
+
+@pytest.mark.django_db(transaction=True)
+def test_ten_devices_racing_reservations_never_exceed_event_photo_limit() -> None:
+    content = b"fixed-size synthetic jpeg"
+    photographer = Photographer.objects.create(slug="count-race", display_name="Count Race")
+    user = get_user_model().objects.create_user(
+        username="count-race-photographer",
+        password="correct-password",
+    )
+    PhotographerMembership.objects.create(photographer=photographer, user=user)
+    event = Event.objects.create(
+        photographer=photographer,
+        name="Concurrent reception",
+        reserved_original_bytes=EVENT_ORIGINAL_ASSET_LIMIT - 5,
+        reserved_original_count=EVENT_ORIGINAL_ASSET_LIMIT - 5,
+        expires_at=timezone.now() + timedelta(days=30),
+    )
+    SubEvent.objects.create(event=event, name="Reception", position=1)
+    attempts = []
+    for _index in range(10):
+        tokens = authenticate_photographer(
+            photographer=photographer,
+            username="count-race-photographer",
+            password="correct-password",
+            installation_id=uuid4(),
+        )
+        attempts.append((tokens.session.id, contribution(content)))
+
+    def attempt(args):
+        session_id, manifest_input = args
+        close_old_connections()
+        try:
+            for retry in range(20):
+                try:
+                    session = DesktopSession.objects.select_related("photographer", "user").get(
+                        pk=session_id
+                    )
+                    reserve_contribution(
+                        session=session,
+                        event_id=event.id,
+                        contribution=manifest_input,
+                    )
+                    return "reserved"
+                except OperationalError:
+                    if retry == 19:
+                        raise
+                    time.sleep(0.01 * (retry + 1))
+                except IngestionError as exc:
+                    return exc.code
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        results = list(executor.map(attempt, attempts))
+
+    event.refresh_from_db()
+    assert results.count("reserved") == 5
+    assert results.count("event_asset_limit") == 5
+    assert event.reserved_original_count == EVENT_ORIGINAL_ASSET_LIMIT
     assert AssetObject.objects.filter(asset__batch__installation__event=event).count() == 5

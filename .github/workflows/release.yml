@@ -1,0 +1,123 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16@sha256:ccc6e83d6e35e931dc7c5def2022729d5a6c370318d099181995567ff1fb4d6b
+        env:
+          POSTGRES_DB: openfotos
+          POSTGRES_USER: openfotos
+          POSTGRES_PASSWORD: openfotos
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openfotos -d openfotos"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Install checksum-verified Gitleaks
+        run: |
+          curl --fail --location --silent --show-error \
+            --output /tmp/gitleaks.tar.gz \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum --check --strict
+          tar --extract --gzip --file /tmp/gitleaks.tar.gz --directory /tmp gitleaks
+      - run: /tmp/gitleaks git --redact --no-banner --verbose .
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes libegl1
+      - run: uv sync --frozen --extra server --extra desktop --extra vision
+      - run: uv run python scripts/release_artifacts.py verify-tag "${{ github.ref_name }}"
+      - run: ./scripts/check.sh
+      - run: >-
+          uv run pytest
+          tests/integration/test_session7_face_index.py
+          tests/integration/test_session8_sharing.py
+        env:
+          DATABASE_URL: postgresql://openfotos:openfotos@127.0.0.1:5432/openfotos
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-2025
+            bundle: dist/OpenFotos
+          - platform: macos
+            runner: macos-15
+            bundle: dist/OpenFotos.app
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          version: "0.11.26"
+          enable-cache: true
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version-file: .python-version
+      - run: uv sync --frozen --extra desktop --group packaging
+      - run: uv run python scripts/release_artifacts.py verify-tag "${{ github.ref_name }}"
+      - run: uv run python -c "from pathlib import Path; Path('build').mkdir(exist_ok=True)"
+      - name: Generate installed dependency licenses
+        run: >-
+          uv run pip-licenses
+          --from=mixed
+          --format=plain-vertical
+          --with-license-file
+          --no-license-path
+          --output-file=build/THIRD_PARTY_LICENSES.txt
+      - run: uv run pyinstaller --clean --noconfirm packaging/openfotos_desktop.spec
+      - run: uv run python scripts/release_artifacts.py archive ${{ matrix.platform }} "${{ matrix.bundle }}" release
+      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: openfotos-${{ matrix.platform }}
+          path: release/*
+          if-no-files-found: error
+
+  draft-release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: openfotos-*
+          path: release
+          merge-multiple: true
+      - run: python scripts/release_artifacts.py checksums release
+      - name: Create draft pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          release/*
+          --draft
+          --prerelease
+          --verify-tag
+          --title "OpenFotos ${{ github.ref_name }} supervised pilot"
+          --notes-file docs/release/v0.1.0.md

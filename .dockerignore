@@ -1,0 +1,18 @@
+# Deny by default: local photographs, models, credentials, databases, and VCS data must never enter
+# a local or remote container build context.
+**
+
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE
+!NOTICE
+!THIRD_PARTY_NOTICES.md
+!apps/
+!apps/**
+!packages/
+!packages/**
+!scripts/
+!scripts/fetch_face_models.py
+!licenses/
+!licenses/**

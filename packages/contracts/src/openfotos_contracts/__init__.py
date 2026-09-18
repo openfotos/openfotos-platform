@@ -19,6 +19,8 @@ from .derivatives import (
 )
 from .events import EventSnapshot, PreviewPolicySnapshot, SubEventSnapshot
 from .ingestion import (
+    EVENT_ORIGINAL_ASSET_LIMIT,
+    EVENT_ORIGINAL_BYTES_LIMIT,
     ORIGINAL_EXTENSION_BY_CONTENT_TYPE,
     SUPPORTED_ORIGINAL_CONTENT_TYPES,
     ContractError,
@@ -51,6 +53,8 @@ __all__ = [
     "InstallationStatus",
     "EventState",
     "EventSnapshot",
+    "EVENT_ORIGINAL_ASSET_LIMIT",
+    "EVENT_ORIGINAL_BYTES_LIMIT",
     "IngestionManifestState",
     "IntakeState",
     "MAX_WATERMARK_TEXT_LENGTH",

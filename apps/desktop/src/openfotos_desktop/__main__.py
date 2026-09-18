@@ -5,7 +5,11 @@ import sys
 from pathlib import Path
 from uuid import UUID
 
-from openfotos_contracts import WatermarkLogoKind, WatermarkTemplate
+from openfotos_contracts import (
+    EVENT_ORIGINAL_BYTES_LIMIT,
+    WatermarkLogoKind,
+    WatermarkTemplate,
+)
 
 from .ingestion import (
     CheckpointStore,
@@ -18,7 +22,7 @@ from .paths import default_checkpoint_path
 DEMO_EVENT = EventCache(
     id=UUID("00000000-0000-4000-8000-000000000003"),
     name="Session 3 synthetic reception",
-    storage_limit_bytes=25_000_000_000,
+    storage_limit_bytes=EVENT_ORIGINAL_BYTES_LIMIT,
     processing_profile_id="pilot-profile-v1",
     sub_events=(
         SubEventCache(

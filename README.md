@@ -5,9 +5,9 @@ photo discovery. A photographer organizes one main wedding into sub-events such 
 Reception, and Marriage, then processes edited JPEG/JPG, PNG, WebP, HEIC, or HEIF images with one
 account across tracked desktop installations. RAW formats are intentionally unsupported.
 
-The pilot deliberately targets one photographer, wedding-sized events below roughly 20–25 GB, up
-to 50 sub-events, one to ten active desktop installations, and a supervised delivery window. The complete product and
-architecture decisions are in the
+The pilot deliberately targets one photographer, wedding-sized events with up to 50,000,000,000
+bytes of originals and 10,000 photos, up to 50 sub-events, one to ten active desktop installations,
+and a supervised delivery window. The complete product and architecture decisions are in the
 [product and technical plan](OpenFotos_Markdown/OpenFotos_Product_and_Technical_Plan.md). The
 [pilot access decision](docs/adr/0002-pilot-accounts-tenancy-and-event-access.md) records the exact
 Session 2 authorization and PIN tradeoffs. The
@@ -41,7 +41,7 @@ storage, and 365+30-day retention.
 
 ```text
 apps/
-  desktop/       PySide6 application entry point and future UI/controllers
+  desktop/       PySide6 photographer ingestion application
   server/        Django project
 packages/
   contracts/     Shared event states and API/model contracts
@@ -70,7 +70,8 @@ uv run python apps/server/manage.py check
 uv run python apps/server/manage.py runserver
 ```
 
-The health endpoint is `http://127.0.0.1:8000/health/`. Start the real desktop client with:
+The process-only health endpoint is `http://127.0.0.1:8000/health/live/`; dependency readiness is
+`http://127.0.0.1:8000/health/ready/`. Start the real desktop client with:
 
 ```bash
 uv run python -m openfotos_desktop
@@ -135,11 +136,12 @@ Copy `.env.example` to `.env` for local values and set `SHARE_PIN_PEPPER` indepe
 `DJANGO_SECRET_KEY`. Configure `FACE_DETECTOR_MODEL_PATH` and `FACE_RECOGNIZER_MODEL_PATH` to the
 accepted hash-verified YuNet/SFace files; weights stay outside the repository. Never commit `.env`,
 model weights, customer photos, reference images, face embeddings, or production credentials. The
-application-source licence decision is AGPL-3.0; adding the final licence text and third-party
-notices is a Session 9 packaging gate. Pretrained model weights retain separate terms.
+application source is AGPL-3.0-only. Release packages include the repository licence, generated
+dependency licences, and separate YuNet MIT and SFace Apache-2.0 notices. Pretrained model weights
+are downloaded at runtime, hash-verified, and never bundled.
 
 Search-result rows contain only ordered asset IDs and expire after one hour. Run the idempotent
-cleanup command manually in development; Session 9 must schedule it at least every 15 minutes:
+cleanup command manually in development and every 15 minutes in deployed environments:
 
 ```bash
 uv run python apps/server/manage.py purge_expired_face_searches
@@ -158,9 +160,15 @@ uv run python apps/server/manage.py purge_expired_event_media \
 The purge verifies deletion of private media/manifests/marks, removes face/search/capability state,
 and keeps the consented event title and sanitized cover as a non-clickable portfolio card.
 
-The pre-Session 9 slice does not need production Railway or Supabase accounts. Live secrets,
-wildcard DNS/TLS, schedules, restore rehearsal, monitoring, cost measurements, and deployment
-rehearsal begin in Session 9.
+For verified privacy removal, use `erase_event_for_privacy`; it immediately unpublishes and revokes
+the entire event before deleting all cloud media and redacting identifying database fields. For
+photographer recovery, `reset_photographer_password` prompts interactively and revokes that user's
+browser and desktop sessions. Both commands require explicit confirmation.
+
+Production and rehearsal setup, provider-side manual steps, restore testing, monitoring, load
+evidence, incident handling, and clean cutover are specified in the
+[production runbook](docs/operations/production-runbook.md). Record only non-secret results in the
+[launch evidence log](docs/operations/launch-evidence.md).
 
 The server needs one private S3-compatible bucket per environment plus object read/write
 credentials. It never creates a bucket per event: server-owned `events/<UUID>/...` keys and narrow

@@ -1,0 +1,15 @@
+OpenFotos
+Copyright 2026 OneNodeAI
+
+OpenFotos is distributed under the GNU Affero General Public License,
+version 3 only. See LICENSE.
+
+The application uses the YuNet and SFace model artifacts published by the
+OpenCV Zoo project. YuNet is provided under the MIT License and SFace is
+provided under the Apache License 2.0. Their license notices are retained in
+licenses/YuNet-MIT.txt and licenses/SFace-Apache-2.0.txt.
+
+Desktop distributions include a generated THIRD_PARTY_LICENSES.txt containing
+the installed Python packages and their license texts. No face-model weights,
+customer photographs, reference photographs, or credentials are distributed
+with OpenFotos.

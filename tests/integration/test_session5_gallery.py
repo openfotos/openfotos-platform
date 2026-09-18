@@ -361,7 +361,8 @@ def test_failed_asset_exclusion_requires_five_attempts_and_is_reversible() -> No
         reason="The verified source cannot produce a safe preview.",
     )
     assert excluded.gallery_excluded_at is not None
-    assert event.audit_events.filter(action=AuditAction.ASSET_GALLERY_EXCLUDED).exists()
+    exclusion_audit = event.audit_events.get(action=AuditAction.ASSET_GALLERY_EXCLUDED)
+    assert exclusion_audit.metadata == {"asset_id": str(asset.id)}
 
     restored = restore_to_gallery(event=event, asset_id=asset.id, actor=user)
     assert restored.gallery_excluded_at is None

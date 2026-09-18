@@ -90,7 +90,8 @@ storage, and retention decisions.
 
 - One initial photographer business, with tenant boundaries retained for safe expansion.
 - Wedding-sized main events with up to 50 sub-events.
-- Edited JPEG/JPG, PNG, WebP, HEIC, or HEIF inputs, normally below 20–25 GB per main event.
+- Edited JPEG/JPG, PNG, WebP, HEIC, or HEIF inputs, with a hard limit of 50,000,000,000
+  original bytes and 10,000 photos per main event across all batches and workstations.
 - One photographer account and up to ten active desktop installations per event.
 - Private originals, previews, thumbnails, manifests, and face embeddings.
 - Server-rendered photographer and visitor web experiences.

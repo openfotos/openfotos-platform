@@ -10,6 +10,8 @@ from uuid import UUID
 MAX_BATCH_ASSETS = 10_000
 MAX_ORIGINAL_BYTES = 100 * 1024 * 1024
 MAX_IMAGE_PIXELS = 120_000_000
+EVENT_ORIGINAL_BYTES_LIMIT = 50_000_000_000
+EVENT_ORIGINAL_ASSET_LIMIT = 10_000
 SUPPORTED_ORIGINAL_CONTENT_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/webp", "image/heic", "image/heif"}
 )

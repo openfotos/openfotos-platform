@@ -20,5 +20,10 @@
     {% endif %}
     {% block content %}{% endblock %}
   </main>
+  <footer class="legal-footer">
+    <a href="{% url 'events:privacy-notice' %}">Privacy</a>
+    <a href="{% url 'events:terms' %}">Terms</a>
+    <a href="https://github.com/openfotos/openfotos-platform" rel="noopener noreferrer">Source code</a>
+  </footer>
 </body>
 </html>

@@ -15,6 +15,8 @@ from pgvector.django import VectorField
 
 from openfotos_contracts import (
     DERIVATIVE_PROFILE_ID,
+    EVENT_ORIGINAL_ASSET_LIMIT,
+    EVENT_ORIGINAL_BYTES_LIMIT,
     WATERMARK_RENDERER_ID,
     AssetVariant,
     ContributionState,
@@ -28,7 +30,6 @@ from openfotos_contracts import (
 )
 from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT
 
-PILOT_STORAGE_LIMIT_BYTES = 25_000_000_000
 RESERVED_PHOTOGRAPHER_SLUGS = frozenset({"admin", "api", "media", "static", "www"})
 PIN_PATTERN = re.compile(r"[0-9]{4}\Z")
 SHA256_VALIDATOR = RegexValidator(r"^[0-9a-f]{64}$", "Enter a lowercase SHA-256 digest.")
@@ -235,9 +236,14 @@ class Event(models.Model):
         choices=tuple((state.value, state.value.title()) for state in EventState),
         default=EventState.DRAFT.value,
     )
-    storage_limit_bytes = models.PositiveBigIntegerField(default=PILOT_STORAGE_LIMIT_BYTES)
+    storage_limit_bytes = models.PositiveBigIntegerField(
+        default=EVENT_ORIGINAL_BYTES_LIMIT,
+        editable=False,
+    )
     reserved_original_bytes = models.PositiveBigIntegerField(default=0, editable=False)
     verified_original_bytes = models.PositiveBigIntegerField(default=0, editable=False)
+    reserved_original_count = models.PositiveIntegerField(default=0, editable=False)
+    verified_original_count = models.PositiveIntegerField(default=0, editable=False)
     max_contribution_devices = models.PositiveSmallIntegerField(
         default=10,
         validators=[MinValueValidator(1), MaxValueValidator(10)],
@@ -270,6 +276,9 @@ class Event(models.Model):
     expires_at = models.DateTimeField(blank=True, null=True)
     first_published_at = models.DateTimeField(blank=True, null=True, editable=False)
     purge_after = models.DateTimeField(blank=True, null=True, editable=False)
+    erasure_requested_at = models.DateTimeField(blank=True, null=True, editable=False)
+    erasure_instruction_reference = models.CharField(max_length=100, blank=True, editable=False)
+    privacy_erased_at = models.DateTimeField(blank=True, null=True, editable=False)
     media_purged_at = models.DateTimeField(blank=True, null=True, editable=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -291,6 +300,14 @@ class Event(models.Model):
             models.CheckConstraint(
                 condition=Q(reserved_original_bytes__lte=F("storage_limit_bytes")),
                 name="event_reserved_bytes_within_limit",
+            ),
+            models.CheckConstraint(
+                condition=Q(verified_original_count__lte=F("reserved_original_count")),
+                name="event_verified_count_within_reserved",
+            ),
+            models.CheckConstraint(
+                condition=Q(reserved_original_count__lte=EVENT_ORIGINAL_ASSET_LIMIT),
+                name="event_reserved_count_within_limit",
             ),
         ]
         ordering = ("-created_at",)

@@ -94,7 +94,8 @@ class FaceSearchForm(forms.Form):
     )
     consent = forms.BooleanField(
         label=(
-            "I have permission to use this person's photo and understand that the image, "
-            "face crop, and search vector are discarded after processing."
+            "I am the adult shown, have that adult's permission, or have parent/guardian "
+            "authority for a child shown. I understand that the image, face crop, and "
+            "one-time search vector are discarded after processing."
         )
     )

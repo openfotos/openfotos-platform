@@ -7,6 +7,8 @@ name = "openfotos"
 version = "0.1.0"
 description = "Private event photo delivery and face-based discovery pilot"
 readme = "README.md"
+license = "AGPL-3.0-only"
+authors = [{ name = "OneNodeAI" }]
 requires-python = ">=3.12,<3.15"
 dependencies = []
 
@@ -28,6 +30,8 @@ server = [
 desktop = [
   "httpx>=0.28,<1",
   "keyring>=25.6,<26",
+  "numpy>=1.26,<3",
+  "opencv-python-headless>=4.10,<6",
   "pillow>=11,<13",
   "pillow-heif>=1.1,<2",
   "pyside6>=6.8,<7",
@@ -47,6 +51,10 @@ dev = [
   "pytest-cov>=6,<8",
   "pytest-django>=4.10,<5",
   "ruff>=0.9,<1",
+]
+packaging = [
+  "pip-licenses==5.5.5",
+  "pyinstaller==6.22.3",
 ]
 
 [tool.hatch.build.targets.wheel]

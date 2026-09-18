@@ -66,7 +66,7 @@ def approved_batch(tmp_path: Path):
         EventCache(
             id=event_id,
             name="Reception",
-            storage_limit_bytes=25_000_000_000,
+            storage_limit_bytes=50_000_000_000,
             processing_profile_id="pilot-profile-v1",
             server_url="http://localhost:8000",
             device_label="Studio workstation",
@@ -96,7 +96,7 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
             "id": str(event_id),
             "name": "Reception",
             "state": "uploading",
-            "storage_limit_bytes": 25_000_000_000,
+            "storage_limit_bytes": 50_000_000_000,
             "processing_profile_id": "pilot-profile-v1",
             "face_model_id": "opencv-yunet-2023mar-sface-2021dec",
             "face_index_ready": False,
@@ -109,9 +109,9 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
             ],
             "reserved_original_bytes": 0,
             "verified_original_bytes": 0,
-            "remaining_original_bytes": 25_000_000_000,
-            "intake_state": "open",
-            "intake_generation": 1,
+            "remaining_original_bytes": 50_000_000_000,
+            "intake_state": state.get("intake_state", "open"),
+            "intake_generation": state.get("intake_generation", 1),
             "max_contribution_devices": 10,
             "active_contribution_devices": 1,
             "device_label": "",
@@ -133,6 +133,15 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
             if state.get("policy_after_refresh"):
                 state["policy"] = state["policy_after_refresh"]
             return httpx.Response(200, json={"events": [event_data()]})
+        if path == f"/api/v1/events/{event_id}/intake/close/":
+            state.setdefault("intake_keys", []).append(request.headers["idempotency-key"])
+            state["intake_state"] = "closed"
+            return httpx.Response(200, json=event_data())
+        if path == f"/api/v1/events/{event_id}/intake/reopen/":
+            state.setdefault("intake_keys", []).append(request.headers["idempotency-key"])
+            state["intake_state"] = "open"
+            state["intake_generation"] = state.get("intake_generation", 1) + 1
+            return httpx.Response(200, json=event_data())
         if path == f"/api/v1/events/{event_id}/batches/":
             state["manifest"] = json.loads(request.content)
             return httpx.Response(201, json={"id": str(batch_id), "state": "reserved"})
@@ -274,6 +283,36 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
         raise AssertionError(f"Unexpected API request: {request.method} {path}")
 
     return handle
+
+
+def test_reopened_intake_uses_new_close_idempotency_key(tmp_path: Path) -> None:
+    store, event_id, batch_id, _photo = approved_batch(tmp_path)
+    asset_id = store.list_items(batch_id)[0].id
+    state = {}
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, state))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
+
+    first_close = service.close_intake(event_id)
+    reopened = service.reopen_intake(event_id)
+    second_close = service.close_intake(event_id)
+
+    assert first_close.intake_state == "closed"
+    assert reopened.intake_state == "open"
+    assert reopened.intake_generation == 2
+    assert second_close.intake_state == "closed"
+    assert second_close.intake_generation == 2
+    assert state["intake_keys"][0] != state["intake_keys"][2]
+    service.close()
+    store.close()
 
 
 def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_path: Path) -> None:

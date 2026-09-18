@@ -1,11 +1,13 @@
 from django.urls import path
 
-from . import share_views, views
+from . import legal_views, share_views, views
 
 app_name = "events"
 
 urlpatterns = [
     path("", views.portfolio, name="portfolio"),
+    path("legal/privacy/", legal_views.privacy_notice, name="privacy-notice"),
+    path("legal/terms/", legal_views.terms, name="terms"),
     path("login/", views.photographer_login, name="login"),
     path("logout/", views.photographer_logout, name="logout"),
     path("dashboard/", views.dashboard, name="dashboard"),

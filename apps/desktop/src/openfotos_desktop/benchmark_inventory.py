@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from uuid import uuid4
 
+from openfotos_contracts import EVENT_ORIGINAL_BYTES_LIMIT
+
 from .ingestion import CheckpointStore, EventCache, InventoryScanner, ScanLimits, SubEventCache
 
 
@@ -16,7 +18,7 @@ def run_benchmark(source: Path, database: Path) -> dict[str, object]:
     event = EventCache(
         id=uuid4(),
         name="Redacted benchmark event",
-        storage_limit_bytes=25_000_000_000,
+        storage_limit_bytes=EVENT_ORIGINAL_BYTES_LIMIT,
         processing_profile_id="pilot-profile-v1",
         sub_events=(sub_event,),
     )

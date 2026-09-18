@@ -483,6 +483,28 @@ button:disabled {
   font-weight: 700;
 }
 
+.legal-footer {
+  display: flex;
+  width: min(100% - 2rem, 80rem);
+  margin: 0 auto 2rem;
+  gap: 1rem;
+  color: #526670;
+  font-size: 0.9rem;
+}
+
+.legal-copy {
+  max-width: 52rem;
+  margin-inline: auto;
+}
+
+.legal-copy h2 {
+  margin-top: 2rem;
+}
+
+.legal-copy li + li {
+  margin-top: 0.75rem;
+}
+
 @media (max-width: 40rem) {
   .page-heading,
   .event-row {

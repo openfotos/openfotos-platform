@@ -2,6 +2,7 @@ from pathlib import Path
 from unittest.mock import Mock
 from uuid import UUID
 
+from PIL import Image
 from PySide6.QtGui import QCloseEvent, QPalette
 from PySide6.QtWidgets import QApplication, QToolButton
 
@@ -10,11 +11,13 @@ from openfotos_desktop.face_models import FaceModelStore
 from openfotos_desktop.ingestion import (
     CheckpointStore,
     EventCache,
+    InventoryScanner,
     PreviewPolicyCache,
     SubEventCache,
 )
 from openfotos_desktop.ports import Session3Gateway
 from openfotos_desktop.ui import (
+    ApprovedPage,
     LoginPage,
     MainWindow,
     PreviewPolicyPage,
@@ -41,7 +44,7 @@ _DISABLED_POLICY = PreviewPolicyCache(
 DEMO_EVENT = EventCache(
     id=UUID("00000000-0000-4000-8000-000000000003"),
     name="Session 3 synthetic reception",
-    storage_limit_bytes=25_000_000_000,
+    storage_limit_bytes=50_000_000_000,
     processing_profile_id="pilot-profile-v1",
     sub_events=(_SUB_EVENT,),
     preview_policy=_DISABLED_POLICY,
@@ -92,6 +95,57 @@ def test_demo_event_opens_functional_local_inventory(tmp_path: Path) -> None:
     window.close()
 
 
+def test_selected_section_can_return_to_section_picker_before_scanning(tmp_path: Path) -> None:
+    app = application()
+    window = MainWindow(
+        store=CheckpointStore(tmp_path / "section-navigation.sqlite3"),
+        gateway=Session3Gateway(),
+        demo_event=DEMO_EVENT,
+    )
+
+    window.events.open_button.click()
+    window.sub_events.open_button.click()
+    app.processEvents()
+    assert isinstance(window.stack.currentWidget(), SelectionPage)
+
+    window.selection.back.click()
+    app.processEvents()
+
+    assert isinstance(window.stack.currentWidget(), SubEventSelectorPage)
+    assert window.current_sub_event is None
+    assert window.current_batch_id is None
+    assert window.header.context.text() == DEMO_EVENT.name
+    window.close()
+
+
+def test_section_reopens_unfinished_processing_before_newer_empty_draft(tmp_path: Path) -> None:
+    app = application()
+    store = CheckpointStore(tmp_path / "resume-processing.sqlite3")
+    store.cache_event(DEMO_EVENT)
+    photo = tmp_path / "source.jpg"
+    Image.new("RGB", (8, 6), color="navy").save(photo, format="JPEG")
+    resumable_id = store.create_batch(DEMO_EVENT.id, _SUB_EVENT.id)
+    store.add_files(resumable_id, [photo])
+    InventoryScanner(store).scan(resumable_id)
+    store.approve_batch(resumable_id, supported_profile_id="pilot-profile-v1")
+    store.mark_batch_reserved(resumable_id)
+    store.mark_upload_verified(store.list_items(resumable_id)[0].id)
+    newer_empty_id = store.create_batch(DEMO_EVENT.id, _SUB_EVENT.id)
+    window = MainWindow(store=store, gateway=Session3Gateway(), demo_event=DEMO_EVENT)
+
+    window.events.open_button.click()
+    window.sub_events.open_button.click()
+    app.processEvents()
+
+    assert window.current_batch_id == resumable_id
+    assert window.current_batch_id != newer_empty_id
+    assert isinstance(window.stack.currentWidget(), ApprovedPage)
+    assert window.approved.original_progress.value() == 1
+    assert window.approved.original_progress.maximum() == 1
+    assert window.approved.upload.text() == "Resume gallery processing"
+    window.close()
+
+
 def test_desktop_shell_packages_corporate_brand_and_source_actions(tmp_path: Path) -> None:
     app = application()
     window = MainWindow(
@@ -132,8 +186,28 @@ def test_face_model_settings_show_an_explicit_not_ready_state(tmp_path: Path) ->
     assert window.model_settings is not None
     assert window.model_settings.isVisible()
     assert "Not ready" in window.model_settings.status.text()
+    assert window.model_settings.minimumHeight() >= 300
+    assert not window.model_settings.progress.isTextVisible()
+    assert window.model_settings.download.isVisible()
     window.model_settings.accept()
     window.close()
+
+
+def test_approved_page_scrolls_to_controls_without_clipped_progress_text() -> None:
+    app = application()
+    page = ApprovedPage()
+    page.resize(900, 500)
+    page.show()
+    app.processEvents()
+
+    assert page.scroll.verticalScrollBar().maximum() > 0
+    assert not page.upload_progress.isTextVisible()
+    assert not page.derivative_progress.isTextVisible()
+    assert not page.face_progress.isTextVisible()
+    page.scroll.ensureWidgetVisible(page.finalize)
+    app.processEvents()
+    assert page.finalize.isVisible()
+    page.close()
 
 
 def test_window_close_waits_for_active_face_model_setup(tmp_path: Path) -> None:
@@ -162,7 +236,7 @@ def test_photographer_can_finalize_after_closing_intake(tmp_path: Path) -> None:
     event = EventCache(
         id=UUID("00000000-0000-4000-8000-000000000004"),
         name="Reception",
-        storage_limit_bytes=25_000_000_000,
+        storage_limit_bytes=50_000_000_000,
         processing_profile_id="pilot-profile-v1",
         intake_state="closed",
         sub_events=(_SUB_EVENT,),
@@ -187,7 +261,7 @@ def test_unconfigured_event_gets_optional_watermark_setup_with_clean_default(
     event = EventCache(
         id=UUID("00000000-0000-4000-8000-000000000005"),
         name="Reception",
-        storage_limit_bytes=25_000_000_000,
+        storage_limit_bytes=50_000_000_000,
         processing_profile_id="pilot-profile-v1",
         sub_events=(_SUB_EVENT,),
     )

@@ -26,7 +26,7 @@ def test_diagnostic_export_omits_paths_filenames_and_checksums(tmp_path: Path) -
             EventCache(
                 id=event_id,
                 name="Private event name",
-                storage_limit_bytes=25_000_000_000,
+                storage_limit_bytes=50_000_000_000,
                 processing_profile_id="pilot-profile-v1",
                 sub_events=(sub_event,),
             )

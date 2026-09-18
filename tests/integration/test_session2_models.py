@@ -9,7 +9,12 @@ from django.db import IntegrityError, transaction
 from django.test import RequestFactory, override_settings
 from django.utils import timezone
 
-from openfotos_contracts import EventState, IngestionManifestState, IntakeState
+from openfotos_contracts import (
+    EVENT_ORIGINAL_BYTES_LIMIT,
+    EventState,
+    IngestionManifestState,
+    IntakeState,
+)
 from openfotos_server.events.admin import EventAdmin, EventAdminForm
 from openfotos_server.events.models import (
     AuditAction,
@@ -153,7 +158,6 @@ def test_admin_provisions_a_draft_event_without_public_credentials(monkeypatch) 
         data={
             "photographer": photographer.id,
             "name": "Pilot Reception",
-            "storage_limit_bytes": 25_000_000_000,
             "max_contribution_devices": 10,
             "processing_profile_id": "pilot-profile-v1",
             "expires_at": (timezone.now() + timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S"),
@@ -175,6 +179,7 @@ def test_admin_provisions_a_draft_event_without_public_credentials(monkeypatch) 
 
     event.refresh_from_db()
     assert event.state == EventState.DRAFT
+    assert event.storage_limit_bytes == EVENT_ORIGINAL_BYTES_LIMIT
     assert messages == []
     assert not hasattr(event, "owner_capability")
     assert event.audit_events.filter(action=AuditAction.EVENT_CREATED).exists()

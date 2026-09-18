@@ -346,7 +346,8 @@ browse/search/download but cannot render or invoke owner controls.
 
 ## Session 9: production hardening and launch rehearsal
 
-**Status:** not started.
+**Status:** in progress; code hardening and deployment/release automation are implemented, while the
+provider rehearsal, restore, load evidence, native package smoke tests, and production cutover remain.
 
 **Goal:** Turn the feature-complete pilot into an operable release.
 

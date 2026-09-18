@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSpinBox,
     QStackedWidget,
@@ -283,7 +284,8 @@ class FaceModelSettingsDialog(QDialog):
         self._worker: FaceModelSetupWorker | None = None
         self.setWindowTitle("Face model settings")
         self.setModal(True)
-        self.setMinimumWidth(560)
+        self.setMinimumSize(620, 300)
+        self.resize(680, 340)
 
         layout = QVBoxLayout(self)
         heading = QLabel("Accepted face models")
@@ -306,6 +308,7 @@ class FaceModelSettingsDialog(QDialog):
         self.progress = QProgressBar()
         self.progress.setRange(0, 2)
         self.progress.setValue(0)
+        self.progress.setTextVisible(False)
         layout.addWidget(self.progress)
 
         buttons = QHBoxLayout()
@@ -915,6 +918,7 @@ class SelectionPage(QWidget):
     new_batch_requested = Signal()
     intake_requested = Signal()
     finalize_requested = Signal()
+    back_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -1022,6 +1026,7 @@ class SelectionPage(QWidget):
         progress_header.addWidget(self.pause)
         progress_layout.addLayout(progress_header)
         self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
         progress_layout.addWidget(self.progress)
         self.progress_text = QLabel()
         self.progress_text.setObjectName("BodyMuted")
@@ -1031,6 +1036,12 @@ class SelectionPage(QWidget):
         layout.addWidget(self.progress_panel)
 
         buttons = QHBoxLayout()
+        self.back = _style_button(
+            QPushButton("Back to sections"),
+            icon="arrow-left.svg",
+            kind="ghost",
+        )
+        self.back.clicked.connect(self.back_requested)
         self.remove_selection = _style_button(
             QPushButton("Remove selected"),
             icon="trash.svg",
@@ -1047,6 +1058,7 @@ class SelectionPage(QWidget):
             icon="plus.svg",
         )
         self.new_batch.clicked.connect(self.new_batch_requested)
+        buttons.addWidget(self.back)
         buttons.addWidget(self.remove_selection)
         buttons.addStretch()
         buttons.addWidget(self.new_batch)
@@ -1092,6 +1104,7 @@ class SelectionPage(QWidget):
         self.remove_selection.setEnabled(not batch.frozen and intake_open)
         self.scan.setEnabled(intake_open)
         self.new_batch.setEnabled(intake_open)
+        self.back.setEnabled(True)
         self.progress_panel.hide()
         self.progress_text.clear()
 
@@ -1104,6 +1117,7 @@ class SelectionPage(QWidget):
             self.remove_selection,
             self.scan,
             self.new_batch,
+            self.back,
             self.intake,
             self.finalize,
         ):
@@ -1123,6 +1137,7 @@ class SelectionPage(QWidget):
         self.remove_selection.setEnabled(not self._batch_frozen and self._intake_open)
         self.scan.setEnabled(self._intake_open)
         self.new_batch.setEnabled(self._intake_open)
+        self.back.setEnabled(True)
         self.intake.setEnabled(True)
         self.finalize.setEnabled(not self._intake_open)
 
@@ -1259,10 +1274,18 @@ class ApprovedPage(QWidget):
     cleanup_requested = Signal()
     intake_requested = Signal()
     finalize_requested = Signal()
+    back_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
-        layout = QVBoxLayout(self)
+        page_layout = QVBoxLayout(self)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        content = QWidget()
+        layout = QVBoxLayout(content)
         layout.setContentsMargins(52, 34, 52, 38)
         layout.setSpacing(22)
         layout.addWidget(
@@ -1341,6 +1364,7 @@ class ApprovedPage(QWidget):
         self.upload_progress = QProgressBar()
         self.upload_progress.setRange(0, 1)
         self.upload_progress.setValue(0)
+        self.upload_progress.setTextVisible(False)
         self.original_progress = self.upload_progress
         transfer_layout.addWidget(QLabel("Originals"))
         transfer_layout.addWidget(self.upload_progress)
@@ -1348,11 +1372,13 @@ class ApprovedPage(QWidget):
         self.derivative_progress = QProgressBar()
         self.derivative_progress.setRange(0, 1)
         self.derivative_progress.setValue(0)
+        self.derivative_progress.setTextVisible(False)
         transfer_layout.addWidget(self.derivative_progress)
         transfer_layout.addWidget(QLabel("Face index"))
         self.face_progress = QProgressBar()
         self.face_progress.setRange(0, 1)
         self.face_progress.setValue(0)
+        self.face_progress.setTextVisible(False)
         transfer_layout.addWidget(self.face_progress)
         transfer_buttons = QHBoxLayout()
         self.upload = _style_button(QPushButton("Process and upload contribution"), kind="primary")
@@ -1383,6 +1409,12 @@ class ApprovedPage(QWidget):
         layout.addWidget(self.event_controls)
 
         buttons = QHBoxLayout()
+        self.back = _style_button(
+            QPushButton("Back to sections"),
+            icon="arrow-left.svg",
+            kind="ghost",
+        )
+        self.back.clicked.connect(self.back_requested)
         self.new_batch = _style_button(
             QPushButton("Create another contribution"),
             kind="primary",
@@ -1402,6 +1434,7 @@ class ApprovedPage(QWidget):
             kind="danger",
         )
         self.cleanup.clicked.connect(self.cleanup_requested)
+        buttons.addWidget(self.back)
         buttons.addWidget(self.export)
         buttons.addWidget(self.cleanup)
         buttons.addStretch()
@@ -1409,6 +1442,8 @@ class ApprovedPage(QWidget):
         buttons.addWidget(self.new_batch)
         layout.addLayout(buttons)
         layout.addStretch()
+        self.scroll.setWidget(content)
+        page_layout.addWidget(self.scroll)
 
     def show_batch(
         self,
@@ -1416,6 +1451,8 @@ class ApprovedPage(QWidget):
         *,
         state: BatchState,
         event: EventCache,
+        original_completed_count: int = 0,
+        original_total_count: int = 0,
         excluded_count: int = 0,
         derivative_failure_count: int = 0,
         derivatives_complete: bool = False,
@@ -1428,6 +1465,8 @@ class ApprovedPage(QWidget):
     ) -> None:
         originals_complete = state is BatchState.COMPLETE
         complete = originals_complete and derivatives_complete and face_analysis_complete
+        self.upload_progress.setRange(0, max(original_total_count, 1))
+        self.upload_progress.setValue(original_completed_count)
         self.derivative_progress.setRange(0, max(derivative_total_count, 1))
         self.derivative_progress.setValue(derivative_completed_count)
         self.face_progress.setRange(0, max(face_total_count, 1))
@@ -1482,9 +1521,18 @@ class ApprovedPage(QWidget):
             )
             self.cloud_stage_detail.setText("Resume-safe transfer pending")
         can_sync = event.intake_state == "open" or originals_complete
+        if originals_complete and derivatives_complete:
+            self.upload.setText("Resume face indexing")
+        elif originals_complete:
+            self.upload.setText("Resume gallery processing")
+        elif state in {BatchState.RESERVED, BatchState.UPLOADING}:
+            self.upload.setText("Resume upload and processing")
+        else:
+            self.upload.setText("Process and upload contribution")
         self.upload.setEnabled(not complete and can_sync)
         self.pause.setEnabled(False)
         self.transfer_limit.setEnabled(True)
+        self.back.setEnabled(True)
         self.verify.setEnabled(state is BatchState.APPROVED)
         self.new_batch.setEnabled(event.intake_state == "open")
         self.intake.setText("Reopen intake" if event.intake_state == "closed" else "Close intake")
@@ -1495,6 +1543,7 @@ class ApprovedPage(QWidget):
         self.upload.setEnabled(False)
         self.pause.setEnabled(True)
         self.transfer_limit.setEnabled(False)
+        self.back.setEnabled(False)
         self.cloud_stage_detail.setText("Uploading originals")
 
     @Slot(int, int)
@@ -1521,6 +1570,7 @@ class ApprovedPage(QWidget):
         self.pause.setEnabled(False)
         self.upload.setEnabled(True)
         self.transfer_limit.setEnabled(True)
+        self.back.setEnabled(True)
         if paused:
             self.cloud_stage_detail.setText("Paused; verified files will not restart")
 
@@ -1612,6 +1662,7 @@ class MainWindow(QMainWindow):
         self.selection.scan_requested.connect(self._start_scan)
         self.selection.pause_requested.connect(self._pause_scan)
         self.selection.new_batch_requested.connect(self._new_batch)
+        self.selection.back_requested.connect(self._back_to_sub_events)
         self.selection.intake_requested.connect(self._toggle_intake)
         self.selection.finalize_requested.connect(self._finalize_ingestion)
         self.validation.approve_requested.connect(self._approve_batch)
@@ -1625,6 +1676,7 @@ class MainWindow(QMainWindow):
         self.approved.pause_requested.connect(self._pause_upload)
         self.approved.intake_requested.connect(self._toggle_intake)
         self.approved.finalize_requested.connect(self._finalize_ingestion)
+        self.approved.back_requested.connect(self._back_to_sub_events)
 
     @Slot()
     def _show_face_model_settings(self) -> None:
@@ -1693,6 +1745,15 @@ class MainWindow(QMainWindow):
         self.sub_events.show_event(self.current_event)
         self.stack.setCurrentWidget(self.sub_events)
 
+    @Slot()
+    def _back_to_sub_events(self) -> None:
+        if self.current_event is None:
+            return
+        self.current_sub_event = None
+        self.current_batch_id = None
+        self.header.set_context(self.current_event.name)
+        self._show_sub_events()
+
     @Slot(object)
     def _open_sub_event(self, sub_event: SubEventCache) -> None:
         if self.current_event is None or sub_event not in self.current_event.sub_events:
@@ -1710,10 +1771,15 @@ class MainWindow(QMainWindow):
             for batch in self.store.list_batches(event.id)
             if batch.sub_event_id == self.current_sub_event.id
         ]
+        resumable = [batch for batch in batches if self._batch_needs_attention(batch)]
         self.current_batch_id = (
-            batches[-1].id
-            if batches
-            else self.store.create_batch(event.id, self.current_sub_event.id)
+            resumable[0].id
+            if resumable
+            else (
+                batches[-1].id
+                if batches
+                else self.store.create_batch(event.id, self.current_sub_event.id)
+            )
         )
         batch = self.store.get_batch(self.current_batch_id)
         if batch.state in {
@@ -1727,6 +1793,25 @@ class MainWindow(QMainWindow):
             self._show_validation(self.store.summary(batch.id))
         else:
             self._show_selection()
+
+    def _batch_needs_attention(self, batch) -> bool:
+        if batch.state in {
+            BatchState.SCANNING,
+            BatchState.PAUSED,
+            BatchState.NEEDS_REVIEW,
+            BatchState.APPROVED,
+            BatchState.RESERVED,
+            BatchState.UPLOADING,
+        }:
+            return True
+        if batch.state is BatchState.DRAFT:
+            return bool(self.store.list_selections(batch.id))
+        if batch.state is BatchState.COMPLETE:
+            return not (
+                self.store.derivatives_complete(batch.id)
+                and self.store.face_analysis_complete(batch.id)
+            )
+        return False
 
     @Slot(object)
     def _confirm_preview_policy(self, draft: dict) -> None:
@@ -1918,6 +2003,11 @@ class MainWindow(QMainWindow):
             batch.id,
             state=batch.state,
             event=self.current_event,
+            original_completed_count=sum(
+                checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                for checkpoint in upload_checkpoints
+            ),
+            original_total_count=len(upload_checkpoints),
             excluded_count=len(excluded_items),
             derivative_failure_count=len(failed_derivative_items),
             derivatives_complete=self.store.derivatives_complete(batch.id),

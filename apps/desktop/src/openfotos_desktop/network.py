@@ -106,11 +106,14 @@ class DesktopNetworkService:
         return self._event_action(event_id, "intake/reopen")
 
     def finalize(self, event_id: UUID) -> dict:
+        event = self.store.get_event(event_id)
         return self._request(
             "POST",
             f"/api/v1/events/{event_id}/finalize/",
             json={},
-            idempotency_key=_operation_key(event_id, "finalize"),
+            idempotency_key=_operation_key(
+                event_id, f"finalize:generation:{event.intake_generation}"
+            ),
         )
 
     def confirm_preview_policy(
@@ -155,11 +158,14 @@ class DesktopNetworkService:
         )
 
     def _event_action(self, event_id: UUID, action: str) -> EventCache:
+        event = self.store.get_event(event_id)
         response = self._request(
             "POST",
             f"/api/v1/events/{event_id}/{action}/",
             json={},
-            idempotency_key=_operation_key(event_id, action),
+            idempotency_key=_operation_key(
+                event_id, f"{action}:generation:{event.intake_generation}"
+            ),
         )
         return self._cache_events(self._api.server_url, [response])[0]
 

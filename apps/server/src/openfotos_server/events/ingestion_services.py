@@ -11,6 +11,7 @@ from django.db.models import Count, Q, Sum
 from django.utils import timezone
 
 from openfotos_contracts import (
+    EVENT_ORIGINAL_ASSET_LIMIT,
     AssetVariant,
     ContributionInput,
     ContributionState,
@@ -174,6 +175,12 @@ def reserve_contribution(
             "event_storage_limit",
             "The complete contribution exceeds the remaining event allowance.",
         )
+    asset_count = len(contribution.assets)
+    if locked_event.reserved_original_count + asset_count > EVENT_ORIGINAL_ASSET_LIMIT:
+        raise IngestionError(
+            "event_asset_limit",
+            "The complete contribution exceeds the 10,000-photo event limit.",
+        )
     if Asset.objects.filter(pk__in=(asset.id for asset in contribution.assets)).exists():
         raise IngestionError("idempotency_conflict", "One or more asset IDs are already in use.")
 
@@ -184,7 +191,7 @@ def reserve_contribution(
         intake_generation=locked_event.intake_generation,
         label=contribution.label,
         processing_profile_id=contribution.processing_profile_id,
-        declared_asset_count=len(contribution.assets),
+        declared_asset_count=asset_count,
         declared_original_bytes=contribution.original_bytes,
         manifest_sha256=manifest_sha256,
     )
@@ -222,8 +229,16 @@ def reserve_contribution(
         ]
     )
     locked_event.reserved_original_bytes += contribution.original_bytes
+    locked_event.reserved_original_count += asset_count
     locked_event.state = contribution_state.value
-    locked_event.save(update_fields=("reserved_original_bytes", "state", "updated_at"))
+    locked_event.save(
+        update_fields=(
+            "reserved_original_bytes",
+            "reserved_original_count",
+            "state",
+            "updated_at",
+        )
+    )
     record_audit(
         photographer=locked_event.photographer,
         event=locked_event,
@@ -378,7 +393,14 @@ def verify_uploaded_object(
                 update_fields=("state", "etag", "verified_at", "failure_code", "updated_at")
             )
             locked_event.verified_original_bytes += locked.expected_bytes
-            locked_event.save(update_fields=("verified_original_bytes", "updated_at"))
+            locked_event.verified_original_count += 1
+            locked_event.save(
+                update_fields=(
+                    "verified_original_bytes",
+                    "verified_original_count",
+                    "updated_at",
+                )
+            )
             _complete_batch_if_terminal(locked_batch, now=now)
     if mismatch:
         raise IngestionError(
@@ -496,6 +518,9 @@ def cancel_batch(
             for upload in uploads
             if upload.state != UploadObjectState.EXCLUDED.value
         )
+        releasable_count = sum(
+            upload.state != UploadObjectState.EXCLUDED.value for upload in uploads
+        )
         AssetObject.objects.filter(asset__batch=locked).exclude(
             state=UploadObjectState.EXCLUDED.value
         ).update(
@@ -509,7 +534,14 @@ def cancel_batch(
         locked.cancelled_at = now
         locked.save(update_fields=("state", "cancelled_at", "updated_at"))
         locked_event.reserved_original_bytes -= releasable
-        locked_event.save(update_fields=("reserved_original_bytes", "updated_at"))
+        locked_event.reserved_original_count -= releasable_count
+        locked_event.save(
+            update_fields=(
+                "reserved_original_bytes",
+                "reserved_original_count",
+                "updated_at",
+            )
+        )
     record_audit(
         photographer=event.photographer,
         event=event,
@@ -518,7 +550,11 @@ def cancel_batch(
         action=AuditAction.CONTRIBUTION_CANCELLED,
         result=AuditResult.SUCCEEDED,
         request=request,
-        metadata={"batch_id": str(locked.id), "released_original_bytes": releasable},
+        metadata={
+            "batch_id": str(locked.id),
+            "released_original_bytes": releasable,
+            "released_original_count": releasable_count,
+        },
     )
     return locked
 
@@ -628,7 +664,14 @@ def exclude_asset(
             )
         )
         locked_event.reserved_original_bytes -= locked.expected_bytes
-        locked_event.save(update_fields=("reserved_original_bytes", "updated_at"))
+        locked_event.reserved_original_count -= 1
+        locked_event.save(
+            update_fields=(
+                "reserved_original_bytes",
+                "reserved_original_count",
+                "updated_at",
+            )
+        )
         _complete_batch_if_terminal(locked_batch, now=timezone.now())
     record_audit(
         photographer=event.photographer,
@@ -638,7 +681,7 @@ def exclude_asset(
         action=AuditAction.ASSET_EXCLUDED,
         result=AuditResult.SUCCEEDED,
         request=request,
-        metadata={"asset_id": str(asset_id), "reason": normalized_reason},
+        metadata={"asset_id": str(asset_id)},
     )
     return locked
 

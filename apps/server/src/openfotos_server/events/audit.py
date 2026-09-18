@@ -14,13 +14,17 @@ from .models import AuditAction, AuditEvent, AuditResult, Event, Photographer
 def privacy_hash(value: str, *, purpose: str) -> str:
     """Return a keyed digest so low-entropy identifiers are not recoverable from logs."""
     message = f"openfotos:{purpose}:{value}".encode()
-    return hmac.new(settings.SECRET_KEY.encode(), message, hashlib.sha256).hexdigest()
+    return hmac.new(settings.PRIVACY_HASH_KEY.encode(), message, hashlib.sha256).hexdigest()
 
 
 def request_client_hash(request: HttpRequest) -> str:
-    """Hash the direct peer address without trusting caller-controlled proxy headers."""
-    peer_address = request.META.get("REMOTE_ADDR", "unknown")
-    return privacy_hash(peer_address, purpose="client-address")
+    """Hash the address selected by the edge-validation middleware."""
+    client_address = getattr(
+        request,
+        "openfotos_client_address",
+        request.META.get("REMOTE_ADDR", "unknown"),
+    )
+    return privacy_hash(client_address, purpose="client-address")
 
 
 def request_id(request: HttpRequest | None) -> UUID:

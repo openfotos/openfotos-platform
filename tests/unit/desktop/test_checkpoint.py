@@ -37,7 +37,7 @@ def test_session4_checkpoint_migrates_event_metadata_to_sub_event_schema(tmp_pat
             EventCache(
                 id=event_id,
                 name="Reception",
-                storage_limit_bytes=25_000_000_000,
+                storage_limit_bytes=50_000_000_000,
                 processing_profile_id="pilot-profile-v1",
                 sub_events=(_SUB_EVENT,),
             )
@@ -71,7 +71,7 @@ def test_approved_batch_rejects_new_selections(tmp_path: Path) -> None:
             EventCache(
                 id=event_id,
                 name="Reception",
-                storage_limit_bytes=25_000_000_000,
+                storage_limit_bytes=50_000_000_000,
                 processing_profile_id="pilot-profile-v1",
                 sub_events=(_SUB_EVENT,),
             )
@@ -107,7 +107,7 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
             EventCache(
                 id=event_id,
                 name="Reception",
-                storage_limit_bytes=25_000_000_000,
+                storage_limit_bytes=50_000_000_000,
                 processing_profile_id="pilot-profile-v1",
                 sub_events=(_SUB_EVENT,),
                 preview_policy=policy,
@@ -162,7 +162,7 @@ def test_photographer_exclusion_is_a_terminal_local_upload_state(tmp_path: Path)
             EventCache(
                 id=event_id,
                 name="Reception",
-                storage_limit_bytes=25_000_000_000,
+                storage_limit_bytes=50_000_000_000,
                 processing_profile_id="pilot-profile-v1",
                 sub_events=(_SUB_EVENT,),
             )
@@ -190,7 +190,7 @@ def test_draft_selection_can_be_removed_without_touching_source(tmp_path: Path) 
             EventCache(
                 id=event_id,
                 name="Reception",
-                storage_limit_bytes=25_000_000_000,
+                storage_limit_bytes=50_000_000_000,
                 processing_profile_id="pilot-profile-v1",
                 sub_events=(_SUB_EVENT,),
             )
@@ -214,7 +214,7 @@ def test_deleting_local_event_removes_checkpoints_but_not_sources(tmp_path: Path
             EventCache(
                 id=event_id,
                 name="Reception",
-                storage_limit_bytes=25_000_000_000,
+                storage_limit_bytes=50_000_000_000,
                 processing_profile_id="pilot-profile-v1",
                 sub_events=(_SUB_EVENT,),
             )

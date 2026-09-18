@@ -33,7 +33,7 @@ def cache_event(store: CheckpointStore, event_id: UUID | None = None) -> UUID:
         EventCache(
             id=selected_id,
             name="Synthetic reception",
-            storage_limit_bytes=25_000_000_000,
+            storage_limit_bytes=50_000_000_000,
             processing_profile_id="pilot-profile-v1",
             sub_events=(SubEventCache(id=_SUB_EVENT_ID, name="Reception", position=1),),
         )

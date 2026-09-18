@@ -1,0 +1,25 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}Privacy notice · {{ photographer.display_name }}{% endblock %}
+
+{% block content %}
+<article class="card legal-copy">
+  <p class="eyebrow">Privacy notice</p>
+  <h1>How this private photo service uses information</h1>
+  <p><strong>{{ photographer.display_name }}</strong> decides why and how event photographs are used and is the customer-facing data fiduciary. <strong>OneNodeAI</strong> operates OpenFotos only as its technology processor under the studio’s written instructions.</p>
+
+  <h2>Information and purpose</h2>
+  <p>The service stores edited event photographs, private access records, and face vectors derived from faces already present in those photographs. This supports private gallery delivery and best-effort “find my photos” search; face similarity never grants access.</p>
+  <p>A reference photo is processed only for the requested search. Its upload, temporary face crop, and one-time search vector are discarded when processing finishes. Search result identifiers expire within one hour.</p>
+
+  <h2>Authority and children</h2>
+  <p>The studio confirms its authority for each event. A person uploading a reference photo must be the adult shown, have that adult’s permission, or have parent or guardian authority for a child shown.</p>
+
+  <h2>Storage, access, and retention</h2>
+  <p>Database and application processing occur in Singapore. Object storage uses Cloudflare R2 with an APAC placement hint, which is best effort and is not a country-residency guarantee. Private links, PINs, short sessions, tenant checks, and non-public object storage restrict access.</p>
+  <p>Normal event access lasts up to 365 days from first publication, followed by a 30-day deletion grace period. The studio retains its own edited source copy. A verified removal instruction unpublishes the entire affected event and targets cloud erasure within 24 hours; any replacement is a new event without the disputed photograph, so every old link and PIN remains invalid.</p>
+
+  <h2>Questions, correction, or withdrawal</h2>
+  <p>Contact {{ photographer.display_name }} first at <a href="mailto:{{ privacy_email }}">{{ privacy_email }}</a>{% if photographer.contact_phone %} or <a href="tel:{{ photographer.contact_phone }}">{{ photographer.contact_phone }}</a>{% endif %}. The studio verifies the request and instructs OneNodeAI where operator action is required.</p>
+</article>
+{% endblock %}

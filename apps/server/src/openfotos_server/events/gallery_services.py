@@ -263,7 +263,7 @@ def exclude_from_gallery(
         action=AuditAction.ASSET_GALLERY_EXCLUDED,
         result=AuditResult.SUCCEEDED,
         request=request,
-        metadata={"asset_id": str(asset.id), "reason": normalized_reason},
+        metadata={"asset_id": str(asset.id)},
     )
     refresh_derivative_readiness(event.id)
     refresh_face_index_readiness(event.id)

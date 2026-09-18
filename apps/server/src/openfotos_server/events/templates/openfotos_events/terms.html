@@ -1,0 +1,19 @@
+{% extends "openfotos_events/base.html" %}
+
+{% block title %}Service terms · {{ photographer.display_name }}{% endblock %}
+
+{% block content %}
+<article class="card legal-copy">
+  <p class="eyebrow">Supervised pilot terms</p>
+  <h1>Private gallery conditions</h1>
+  <ul>
+    <li>Use the gallery only if the event owner or {{ photographer.display_name }} gave you access.</li>
+    <li>Keep private links and PINs confidential. The studio can revoke them without notice.</li>
+    <li>Only upload a reference photo when you have the authority described in the privacy notice.</li>
+    <li>Face search is approximate: it can miss photographs or include unrelated photographs. Browse the full authorized gallery when needed.</li>
+    <li>Downloading does not transfer copyright or permission to republish a photograph.</li>
+    <li>This supervised pilot has no contractual availability guarantee. Contact the studio for access, correction, removal, or support.</li>
+  </ul>
+  <p>OpenFotos source code is available under the GNU Affero General Public License v3.0 only at <a href="{{ source_code_url }}" rel="noopener noreferrer">the public source repository</a>.</p>
+</article>
+{% endblock %}
