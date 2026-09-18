@@ -51,4 +51,7 @@ jobs:
         with:
           python-version-file: .python-version
       - run: uv sync --frozen --extra server --extra vision
-      - run: uv run pytest tests/integration/test_session7_face_index.py
+      - run: >-
+          uv run pytest
+          tests/integration/test_session7_face_index.py
+          tests/integration/test_session8_sharing.py

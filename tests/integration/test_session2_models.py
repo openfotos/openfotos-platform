@@ -20,18 +20,18 @@ from openfotos_server.events.models import (
     PreviewPolicy,
     SubEvent,
 )
-from openfotos_server.events.services import change_event_pin, transition_event
+from openfotos_server.events.services import transition_event
+from openfotos_server.events.sharing_services import issue_owner_capability
 
 pytestmark = pytest.mark.django_db
 
 
-def make_event(photographer: Photographer, *, pin: str = "0123", expires=True) -> Event:
+def make_event(photographer: Photographer, *, expires=True) -> Event:
     event = Event(
         photographer=photographer,
         name="Reception",
         expires_at=timezone.now() + timedelta(days=30) if expires else None,
     )
-    event.set_pin(pin)
     event.save()
     SubEvent.objects.create(event=event, name="Reception", position=1)
     return event
@@ -54,23 +54,28 @@ def attach_committed_manifest(event: Event) -> IngestionManifest:
     return manifest
 
 
-def test_event_pin_is_four_ascii_digits_peppered_and_uses_argon2() -> None:
+def test_owner_pin_is_four_ascii_digits_peppered_and_uses_argon2() -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     event = make_event(photographer)
+    event.state = EventState.PUBLISHED.value
+    event.save(update_fields=("state",))
+    actor = get_user_model().objects.create_user(username="issuer", password="safe-pass")
+    issued = issue_owner_capability(event=event, actor=actor)
+    owner = issued.capability
 
-    assert event.pin_hash != "0123"
-    assert "0123" not in event.pin_hash
-    assert identify_hasher(event.pin_hash).algorithm == "argon2"
-    assert event.check_pin("0123")
-    assert not event.check_pin("9999")
-    assert len(event.public_token) >= 43
+    assert owner.pin_hash != issued.pin
+    assert issued.pin not in owner.pin_hash
+    assert identify_hasher(owner.pin_hash).algorithm == "argon2"
+    assert owner.check_pin(issued.pin)
+    assert len(issued.secret) >= 43
+    assert issued.secret not in owner.secret_digest
 
-    with override_settings(EVENT_PIN_PEPPER="another-independent-pepper-value-1234"):
-        assert not event.check_pin("0123")
+    with override_settings(SHARE_PIN_PEPPER="another-independent-pepper-value-1234"):
+        assert not owner.check_pin(issued.pin)
 
     for invalid_pin in ("123", "12345", "１２３４", "ab12"):
         with pytest.raises(ValidationError, match="four ASCII digits"):
-            event.set_pin(invalid_pin)
+            owner.set_pin(invalid_pin)
 
 
 def test_reserved_and_non_dns_photographer_slugs_are_rejected() -> None:
@@ -123,7 +128,7 @@ def test_event_transitions_are_legal_idempotent_and_audited() -> None:
         transition_event(event_id=event.id, target=EventState.UPLOADING, actor=actor)
 
 
-def test_publication_requires_a_pin_and_future_expiry() -> None:
+def test_publication_requires_a_future_expiry() -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     actor = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     event = make_event(photographer, expires=False)
@@ -140,29 +145,8 @@ def test_publication_requires_a_pin_and_future_expiry() -> None:
     with pytest.raises(ValidationError, match="future event expiry"):
         transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
 
-    event.expires_at = timezone.now() + timedelta(days=1)
-    event.pin_hash = ""
-    event.save(update_fields=("expires_at", "pin_hash"))
-    with pytest.raises(ValidationError, match="event PIN"):
-        transition_event(event_id=event.id, target=EventState.PUBLISHED, actor=actor)
 
-
-def test_pin_change_rotates_access_version_without_recording_the_pin() -> None:
-    photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
-    actor = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
-    event = make_event(photographer)
-    previous_version = event.visitor_access_version
-
-    changed = change_event_pin(event_id=event.id, raw_pin="6543", actor=actor)
-
-    assert changed.visitor_access_version != previous_version
-    assert changed.check_pin("6543")
-    audit = changed.audit_events.get(action=AuditAction.EVENT_PIN_CHANGED)
-    assert audit.metadata == {}
-    assert "6543" not in str(audit.__dict__)
-
-
-def test_admin_provisions_a_draft_event_with_a_generated_write_only_pin(monkeypatch) -> None:
+def test_admin_provisions_a_draft_event_without_public_credentials(monkeypatch) -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     actor = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     form = EventAdminForm(
@@ -191,8 +175,6 @@ def test_admin_provisions_a_draft_event_with_a_generated_write_only_pin(monkeypa
 
     event.refresh_from_db()
     assert event.state == EventState.DRAFT
-    generated_pin = messages[0].split(": ", 1)[1].split(".", 1)[0]
-    assert len(generated_pin) == 4 and generated_pin.isascii() and generated_pin.isdigit()
-    assert event.check_pin(generated_pin)
-    assert generated_pin not in event.pin_hash
+    assert messages == []
+    assert not hasattr(event, "owner_capability")
     assert event.audit_events.filter(action=AuditAction.EVENT_CREATED).exists()

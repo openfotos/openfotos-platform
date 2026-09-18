@@ -38,6 +38,13 @@ class GalleryImage:
     height: int
 
 
+@dataclass(frozen=True)
+class OriginalDownload:
+    asset: Asset
+    url: str
+    sha256: str
+
+
 def available_gallery_assets(event: Event, *, sub_event: SubEvent | None = None) -> QuerySet[Asset]:
     original = AssetObject.objects.filter(
         asset_id=OuterRef("pk"),
@@ -113,6 +120,57 @@ def gallery_photo(
         previous_asset,
         next_asset,
     )
+
+
+def search_gallery_page(
+    *,
+    result_set,
+    page_number: object,
+    object_store: S3ObjectStore,
+) -> tuple[Page, list[GalleryImage]]:
+    available = available_gallery_assets(
+        result_set.event,
+        sub_event=result_set.sub_event,
+    ).filter(id__in=result_set.ordered_asset_ids)
+    by_id = {str(asset.id): asset for asset in available}
+    ordered = [by_id[asset_id] for asset_id in result_set.ordered_asset_ids if asset_id in by_id]
+    page = Paginator(ordered, GALLERY_PAGE_SIZE).get_page(page_number)
+    images = [
+        _signed_image(asset=asset, variant=AssetVariant.THUMBNAIL, object_store=object_store)
+        for asset in page.object_list
+    ]
+    return page, images
+
+
+def original_download(
+    *,
+    event: Event,
+    asset_id: UUID,
+    object_store: S3ObjectStore,
+    sub_event: SubEvent | None = None,
+) -> OriginalDownload:
+    try:
+        asset = available_gallery_assets(event, sub_event=sub_event).get(pk=asset_id)
+        original = AssetObject.objects.get(
+            asset=asset,
+            variant=AssetVariant.ORIGINAL.value,
+            state=UploadObjectState.VERIFIED.value,
+        )
+    except (Asset.DoesNotExist, AssetObject.DoesNotExist) as exc:
+        raise IngestionError("asset_not_found", "The gallery photo is unavailable.") from exc
+    try:
+        signed = object_store.presign_get(
+            key=original.object_key,
+            expires_in_seconds=settings.SIGNED_URL_TTL_SECONDS,
+            content_disposition=f'attachment; filename="photo-{asset.id}.jpg"',
+        )
+    except ObjectStoreError as exc:
+        raise IngestionError(
+            "object_store_unavailable",
+            "The original photo is temporarily unavailable.",
+            retryable=True,
+        ) from exc
+    return OriginalDownload(asset=asset, url=signed.url, sha256=asset.sha256)
 
 
 def exclude_from_gallery(

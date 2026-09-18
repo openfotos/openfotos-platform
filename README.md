@@ -28,7 +28,10 @@ The [accepted face-model contract](docs/adr/0010-accepted-yunet-sface-model-cont
 YuNet/SFace hashes, preprocessing, vector and quality invariants, fixed threshold, and evidence that
 unblocked Session 7. The
 [direct face-index decision](docs/adr/0011-direct-per-photo-face-index.md) records the strict
-desktop-to-server document, retry/reset behavior, publication gate, and exact SQL search scope.
+desktop-to-server document, retry/reset behavior, publication gate, and exact SQL search scope. The
+[Session 8 sharing decision](docs/adr/0012-owner-guest-capabilities-ephemeral-search-and-downloads.md)
+records owner/guest authority, fragment-secret/PIN delivery, expiry/revocation, ephemeral search,
+and visibility-derived exact-original downloads.
 
 ## Repository map
 
@@ -93,12 +96,14 @@ uv run python -m openfotos_desktop.benchmark_inventory /path/to/representative/f
   --output openfotos-inventory-benchmark.json
 ```
 
-For the Session 2 browser flow, open `http://localhost:8000/admin/` and provision records in this
-order: Django user, photographer, photographer membership, then event. Event PINs are generated
-four-digit ASCII values shown once and stored with Argon2 plus `EVENT_PIN_PEPPER`. Create at least
-one sub-event in the photographer dashboard before upload/publication. Use the event admin actions to move a sample through its legal lifecycle or to
-revoke visitor sessions. A photographer with slug `demo` signs in at
-`http://demo.localhost:8000/login/`; its visitor links use the same tenant host.
+For the browser flow, open `http://localhost:8000/admin/` and provision records in this order:
+Django user, photographer, photographer membership, then event. Create at least one sub-event in
+the photographer dashboard before upload/publication. Use the event admin actions to move a sample
+through its legal lifecycle. A photographer with slug `demo` signs in at
+`http://demo.localhost:8000/login/`; after publication the dashboard can issue the one owner link.
+Its fragment-secret URL and generated four-digit PIN are shown once. The owner uses that private
+management link to create whole-event or sub-event guest links; it should not be forwarded as the
+family guest link.
 
 For development checks:
 
@@ -107,23 +112,41 @@ uv sync --extra server --extra desktop --extra vision
 ./scripts/check.sh
 ```
 
-The default fast suite uses SQLite. Session 7's dedicated CI job runs its migrations and exact
-cosine-scope tests against `pgvector/pgvector:pg16`. To exercise the same boundary locally with the
-repository service:
+The default fast suite uses SQLite. The Session 7–8 CI job runs migrations, exact cosine-scope
+tests, and the public capability/search/download boundary against `pgvector/pgvector:pg16`. To
+exercise the same boundary locally with the repository service:
 
 ```bash
 docker compose -f infra/docker/compose.yaml up -d postgres
 DATABASE_URL=postgresql://openfotos:openfotos@127.0.0.1:5432/openfotos \
-  uv run pytest tests/integration/test_session7_face_index.py
+  uv run pytest tests/integration/test_session7_face_index.py \
+    tests/integration/test_session8_sharing.py
 ```
 
 Migration `0005_face_index` enables pgvector and intentionally aborts if any event is already
 published. Unpublish and index those events deliberately before applying it.
 
-Copy `.env.example` to `.env` for local values and set `EVENT_PIN_PEPPER` independently from
-`DJANGO_SECRET_KEY`. Never commit `.env`, model weights, customer
-photos, selfies, face embeddings, or production credentials. The application-source licence is
-still an explicit pre-publication decision; pretrained model weights retain separate terms.
+Copy `.env.example` to `.env` for local values and set `SHARE_PIN_PEPPER` independently from
+`DJANGO_SECRET_KEY`. Configure `FACE_DETECTOR_MODEL_PATH` and `FACE_RECOGNIZER_MODEL_PATH` to the
+accepted hash-verified YuNet/SFace files; weights stay outside the repository. Never commit `.env`,
+model weights, customer photos, reference images, face embeddings, or production credentials. The
+application-source licence is still an explicit pre-publication decision; pretrained model weights
+retain separate terms.
+
+Search-result rows contain only ordered asset IDs and expire after one hour. Run the idempotent
+cleanup command manually in development; Session 9 must schedule it at least every 15 minutes:
+
+```bash
+uv run python apps/server/manage.py purge_expired_face_searches
+```
+
+`reset_share_access --confirm RESET-ALL-SHARE-ACCESS` is an emergency-only operation to revoke all
+owner/guest links before replacing a suspected-compromised `SHARE_PIN_PEPPER`. Capability expiry
+does not delete event media; a controlled, audited retention purge is Session 9 work.
+
+Session 8 does not need production Railway or Supabase accounts. Local/CI PostgreSQL with pgvector
+and the storage abstraction are sufficient. Live regions, secrets, schedules, domains, backups,
+retention deletion, and deployment rehearsal begin in Session 9.
 
 The server needs an S3-compatible bucket plus object read/write credentials. For Cloudflare R2,
 set the account ID, bucket name, access key ID, and secret; the endpoint is derived automatically.

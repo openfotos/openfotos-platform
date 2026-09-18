@@ -14,8 +14,8 @@ The client replaced three earlier assumptions:
 - customer-visible collections and all pre-clustering are removed;
 - access PINs are exactly four auto-generated ASCII digits.
 
-The retrofit applies only to work implemented in Sessions 1–5. It does not implement future face
-indexing, owner/guest sharing, selfie search, or original-download endpoints.
+The retrofit applied only to work implemented in Sessions 1–5. Later Sessions 7–8 now implement
+face indexing, owner/guest sharing, reference-photo search, and original-download endpoints.
 
 ### Retrofit work
 
@@ -26,7 +26,7 @@ indexing, owner/guest sharing, selfie search, or original-download endpoints.
 - Permit whole-batch reassignment before publication and audit both child identifiers.
 - Replace lead/uploader invitation roles with one photographer account and up to ten tracked,
   revocable event installations.
-- Remove the original-download policy setting; future downloads derive from visibility.
+- Remove the original-download policy setting; Session 8 downloads derive from visibility.
 - Generate four-digit PINs, hash PIN+dedicated pepper with Argon2, and retain throttling/audit.
 - Revise shared contracts, SQLite/Django migrations, desktop/UI/API behavior, tests, README, plan,
   and ADRs.
@@ -44,7 +44,7 @@ indexing, owner/guest sharing, selfie search, or original-download endpoints.
 
 **Status (2026-09-16): accepted and reflected in the completed Session 6 contract.**
 
-Photographer interviews removed the outsider/coworker sharing journey. Future guest capabilities
+Photographer interviews removed the outsider/coworker sharing journey. Session 8 guest capabilities
 grant full gallery access within an event or sub-event scope. Face search is a best-effort,
 recall-first filter over that already-authorized set, never a source of photo authorization.
 ADR 0009 records the decision and supersedes the `selfie_only` parts of ADR 0008.
@@ -71,9 +71,9 @@ vision boundaries and does not commit private media or credentials.
 provisioning, private visitor access, Argon2 PIN checks, event cookies, database throttling, audit
 events, and cross-tenant denial tests.
 
-**Revision:** PINs are now system-generated four-digit ASCII values with `EVENT_PIN_PEPPER`.
-Publication also requires at least one active sub-event. The current event token/PIN flow is an
-interim private gallery access path until Session 8 introduces owner/guest capabilities.
+**Revision:** Publication also requires at least one active sub-event. Session 8 removes the
+interim event token/PIN flow and replaces it with owner/guest capabilities whose generated PINs use
+`SHARE_PIN_PEPPER`.
 
 **Done when:** Matching tenant+event+host access succeeds; all identifier substitution, expiry,
 revocation, invalid PIN, and throttling cases fail without leaking event/PIN details.
@@ -130,7 +130,7 @@ private signed gallery media, 48-item pagination, photo navigation, and publish/
 **Revision:** The photographer dashboard manages sub-events and whole-batch reassignment. `All
 Photos` aggregates active children; filtered list/photo navigation stays child-scoped. Archiving a
 child hides its assets and blocks processing/new uploads until restoration. The download-policy UI,
-model, service, and tests are removed; actual original downloads remain Session 8.
+model, service, and tests are removed; Session 8 now derives original downloads from visibility.
 
 **Done when:** Unauthorized, expired, cross-tenant, cross-child, and archived-child requests cannot
 obtain media; derivatives contain no source metadata; original hashes do not change; publication
@@ -222,7 +222,7 @@ different tenant or sub-event and prove that no analysis/vector row is written.
 
 ## Session 8: owner/guest sharing, ephemeral search, and downloads
 
-**Status:** ready; not started. Sessions 6–7 are accepted.
+**Status:** complete; accepted on 2026-09-18 in ADR 0012.
 
 **Goal:** Complete customer discovery and delivery with independently scoped full-gallery links.
 
@@ -242,6 +242,27 @@ results, and visibility-derived signed original downloads.
 - Every guest can browse/download all scoped visible photos; search returns only photos in that same
   scope and never changes download authorization.
 - Expired/revoked links and residual sessions fail; downloaded original hashes match uploads.
+
+**Delivered:** Migration `0006_session8_sharing` removes the interim event token/PIN, preserves the
+event-wide invalidation version, and adds one owner capability, immutable event/sub-event guest
+capabilities, and one-hour non-authorizing face-search result sets. Credentials use a 32-byte
+fragment secret, independently generated peppered Argon2 PIN, one-time no-store reveal, HttpOnly
+presentation/access cookies, 365-day caps, 12/24-hour sessions, cascade revocation, and a 100-active
+guest limit. Unpublishing pauses links and invalidates sessions without deleting credentials.
+
+Owner/guest pages provide scoped browse/search/download behavior and owner-only guest management;
+the photographer can inspect/revoke links and download originals. Reference search accepts
+JPEG/PNG/WebP/HEIC/HEIF up to 20 MiB/40 megapixels with explicit consent, requires exactly one usable
+YuNet/SFace face, applies the Session 7 event/child SQL boundary, stores only ordered asset IDs for
+one hour, and enforces 10 browser/link plus 100 capability attempts per 15 minutes. Clear,
+revocation, and `purge_expired_face_searches` remove result state. Downloads recheck visibility and
+sign only the exact verified original with attachment disposition.
+
+**Verification evidence:** `./scripts/check.sh` passes formatting, Ruff, 163 tests, and Django
+system checks; SQLite skips only the two PostgreSQL query-boundary cases and the opt-in live-S3
+contract. Migration drift reports no changes. A disposable PostgreSQL 18 cluster with the installed
+vector extension passes all 14 Session 7–8 pgvector tests, including the first failing acceptance
+test. No customer media, model weights, or provider credentials are used.
 
 **First failing acceptance test:** Use a valid sub-event capability to search with an embedding that
 would match a photo in another sub-event and prove the photo is absent and no signed URL is issued.
@@ -271,5 +292,6 @@ At the end of every session record:
 4. Known limitations and preserved invariants.
 5. The next session's first failing acceptance test.
 
-Session 8 may begin against ADRs 0009–0011. Do not begin a later session while an earlier authorization,
-privacy-cleanup, tenant, sub-event, checksum, or lifecycle test is failing.
+Session 9 may begin against ADR 0012 only after the Session 8 repository-wide check is green. Do not
+begin a later session while an earlier authorization, privacy-cleanup, tenant, sub-event, checksum,
+or lifecycle test is failing.

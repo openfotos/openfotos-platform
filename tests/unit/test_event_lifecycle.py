@@ -19,7 +19,6 @@ def _facts(**changes) -> TransitionFacts:
         "manifest_exists": True,
         "manifest_state": IngestionManifestState.COMMITTED,
         "manifest_generation": 2,
-        "pin_configured": True,
         "expiry_is_future": True,
         "derivatives_ready_generation": 2,
         "face_index_ready_generation": 2,

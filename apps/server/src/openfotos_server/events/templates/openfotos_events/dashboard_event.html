@@ -82,7 +82,7 @@
   <div>
     <h2>Publication</h2>
     {% if event.state == "published" %}
-      <p><a href="{% url 'events:event-access' token=event.public_token %}">Open the visitor link</a></p>
+      <p>The gallery is available to active owner and guest capabilities.</p>
     {% elif ready %}
       <p>Derivative, face-analysis, and authorization gates are complete. Publication remains deliberate.</p>
     {% else %}
@@ -98,6 +98,33 @@
     <form method="post" action="{% url 'events:publish-event' event_id=event.id %}">
       {% csrf_token %}<button type="submit" {% if not ready %}disabled{% endif %}>Publish gallery</button>
     </form>
+  {% endif %}
+</section>
+
+<section class="card compact-card">
+  <h2>Customer access</h2>
+  <p class="muted">Exact-original downloads can retain camera EXIF or GPS metadata. Review source files before sharing access.</p>
+  {% if owner_capability_active %}
+    <p>Owner access is active until {{ owner_capability.expires_at }}. Its link and PIN cannot be recovered.</p>
+    <form method="post" action="{% url 'events:revoke-owner-capability' event_id=event.id %}">
+      {% csrf_token %}<button type="submit" class="button-secondary">Revoke owner and all guests</button>
+    </form>
+    {% if guest_capabilities %}
+      <h3>Guest links</h3>
+      {% for guest in guest_capabilities %}
+        <div class="failure-row">
+          <span>{{ guest.label|default:"Guest link" }} · {% if guest.sub_event %}{{ guest.sub_event.name }}{% else %}All Photos{% endif %} · expires {{ guest.expires_at }}{% if guest.revoked_at %} · revoked{% endif %}</span>
+          {% if not guest.revoked_at %}<form method="post" action="{% url 'events:photographer-revoke-guest' event_id=event.id guest_id=guest.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Revoke</button></form>{% endif %}
+        </div>
+      {% endfor %}
+    {% endif %}
+  {% elif event.state == "published" %}
+    <p class="muted">Issue the one owner link after publication. Credentials are shown only once and expire after at most one year.</p>
+    <form method="post" action="{% url 'events:issue-owner-capability' event_id=event.id %}">
+      {% csrf_token %}<button type="submit">Issue owner access</button>
+    </form>
+  {% else %}
+    <p class="muted">Publish the gallery before issuing owner access.</p>
   {% endif %}
 </section>
 

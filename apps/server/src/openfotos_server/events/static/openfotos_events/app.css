@@ -99,6 +99,16 @@ button {
   cursor: pointer;
 }
 
+.button-link {
+  display: inline-block;
+  padding: 0.72rem 1.05rem;
+  border-radius: 0.5rem;
+  color: #ffffff;
+  background: #0d6772;
+  font-weight: 700;
+  text-decoration: none;
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
@@ -108,6 +118,59 @@ button:disabled {
   margin-top: 0;
   color: #0d6772;
   background: #e9f2f3;
+}
+
+.button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.button-row .button-secondary {
+  margin-top: 1.25rem;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.65rem;
+  font-weight: 500;
+}
+
+.checkbox-label input {
+  width: auto;
+  margin-top: 0.2rem;
+}
+
+.credential-values {
+  display: grid;
+  gap: 1rem;
+}
+
+.credential-values div {
+  padding: 1rem;
+  border-radius: 0.7rem;
+  background: #f4f7f8;
+}
+
+.credential-values dt {
+  color: #526670;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.credential-values dd {
+  margin: 0.35rem 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.search-card {
+  margin-bottom: 1.4rem;
+}
+
+.download-row {
+  text-align: center;
 }
 
 .form-error,

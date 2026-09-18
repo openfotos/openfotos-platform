@@ -23,7 +23,6 @@ class TransitionFacts:
     manifest_exists: bool
     manifest_state: IngestionManifestState | None
     manifest_generation: int | None
-    pin_configured: bool
     expiry_is_future: bool
     derivatives_ready_generation: int | None
     face_index_ready_generation: int | None
@@ -100,8 +99,6 @@ def state_for_manual_transition(
                 "sub_event_required",
                 "Create and retain at least one active sub-event before publication.",
             )
-        if not facts.pin_configured:
-            raise LifecycleViolation("pin_required", "Set an event PIN before publication.")
         if not facts.expiry_is_future:
             raise LifecycleViolation(
                 "future_expiry_required", "Set a future event expiry before publication."

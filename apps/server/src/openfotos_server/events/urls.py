@@ -1,6 +1,6 @@
 from django.urls import path
 
-from . import views
+from . import share_views, views
 
 app_name = "events"
 
@@ -59,6 +59,16 @@ urlpatterns = [
         name="photographer-sub-event-photo",
     ),
     path(
+        "dashboard/events/<uuid:event_id>/photos/<uuid:asset_id>/download/",
+        views.photographer_download,
+        name="photographer-download",
+    ),
+    path(
+        "dashboard/events/<uuid:event_id>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/download/",
+        views.photographer_download,
+        name="photographer-sub-event-download",
+    ),
+    path(
         "dashboard/events/<uuid:event_id>/photos/<uuid:asset_id>/exclude/",
         views.exclude_gallery_asset,
         name="exclude-gallery-asset",
@@ -73,20 +83,149 @@ urlpatterns = [
         views.reset_asset_face_analysis,
         name="reset-face-analysis",
     ),
-    path("e/<str:token>/", views.event_access, name="event-access"),
     path(
-        "e/<str:token>/sub-events/<uuid:sub_event_id>/",
-        views.event_access,
-        name="visitor-sub-event",
+        "dashboard/events/<uuid:event_id>/owner-capability/issue/",
+        views.issue_event_owner_capability,
+        name="issue-owner-capability",
     ),
     path(
-        "e/<str:token>/photos/<uuid:asset_id>/",
-        views.visitor_photo,
-        name="visitor-photo",
+        "dashboard/events/<uuid:event_id>/owner-capability/revoke/",
+        views.revoke_event_owner_capability,
+        name="revoke-owner-capability",
     ),
     path(
-        "e/<str:token>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/",
-        views.visitor_photo,
-        name="visitor-sub-event-photo",
+        "dashboard/events/<uuid:event_id>/guest-capabilities/<uuid:guest_id>/revoke/",
+        views.revoke_event_guest_capability,
+        name="photographer-revoke-guest",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/",
+        share_views.owner_gallery,
+        name="owner-gallery",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/present/",
+        share_views.owner_present,
+        name="owner-present",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/unlock/",
+        share_views.owner_unlock,
+        name="owner-unlock",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/",
+        share_views.owner_gallery,
+        name="owner-sub-event",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/photos/<uuid:asset_id>/",
+        share_views.owner_photo,
+        name="owner-photo",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/",
+        share_views.owner_photo,
+        name="owner-sub-event-photo",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/photos/<uuid:asset_id>/download/",
+        share_views.owner_download,
+        name="owner-download",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/download/",
+        share_views.owner_download,
+        name="owner-sub-event-download",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/guests/create/",
+        share_views.owner_create_guest,
+        name="owner-create-guest",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/guests/<uuid:guest_id>/revoke/",
+        share_views.owner_revoke_guest,
+        name="owner-revoke-guest",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/search/",
+        share_views.owner_search,
+        name="owner-search",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/search/",
+        share_views.owner_search,
+        name="owner-sub-event-search",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/search/<uuid:result_id>/",
+        share_views.owner_search_results,
+        name="owner-search-results",
+    ),
+    path(
+        "share/owner/<uuid:capability_id>/search/<uuid:result_id>/clear/",
+        share_views.owner_clear_search,
+        name="owner-clear-search",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/",
+        share_views.guest_gallery,
+        name="guest-gallery",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/present/",
+        share_views.guest_present,
+        name="guest-present",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/unlock/",
+        share_views.guest_unlock,
+        name="guest-unlock",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/",
+        share_views.guest_gallery,
+        name="guest-sub-event",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/photos/<uuid:asset_id>/",
+        share_views.guest_photo,
+        name="guest-photo",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/",
+        share_views.guest_photo,
+        name="guest-sub-event-photo",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/photos/<uuid:asset_id>/download/",
+        share_views.guest_download,
+        name="guest-download",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/photos/<uuid:asset_id>/download/",
+        share_views.guest_download,
+        name="guest-sub-event-download",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/search/",
+        share_views.guest_search,
+        name="guest-search",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/sub-events/<uuid:sub_event_id>/search/",
+        share_views.guest_search,
+        name="guest-sub-event-search",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/search/<uuid:result_id>/",
+        share_views.guest_search_results,
+        name="guest-search-results",
+    ),
+    path(
+        "share/guest/<uuid:capability_id>/search/<uuid:result_id>/clear/",
+        share_views.guest_clear_search,
+        name="guest-clear-search",
     ),
 ]

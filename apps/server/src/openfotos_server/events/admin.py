@@ -1,10 +1,8 @@
 """Manual pilot provisioning and audited lifecycle controls."""
 
 from django import forms
-from django.conf import settings
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
-from django.utils.html import format_html
 
 from openfotos_contracts import EventState, InstallationStatus
 
@@ -18,19 +16,16 @@ from .models import (
     ContributionBatch,
     Event,
     EventInstallation,
+    GuestCapability,
     IngestionManifest,
+    OwnerCapability,
     Photographer,
     PhotographerMembership,
     PreviewPolicy,
     SubEvent,
-    generate_event_pin,
 )
-from .services import (
-    change_event_pin,
-    revoke_event_sessions,
-    rotate_event_token,
-    transition_event,
-)
+from .services import transition_event
+from .sharing_services import ShareAccessError, revoke_owner_capability
 
 
 class EventAdminForm(forms.ModelForm):
@@ -123,12 +118,10 @@ class EventAdmin(admin.ModelAdmin):
     form = EventAdminForm
     list_display = ("name", "photographer", "state", "expires_at", "updated_at")
     list_filter = ("state", "photographer")
-    search_fields = ("name", "photographer__display_name", "public_token")
+    search_fields = ("name", "photographer__display_name")
     autocomplete_fields = ("photographer",)
     readonly_fields = (
         "id",
-        "public_token",
-        "event_url",
         "state",
         "reserved_original_bytes",
         "verified_original_bytes",
@@ -138,7 +131,7 @@ class EventAdmin(admin.ModelAdmin):
         "derivatives_ready_generation",
         "face_model_id",
         "face_index_ready_generation",
-        "visitor_access_version",
+        "share_access_version",
         "created_at",
         "updated_at",
     )
@@ -150,9 +143,7 @@ class EventAdmin(admin.ModelAdmin):
         "move_to_archived",
         "move_to_failed",
         "move_to_cancelled",
-        "revoke_visitor_sessions",
-        "rotate_public_token",
-        "rotate_event_pin",
+        "revoke_owner_access",
     )
 
     def get_readonly_fields(self, request, obj=None):
@@ -161,24 +152,11 @@ class EventAdmin(admin.ModelAdmin):
             fields.append("photographer")
         return fields
 
-    @admin.display(description="Event URL")
-    def event_url(self, obj):
-        if not obj or not obj.public_token:
-            return "Available after saving"
-        scheme = "http" if settings.DEBUG else "https"
-        url = (
-            f"{scheme}://{obj.photographer.slug}.{settings.PUBLIC_BASE_DOMAIN}"
-            f"/e/{obj.public_token}/"
-        )
-        return format_html('<a href="{}">{}</a>', url, url)
-
     def has_delete_permission(self, request, obj=None):
         return False
 
     def save_model(self, request, obj, form, change):
         if not change:
-            raw_pin = generate_event_pin()
-            obj.set_pin(raw_pin)
             super().save_model(request, obj, form, change)
             record_audit(
                 photographer=obj.photographer,
@@ -187,10 +165,6 @@ class EventAdmin(admin.ModelAdmin):
                 action=AuditAction.EVENT_CREATED,
                 result=AuditResult.SUCCEEDED,
                 request=request,
-            )
-            self.message_user(
-                request,
-                f"Generated PIN for {obj.name}: {raw_pin}. Copy it now; it is not stored.",
             )
             return
 
@@ -232,36 +206,17 @@ class EventAdmin(admin.ModelAdmin):
     def move_to_cancelled(self, request, queryset):
         self._transition(request, queryset, EventState.CANCELLED)
 
-    @admin.action(description="Revoke all current visitor sessions")
-    def revoke_visitor_sessions(self, request, queryset):
+    @admin.action(description="Revoke owner access and all guest links")
+    def revoke_owner_access(self, request, queryset):
         changed = 0
         for event in queryset:
-            revoke_event_sessions(event_id=event.id, actor=request.user, request=request)
-            changed += 1
-        self.message_user(request, f"Revoked visitor sessions for {changed} event(s).")
-
-    @admin.action(description="Rotate public token and break existing links")
-    def rotate_public_token(self, request, queryset):
-        changed = 0
-        for event in queryset:
-            rotate_event_token(event_id=event.id, actor=request.user, request=request)
-            changed += 1
-        self.message_user(request, f"Rotated the public token for {changed} event(s).")
-
-    @admin.action(description="Generate new four-digit PINs and revoke visitor sessions")
-    def rotate_event_pin(self, request, queryset):
-        for event in queryset:
-            raw_pin = generate_event_pin()
-            change_event_pin(
-                event_id=event.id,
-                raw_pin=raw_pin,
-                actor=request.user,
-                request=request,
-            )
-            self.message_user(
-                request,
-                f"Generated PIN for {event.name}: {raw_pin}. Copy it now; it is not stored.",
-            )
+            try:
+                revoke_owner_capability(event=event, actor=request.user, request=request)
+            except ShareAccessError:
+                continue
+            else:
+                changed += 1
+        self.message_user(request, f"Revoked owner access for {changed} event(s).")
 
     def _transition(self, request, queryset, target):
         changed = 0
@@ -336,6 +291,22 @@ class _IngestionRecordAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(OwnerCapability)
+class OwnerCapabilityAdmin(_IngestionRecordAdmin):
+    list_display = ("event", "expires_at", "revoked_at", "created_at")
+    list_filter = ("revoked_at", "event__photographer")
+    search_fields = ("id", "event__name")
+    exclude = ("secret_digest", "pin_hash", "access_version")
+
+
+@admin.register(GuestCapability)
+class GuestCapabilityAdmin(_IngestionRecordAdmin):
+    list_display = ("id", "owner", "sub_event", "label", "expires_at", "revoked_at")
+    list_filter = ("revoked_at", "owner__event__photographer")
+    search_fields = ("id", "label", "owner__event__name")
+    exclude = ("secret_digest", "pin_hash", "access_version")
 
 
 @admin.register(EventInstallation)

@@ -1,0 +1,1 @@
+"""OpenFotos management command package."""

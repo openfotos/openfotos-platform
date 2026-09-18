@@ -18,8 +18,11 @@ server = [
   "django>=5.2,<5.3",
   "pillow>=11,<13",
   "gunicorn>=23,<24",
+  "numpy>=1.26,<3",
+  "opencv-python-headless>=4.10,<6",
   "pgvector>=0.4,<1",
   "psycopg[binary]>=3.2,<4",
+  "pillow-heif>=1.1,<2",
   "whitenoise>=6.8,<7",
 ]
 desktop = [

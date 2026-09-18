@@ -36,12 +36,17 @@ MD5_VALIDATOR = RegexValidator(r"^[A-Za-z0-9+/]{22}==$", "Enter a base64-encoded
 
 
 def generate_event_token() -> str:
-    """Generate a durable, unguessable public event locator."""
+    """Retain the callable referenced by historical migration 0001."""
     return secrets.token_urlsafe(32)
 
 
 def generate_event_pin() -> str:
-    """Generate a zero-padded four-digit event PIN."""
+    """Retain the callable referenced by historical migration 0004."""
+    return f"{secrets.randbelow(10_000):04d}"
+
+
+def generate_share_pin() -> str:
+    """Generate a zero-padded four-digit capability PIN."""
     return f"{secrets.randbelow(10_000):04d}"
 
 
@@ -62,12 +67,18 @@ class AuditAction(models.TextChoices):
     EVENT_CREATED = "event.created", "Event created"
     EVENT_CHANGED = "event.changed", "Event changed"
     EVENT_STATE_CHANGED = "event.state_changed", "Event state changed"
-    EVENT_PIN_CHANGED = "event.pin_changed", "Event PIN changed"
-    EVENT_TOKEN_CHANGED = "event.token_changed", "Event token changed"
-    EVENT_ACCESS_REVOKED = "event.access_revoked", "Event access revoked"
     PHOTOGRAPHER_LOGIN = "photographer.login", "Photographer login"
     PHOTOGRAPHER_LOGOUT = "photographer.logout", "Photographer logout"
-    EVENT_PIN_UNLOCK = "event.pin_unlock", "Event PIN unlock"
+    OWNER_CAPABILITY_ISSUED = "owner_capability.issued", "Owner capability issued"
+    OWNER_CAPABILITY_REVOKED = "owner_capability.revoked", "Owner capability revoked"
+    OWNER_PIN_UNLOCK = "owner_capability.pin_unlock", "Owner PIN unlock"
+    GUEST_CAPABILITY_CREATED = "guest_capability.created", "Guest capability created"
+    GUEST_CAPABILITY_REVOKED = "guest_capability.revoked", "Guest capability revoked"
+    GUEST_PIN_UNLOCK = "guest_capability.pin_unlock", "Guest PIN unlock"
+    SHARE_ACCESS_RESET = "share_access.reset", "Share access reset"
+    FACE_SEARCH_COMPLETED = "face_search.completed", "Face search completed"
+    FACE_SEARCH_REJECTED = "face_search.rejected", "Face search rejected"
+    ORIGINAL_DOWNLOAD_ISSUED = "original_download.issued", "Original download issued"
     DESKTOP_LOGIN = "desktop.login", "Desktop login"
     DESKTOP_TOKEN_REFRESH = "desktop.token_refresh", "Desktop token refresh"
     SUB_EVENT_CREATED = "sub_event.created", "Sub-event created"
@@ -109,7 +120,10 @@ class AuditResult(models.TextChoices):
 
 class RateLimitPurpose(models.TextChoices):
     PHOTOGRAPHER_LOGIN = "photographer_login", "Photographer login"
-    EVENT_PIN = "event_pin", "Event PIN"
+    OWNER_PIN = "owner_pin", "Owner PIN"
+    GUEST_PIN = "guest_pin", "Guest PIN"
+    FACE_SEARCH_CLIENT = "face_search_client", "Face search by client"
+    FACE_SEARCH_CAPABILITY = "face_search_capability", "Face search by capability"
 
 
 class FaceAnalysisState(models.TextChoices):
@@ -199,14 +213,7 @@ class Event(models.Model):
         related_name="events",
     )
     name = models.CharField(max_length=200)
-    public_token = models.CharField(
-        max_length=48,
-        unique=True,
-        default=generate_event_token,
-        editable=False,
-    )
-    pin_hash = models.CharField(max_length=256, editable=False)
-    visitor_access_version = models.UUIDField(default=uuid4, editable=False)
+    share_access_version = models.UUIDField(default=uuid4, editable=False)
     state = models.CharField(
         max_length=16,
         choices=tuple((state.value, state.value.title()) for state in EventState),
@@ -272,18 +279,6 @@ class Event(models.Model):
     def __str__(self) -> str:
         return self.name
 
-    def set_pin(self, raw_pin: str) -> None:
-        if not PIN_PATTERN.fullmatch(raw_pin):
-            raise ValidationError({"pin": "Enter exactly four ASCII digits."})
-        self.pin_hash = make_password(self._peppered_pin(raw_pin), hasher="argon2")
-
-    def check_pin(self, raw_pin: str) -> bool:
-        return bool(self.pin_hash) and check_password(self._peppered_pin(raw_pin), self.pin_hash)
-
-    @staticmethod
-    def _peppered_pin(raw_pin: str) -> str:
-        return f"{settings.EVENT_PIN_PEPPER}:{raw_pin}"
-
     def is_publicly_available(self, *, at=None) -> bool:
         checked_at = at or timezone.now()
         return (
@@ -314,6 +309,118 @@ class SubEvent(models.Model):
 
     def __str__(self) -> str:
         return f"{self.event}: {self.name}"
+
+
+class ShareCapability(models.Model):
+    """Security state shared by owner and guest URL capabilities."""
+
+    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
+    secret_digest = models.CharField(max_length=64, unique=True, validators=[SHA256_VALIDATOR])
+    pin_hash = models.CharField(max_length=256, editable=False)
+    access_version = models.UUIDField(default=uuid4, editable=False)
+    expires_at = models.DateTimeField()
+    revoked_at = models.DateTimeField(blank=True, null=True, editable=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+
+    def set_pin(self, raw_pin: str) -> None:
+        if not PIN_PATTERN.fullmatch(raw_pin):
+            raise ValidationError({"pin": "Enter exactly four ASCII digits."})
+        self.pin_hash = make_password(self._peppered_pin(raw_pin), hasher="argon2")
+
+    def check_pin(self, raw_pin: str) -> bool:
+        return bool(self.pin_hash) and check_password(self._peppered_pin(raw_pin), self.pin_hash)
+
+    @staticmethod
+    def _peppered_pin(raw_pin: str) -> str:
+        return f"{settings.SHARE_PIN_PEPPER}:{raw_pin}"
+
+    def has_live_credentials(self, *, at=None) -> bool:
+        checked_at = at or timezone.now()
+        return self.revoked_at is None and self.expires_at > checked_at
+
+
+class OwnerCapability(ShareCapability):
+    event = models.OneToOneField(
+        Event,
+        on_delete=models.PROTECT,
+        related_name="owner_capability",
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.PROTECT,
+        related_name="issued_openfotos_owner_capabilities",
+    )
+
+    def __str__(self) -> str:
+        return f"Owner access for {self.event}"
+
+
+class GuestCapability(ShareCapability):
+    owner = models.ForeignKey(
+        OwnerCapability,
+        on_delete=models.PROTECT,
+        related_name="guest_capabilities",
+    )
+    sub_event = models.ForeignKey(
+        SubEvent,
+        blank=True,
+        null=True,
+        on_delete=models.PROTECT,
+        related_name="guest_capabilities",
+    )
+    label = models.CharField(max_length=80, blank=True)
+
+    class Meta:
+        ordering = ("-created_at", "id")
+
+    def __str__(self) -> str:
+        scope = self.sub_event.name if self.sub_event_id else "All Photos"
+        return f"Guest access to {scope}"
+
+
+class FaceSearchResultSet(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
+    owner_capability = models.ForeignKey(
+        OwnerCapability,
+        blank=True,
+        null=True,
+        on_delete=models.CASCADE,
+        related_name="face_search_results",
+    )
+    guest_capability = models.ForeignKey(
+        GuestCapability,
+        blank=True,
+        null=True,
+        on_delete=models.CASCADE,
+        related_name="face_search_results",
+    )
+    event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name="face_search_results")
+    sub_event = models.ForeignKey(
+        SubEvent,
+        blank=True,
+        null=True,
+        on_delete=models.CASCADE,
+        related_name="face_search_results",
+    )
+    ordered_asset_ids = models.JSONField(default=list)
+    expires_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    Q(owner_capability__isnull=False, guest_capability__isnull=True)
+                    | Q(owner_capability__isnull=True, guest_capability__isnull=False)
+                ),
+                name="face_search_has_one_capability",
+            )
+        ]
+        indexes = [models.Index(fields=("expires_at",), name="face_search_expiry_idx")]
 
 
 class EventInstallation(models.Model):

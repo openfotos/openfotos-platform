@@ -11,12 +11,75 @@
   <p class="muted">Private gallery</p>
 </div>
 
-<nav class="sub-event-filters" aria-label="Gallery sub-events">
-  <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:event-access' token=event.public_token %}">All</a>
-  {% for sub_event in sub_events %}
-    <a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:visitor-sub-event' token=event.public_token sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>
-  {% endfor %}
-</nav>
+{% if share_kind == "owner" or not capability.sub_event_id %}
+  <nav class="sub-event-filters" aria-label="Gallery sub-events">
+    {% if share_kind == "owner" %}
+      <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:owner-gallery' capability_id=capability.id %}">All</a>
+      {% for sub_event in sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:owner-sub-event' capability_id=capability.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
+    {% else %}
+      <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:guest-gallery' capability_id=capability.id %}">All</a>
+      {% for sub_event in sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:guest-sub-event' capability_id=capability.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
+    {% endif %}
+  </nav>
+{% elif selected_sub_event %}
+  <p class="status-pill ready">{{ selected_sub_event.name }}</p>
+{% endif %}
+
+<section class="card compact-card search-card">
+  {% if search_mode %}
+    <div>
+      <p class="eyebrow">Best-effort face search</p>
+      <h2>{{ page.paginator.count }} matching photo{{ page.paginator.count|pluralize }}</h2>
+      <p class="muted">Results are ranked by the closest match. Difficult photos may be missed and extra photos may appear.</p>
+    </div>
+    {% if share_kind == "owner" %}
+      <form method="post" action="{% url 'events:owner-clear-search' capability_id=capability.id result_id=search_result.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Clear search</button></form>
+    {% else %}
+      <form method="post" action="{% url 'events:guest-clear-search' capability_id=capability.id result_id=search_result.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Clear search</button></form>
+    {% endif %}
+  {% else %}
+    <p class="eyebrow">Find my photos</p>
+    <h2>Search with one clear face</h2>
+    <p class="muted">Use a camera photo or choose JPEG, PNG, WebP, HEIC, or HEIF up to 20 MB. The image, crop, and one-time search vector are discarded after processing.</p>
+    {% if share_kind == "owner" %}
+      {% if selected_sub_event %}<form method="post" enctype="multipart/form-data" action="{% url 'events:owner-sub-event-search' capability_id=capability.id sub_event_id=selected_sub_event.id %}" novalidate>{% else %}<form method="post" enctype="multipart/form-data" action="{% url 'events:owner-search' capability_id=capability.id %}" novalidate>{% endif %}
+    {% else %}
+      {% if selected_sub_event %}<form method="post" enctype="multipart/form-data" action="{% url 'events:guest-sub-event-search' capability_id=capability.id sub_event_id=selected_sub_event.id %}" novalidate>{% else %}<form method="post" enctype="multipart/form-data" action="{% url 'events:guest-search' capability_id=capability.id %}" novalidate>{% endif %}
+    {% endif %}
+      {% csrf_token %}
+      {% if search_form.non_field_errors %}<div class="form-error" role="alert">{{ search_form.non_field_errors }}</div>{% endif %}
+      {{ search_form.reference_photo.label_tag }} {{ search_form.reference_photo }}
+      {% if search_form.reference_photo.errors %}<div class="field-error" role="alert">{{ search_form.reference_photo.errors }}</div>{% endif %}
+      <label class="checkbox-label">{{ search_form.consent }} <span>{{ search_form.consent.label }}</span></label>
+      {% if search_form.consent.errors %}<div class="field-error" role="alert">{{ search_form.consent.errors }}</div>{% endif %}
+      <button type="submit">Search this gallery</button>
+    </form>
+  {% endif %}
+</section>
+
+{% if share_kind == "owner" and guest_form and not search_mode %}
+<section class="card compact-card">
+  <p class="eyebrow">Owner controls</p>
+  <h2>Share guest access</h2>
+  <p class="muted">A guest can browse, search, and download every visible photo in the selected scope, but cannot manage sharing. The link and PIN are shown once.</p>
+  <form method="post" action="{% url 'events:owner-create-guest' capability_id=capability.id %}">
+    {% csrf_token %}
+    {{ guest_form.label.label_tag }} {{ guest_form.label }}
+    <p class="muted">Optional, private, and never written to audit logs—for example “Family.”</p>
+    {{ guest_form.sub_event_id.label_tag }} {{ guest_form.sub_event_id }}
+    <button type="submit">Create guest link</button>
+  </form>
+  {% if guest_capabilities %}
+    <h3>Guest links</h3>
+    {% for guest in guest_capabilities %}
+      <div class="failure-row">
+        <span>{{ guest.label|default:"Guest link" }} · {% if guest.sub_event %}{{ guest.sub_event.name }}{% else %}All Photos{% endif %} · expires {{ guest.expires_at }}{% if guest.revoked_at %} · revoked{% endif %}</span>
+        {% if not guest.revoked_at %}<form method="post" action="{% url 'events:owner-revoke-guest' capability_id=capability.id guest_id=guest.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Revoke</button></form>{% endif %}
+      </div>
+    {% endfor %}
+  {% endif %}
+</section>
+{% endif %}
 
 {% include "openfotos_events/gallery_grid.html" %}
 {% endblock %}

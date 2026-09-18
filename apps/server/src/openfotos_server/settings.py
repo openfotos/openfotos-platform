@@ -10,13 +10,13 @@ from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parents[4]
 
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "unsafe-development-key")
-EVENT_PIN_PEPPER = os.environ.get("EVENT_PIN_PEPPER", "").strip()
-if not EVENT_PIN_PEPPER:
+SHARE_PIN_PEPPER = os.environ.get("SHARE_PIN_PEPPER", "").strip()
+if not SHARE_PIN_PEPPER:
     if SECRET_KEY != "unsafe-development-key":
-        raise ImproperlyConfigured("EVENT_PIN_PEPPER is required outside local development.")
-    EVENT_PIN_PEPPER = "unsafe-development-event-pin-pepper"
-if len(EVENT_PIN_PEPPER) < 32:
-    raise ImproperlyConfigured("EVENT_PIN_PEPPER must contain at least 32 characters.")
+        raise ImproperlyConfigured("SHARE_PIN_PEPPER is required outside local development.")
+    SHARE_PIN_PEPPER = "unsafe-development-share-pin-pepper"
+if len(SHARE_PIN_PEPPER) < 32:
+    raise ImproperlyConfigured("SHARE_PIN_PEPPER must contain at least 32 characters.")
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
 ALLOWED_HOSTS = [
     host.strip()
@@ -122,7 +122,19 @@ def positive_integer_setting(name: str, default: int) -> int:
 
 AUTH_FAILURE_LIMIT = positive_integer_setting("AUTH_FAILURE_LIMIT", 5)
 AUTH_FAILURE_WINDOW_SECONDS = positive_integer_setting("AUTH_FAILURE_WINDOW_SECONDS", 900)
-EVENT_SESSION_TTL_SECONDS = positive_integer_setting("EVENT_SESSION_TTL_SECONDS", 86_400)
+OWNER_SESSION_TTL_SECONDS = positive_integer_setting("OWNER_SESSION_TTL_SECONDS", 12 * 3_600)
+GUEST_SESSION_TTL_SECONDS = positive_integer_setting("GUEST_SESSION_TTL_SECONDS", 24 * 3_600)
+SHARE_PRESENTATION_TTL_SECONDS = positive_integer_setting("SHARE_PRESENTATION_TTL_SECONDS", 600)
+SHARE_CAPABILITY_TTL_SECONDS = 365 * 86_400
+MAX_ACTIVE_GUEST_CAPABILITIES = 100
+FACE_SEARCH_RESULT_TTL_SECONDS = 3_600
+FACE_SEARCH_MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+FACE_SEARCH_MAX_PIXELS = 40_000_000
+FACE_SEARCH_CLIENT_LIMIT = 10
+FACE_SEARCH_CAPABILITY_LIMIT = 100
+FACE_SEARCH_LIMIT_WINDOW_SECONDS = 900
+FACE_DETECTOR_MODEL_PATH = os.environ.get("FACE_DETECTOR_MODEL_PATH", "").strip()
+FACE_RECOGNIZER_MODEL_PATH = os.environ.get("FACE_RECOGNIZER_MODEL_PATH", "").strip()
 DESKTOP_ACCESS_TTL_SECONDS = positive_integer_setting("DESKTOP_ACCESS_TTL_SECONDS", 900)
 DESKTOP_REFRESH_TTL_SECONDS = positive_integer_setting("DESKTOP_REFRESH_TTL_SECONDS", 14 * 86_400)
 DESKTOP_REFRESH_RETRY_GRACE_SECONDS = positive_integer_setting(

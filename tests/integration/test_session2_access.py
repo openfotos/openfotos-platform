@@ -1,4 +1,5 @@
 from datetime import timedelta
+from uuid import uuid4
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -7,7 +8,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from openfotos_contracts import EventState
-from openfotos_server.events.cookies import visitor_cookie_name
+from openfotos_server.events.cookies import access_cookie_name
 from openfotos_server.events.models import (
     AuditAction,
     AuditResult,
@@ -16,14 +17,16 @@ from openfotos_server.events.models import (
     PhotographerMembership,
     RateLimitBucket,
 )
-from openfotos_server.events.services import revoke_event_sessions, rotate_event_token
+from openfotos_server.events.sharing_services import (
+    issue_owner_capability,
+    revoke_owner_capability,
+)
 
 pytestmark = pytest.mark.django_db
 
 
 @pytest.fixture(autouse=True)
 def configure_test_static_files(settings):
-    """Render templates without requiring a production collectstatic manifest."""
     settings.STORAGES = {
         **settings.STORAGES,
         "staticfiles": {
@@ -42,18 +45,35 @@ def make_event(
     *,
     name: str,
     state: EventState = EventState.DRAFT,
-    pin: str = "1234",
     expires_at=None,
 ) -> Event:
-    event = Event(
+    return Event.objects.create(
         photographer=photographer,
         name=name,
         state=state,
         expires_at=expires_at,
     )
-    event.set_pin(pin)
-    event.save()
-    return event
+
+
+def issue_owner(event):
+    actor = get_user_model().objects.create_user(
+        username=f"issuer-{event.id}", password="safe-pass"
+    )
+    return issue_owner_capability(event=event, actor=actor)
+
+
+def present_and_unlock(client, issued, *, host="alpha.localhost", pin=None):
+    capability = issued.capability
+    client.post(
+        reverse("events:owner-present", args=(capability.id,)),
+        {"secret": issued.secret},
+        headers={"host": host},
+    )
+    return client.post(
+        reverse("events:owner-unlock", args=(capability.id,)),
+        {"pin": pin or issued.pin},
+        headers={"host": host},
+    )
 
 
 @pytest.fixture
@@ -128,7 +148,7 @@ def test_valid_credentials_do_not_authorize_the_wrong_tenant(tenants) -> None:
     assert audit.actor is None
 
 
-def test_locked_event_reveals_no_event_metadata_and_unlocks_with_scoped_cookie(tenants) -> None:
+def test_fragment_secret_and_pin_unlock_without_revealing_event_metadata(tenants) -> None:
     alpha, _ = tenants
     event = make_event(
         alpha,
@@ -136,22 +156,38 @@ def test_locked_event_reveals_no_event_metadata_and_unlocks_with_scoped_cookie(t
         state=EventState.PUBLISHED,
         expires_at=timezone.now() + timedelta(days=2),
     )
-    event_url = reverse("events:event-access", args=(event.public_token,))
+    issued = issue_owner(event)
+    event_url = reverse("events:owner-gallery", args=(issued.capability.id,))
     client = Client()
 
-    locked = client.get(event_url, headers={"host": "alpha.localhost"})
-    assert locked.status_code == 200
-    assert b"Private Reception" not in locked.content
-    assert b"Alpha Photos" not in locked.content
+    landing = client.get(event_url, headers={"host": "alpha.localhost"})
+    assert landing.status_code == 200
+    assert b"Private Reception" not in landing.content
+    assert b"Alpha Photos" not in landing.content
+    assert issued.secret.encode() not in landing.content
 
-    unlocked = client.post(event_url, {"pin": "1234"}, headers={"host": "alpha.localhost"})
+    presented = client.post(
+        reverse("events:owner-present", args=(issued.capability.id,)),
+        {"secret": issued.secret},
+        headers={"host": "alpha.localhost"},
+    )
+    assert presented.status_code == 302
+    pin_page = client.get(event_url, headers={"host": "alpha.localhost"})
+    assert b"Enter the four-digit PIN" in pin_page.content
+    assert b"Private Reception" not in pin_page.content
+
+    unlocked = client.post(
+        reverse("events:owner-unlock", args=(issued.capability.id,)),
+        {"pin": issued.pin},
+        headers={"host": "alpha.localhost"},
+    )
     assert unlocked.status_code == 302
-    cookie = unlocked.cookies[visitor_cookie_name(event)]
+    cookie = unlocked.cookies[access_cookie_name(issued.capability)]
     assert cookie["httponly"]
     assert cookie["secure"]
     assert cookie["samesite"] == "Lax"
     assert cookie["domain"] == ""
-    assert int(cookie["max-age"]) <= 86_400
+    assert int(cookie["max-age"]) <= 43_200
 
     protected = client.get(event_url, headers={"host": "alpha.localhost"})
     assert protected.status_code == 200
@@ -159,7 +195,7 @@ def test_locked_event_reveals_no_event_metadata_and_unlocks_with_scoped_cookie(t
     assert b"Alpha Photos" in protected.content
 
 
-def test_event_token_host_and_lifecycle_must_all_match(tenants) -> None:
+def test_capability_host_secret_and_lifecycle_must_all_match(tenants) -> None:
     alpha, _ = tenants
     event = make_event(
         alpha,
@@ -167,23 +203,30 @@ def test_event_token_host_and_lifecycle_must_all_match(tenants) -> None:
         state=EventState.PUBLISHED,
         expires_at=timezone.now() + timedelta(days=2),
     )
-    event_url = reverse("events:event-access", args=(event.public_token,))
+    issued = issue_owner(event)
+    event_url = reverse("events:owner-gallery", args=(issued.capability.id,))
     client = Client()
 
     assert client.get(event_url, headers={"host": "beta.localhost"}).status_code == 404
     assert (
         client.get(
-            reverse("events:event-access", args=("altered-token",)),
+            reverse("events:owner-gallery", args=(uuid4(),)),
             headers={"host": "alpha.localhost"},
         ).status_code
         == 404
     )
+    wrong_secret = client.post(
+        reverse("events:owner-present", args=(issued.capability.id,)),
+        {"secret": "wrong-secret"},
+        headers={"host": "alpha.localhost"},
+    )
+    assert wrong_secret.status_code == 404
 
     Event.objects.filter(pk=event.pk).update(state=EventState.ARCHIVED)
     assert client.get(event_url, headers={"host": "alpha.localhost"}).status_code == 404
 
 
-def test_expiry_and_access_revocation_invalidate_an_existing_cookie(tenants) -> None:
+def test_expiry_and_owner_revocation_invalidate_an_existing_cookie(tenants) -> None:
     alpha, _ = tenants
     admin = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     event = make_event(
@@ -192,19 +235,23 @@ def test_expiry_and_access_revocation_invalidate_an_existing_cookie(tenants) -> 
         state=EventState.PUBLISHED,
         expires_at=timezone.now() + timedelta(days=2),
     )
-    event_url = reverse("events:event-access", args=(event.public_token,))
+    issued = issue_owner_capability(event=event, actor=admin)
+    event_url = reverse("events:owner-gallery", args=(issued.capability.id,))
     client = Client()
-    client.post(event_url, {"pin": "1234"}, headers={"host": "alpha.localhost"})
+    present_and_unlock(client, issued)
 
-    revoke_event_sessions(event_id=event.id, actor=admin)
-    revoked = client.get(event_url, headers={"host": "alpha.localhost"})
-    assert revoked.status_code == 200
-    assert b"Private Reception" not in revoked.content
-    assert b"Enter the event PIN" in revoked.content
+    revoke_owner_capability(event=event, actor=admin)
+    assert client.get(event_url, headers={"host": "alpha.localhost"}).status_code == 404
 
+    issued = issue_owner_capability(event=event, actor=admin)
     Event.objects.filter(pk=event.pk).update(expires_at=timezone.now() - timedelta(seconds=1))
-    expired = client.get(event_url, headers={"host": "alpha.localhost"})
-    assert expired.status_code == 404
+    assert (
+        client.get(
+            reverse("events:owner-gallery", args=(issued.capability.id,)),
+            headers={"host": "alpha.localhost"},
+        ).status_code
+        == 404
+    )
 
 
 def test_fifth_wrong_pin_is_rate_limited_without_logging_the_pin_or_ip(tenants) -> None:
@@ -215,11 +262,20 @@ def test_fifth_wrong_pin_is_rate_limited_without_logging_the_pin_or_ip(tenants) 
         state=EventState.PUBLISHED,
         expires_at=timezone.now() + timedelta(days=2),
     )
-    event_url = reverse("events:event-access", args=(event.public_token,))
+    issued = issue_owner(event)
     client = Client(REMOTE_ADDR="203.0.113.8")
+    client.post(
+        reverse("events:owner-present", args=(issued.capability.id,)),
+        {"secret": issued.secret},
+        headers={"host": "alpha.localhost"},
+    )
 
     responses = [
-        client.post(event_url, {"pin": "9999"}, headers={"host": "alpha.localhost"})
+        client.post(
+            reverse("events:owner-unlock", args=(issued.capability.id,)),
+            {"pin": "9999"},
+            headers={"host": "alpha.localhost"},
+        )
         for _ in range(5)
     ]
 
@@ -233,7 +289,7 @@ def test_fifth_wrong_pin_is_rate_limited_without_logging_the_pin_or_ip(tenants) 
     assert "9999" not in str(last_audit.__dict__)
 
 
-def test_token_rotation_breaks_old_links_and_requires_a_fresh_unlock(tenants) -> None:
+def test_reissuing_owner_access_breaks_old_secret_pin_and_cookie(tenants) -> None:
     alpha, _ = tenants
     admin = get_user_model().objects.create_superuser(username="admin", password="safe-pass")
     event = make_event(
@@ -242,18 +298,24 @@ def test_token_rotation_breaks_old_links_and_requires_a_fresh_unlock(tenants) ->
         state=EventState.PUBLISHED,
         expires_at=timezone.now() + timedelta(days=2),
     )
-    old_url = reverse("events:event-access", args=(event.public_token,))
+    original = issue_owner_capability(event=event, actor=admin)
     client = Client()
-    client.post(old_url, {"pin": "1234"}, headers={"host": "alpha.localhost"})
+    present_and_unlock(client, original)
 
-    rotated = rotate_event_token(event_id=event.id, actor=admin)
-    new_url = reverse("events:event-access", args=(rotated.public_token,))
-
-    assert client.get(old_url, headers={"host": "alpha.localhost"}).status_code == 404
-    fresh_link = client.get(new_url, headers={"host": "alpha.localhost"})
-    assert fresh_link.status_code == 200
-    assert b"Private Reception" not in fresh_link.content
-    assert rotated.audit_events.filter(action=AuditAction.EVENT_TOKEN_CHANGED).exists()
+    revoke_owner_capability(event=event, actor=admin)
+    replacement = issue_owner_capability(event=event, actor=admin)
+    assert replacement.capability.id == original.capability.id
+    root = reverse("events:owner-gallery", args=(replacement.capability.id,))
+    locked = client.get(root, headers={"host": "alpha.localhost"})
+    assert b"Private Reception" not in locked.content
+    assert (
+        client.post(
+            reverse("events:owner-present", args=(replacement.capability.id,)),
+            {"secret": original.secret},
+            headers={"host": "alpha.localhost"},
+        ).status_code
+        == 404
+    )
 
 
 def test_unknown_photographer_host_is_not_found() -> None:
