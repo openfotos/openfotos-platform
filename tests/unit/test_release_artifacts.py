@@ -66,3 +66,49 @@ def test_installer_icons_are_valid_for_the_studio_identity() -> None:
     assert icns[:4] == b"icns"
     assert struct.unpack(">I", icns[4:8])[0] == len(icns)
     assert b"icp4" in icns and b"ic10" in icns
+
+
+def test_icon_build_puts_the_extracted_mark_on_a_white_disc(tmp_path: Path) -> None:
+    from PIL import Image, ImageDraw
+
+    source = tmp_path / "logo.png"
+    image = Image.new("RGB", (64, 64), (10, 10, 10))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((8, 8, 56, 56), outline=(240, 240, 240), width=4)
+    draw.ellipse((28, 28, 36, 36), fill=(240, 240, 240))
+    image.save(source)
+    icons = tmp_path / "icons"
+    runtime = tmp_path / "runtime.png"
+
+    built = subprocess.run(
+        [
+            sys.executable,
+            str(REPOSITORY / "scripts" / "build_app_icons.py"),
+            "--source",
+            str(source),
+            "--destination",
+            str(icons),
+            "--runtime-destination",
+            str(runtime),
+        ],
+        cwd=REPOSITORY,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert built.returncode == 0, built.stderr
+    with Image.open(runtime) as opened:
+        badge = opened.convert("RGBA")
+        assert badge.getpixel((0, 0))[3] == 0
+        assert badge.getpixel((round(badge.width * 0.1), badge.height // 2)) == (
+            255,
+            255,
+            255,
+            255,
+        )
+        center = badge.getpixel((badge.width // 2, badge.height // 2))
+        assert center[3] == 255
+        assert max(center[:3]) < 60
+    assert (icons / "onenodeai-studio.ico").read_bytes()[:4] == b"\x00\x00\x01\x00"
+    assert (icons / "onenodeai-studio.icns").read_bytes()[:4] == b"icns"

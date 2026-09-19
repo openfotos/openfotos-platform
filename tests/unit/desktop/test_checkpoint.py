@@ -61,6 +61,78 @@ def test_session4_checkpoint_migrates_event_metadata_to_sub_event_schema(tmp_pat
         assert migrated.installation_id
 
 
+def test_checkpoint_migrates_the_legacy_ofts_watermark_logo_kind(tmp_path: Path) -> None:
+    database = tmp_path / "checkpoint.sqlite3"
+    event_id = uuid4()
+    policy = PreviewPolicyCache(
+        id=uuid4(),
+        enabled=True,
+        template=WatermarkTemplate.COMPACT_BOTTOM_RIGHT,
+        text="",
+        logo_kind=WatermarkLogoKind.ONENODEAI,
+        renderer_id="watermark-raster-v1",
+        derivative_profile_id="gallery-jpeg-v1",
+        mark_sha256="b" * 64,
+    )
+    with CheckpointStore(database) as store:
+        store.cache_event(
+            EventCache(
+                id=event_id,
+                name="Reception",
+                storage_limit_bytes=50_000_000_000,
+                processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
+                preview_policy=policy,
+            )
+        )
+    with sqlite3.connect(database) as connection:
+        connection.execute("UPDATE events SET preview_logo_kind = 'ofts'")
+        connection.execute("PRAGMA user_version = 6")
+
+    with CheckpointStore(database) as migrated:
+        assert migrated.get_event(event_id).preview_policy == policy
+
+
+def test_workstation_label_persists_and_recovers_from_a_single_cached_label(tmp_path: Path) -> None:
+    database = tmp_path / "checkpoint.sqlite3"
+    with CheckpointStore(database) as store:
+        assert store.workstation_label() == ""
+        store.cache_event(
+            EventCache(
+                id=uuid4(),
+                name="Reception",
+                storage_limit_bytes=50_000_000_000,
+                processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
+                device_label="Yashas",
+            )
+        )
+
+        assert store.workstation_label() == "Yashas"
+        store.set_workstation_label("Renamed workstation")
+
+    with CheckpointStore(database) as reopened:
+        assert reopened.workstation_label() == "Renamed workstation"
+
+
+def test_workstation_label_recovery_does_not_guess_between_cached_labels(tmp_path: Path) -> None:
+    database = tmp_path / "checkpoint.sqlite3"
+    with CheckpointStore(database) as store:
+        for name, label in (("Reception", "Workstation one"), ("Ceremony", "Workstation two")):
+            store.cache_event(
+                EventCache(
+                    id=uuid4(),
+                    name=name,
+                    storage_limit_bytes=50_000_000_000,
+                    processing_profile_id="pilot-profile-v1",
+                    sub_events=(_SUB_EVENT,),
+                    device_label=label,
+                )
+            )
+
+        assert store.workstation_label() == ""
+
+
 def test_approved_batch_rejects_new_selections(tmp_path: Path) -> None:
     photo = tmp_path / "photo.jpg"
     Image.new("RGB", (4, 4), color="blue").save(photo, format="JPEG")

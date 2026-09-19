@@ -100,6 +100,7 @@ class DesktopNetworkService:
                 "installation_id": str(self.store.installation_id),
             },
         )
+        self.store.set_workstation_label(label)
         return self._cache_events(origin, response["events"], device_label=label)
 
     def resume(self, server_url: str) -> list[EventCache]:
@@ -193,6 +194,10 @@ class DesktopNetworkService:
         device_label: str = "",
     ) -> list[EventCache]:
         cached_labels = {event.id: event.device_label for event in self.store.list_events()}
+        # The label chosen at sign-in belongs to this installation and outranks labels the
+        # server registered earlier for the same installation.
+        preferred_label = device_label or self.store.workstation_label()
+
         try:
             snapshots = [EventSnapshot.from_dict(value) for value in values]
         except ContractError as exc:
@@ -227,7 +232,9 @@ class DesktopNetworkService:
                     intake_state=snapshot.intake_state.value,
                     intake_generation=snapshot.intake_generation,
                     device_label=(
-                        snapshot.device_label or device_label or cached_labels.get(snapshot.id, "")
+                        preferred_label
+                        or snapshot.device_label
+                        or cached_labels.get(snapshot.id, "")
                     ),
                     sub_events=tuple(
                         SubEventCache(

@@ -14,6 +14,7 @@
       <a class="brand" href="{% url 'events:portfolio' %}">OneNodeAI Studio</a>
     </header>
   {% endblock %}
+  {% block hero %}{% endblock %}
   <main class="page-shell">
     {% if messages %}
       <div class="messages" aria-live="polite">
@@ -26,7 +27,6 @@
     <footer class="legal-footer">
       <a href="{% url 'events:privacy-notice' %}">Privacy</a>
       <a href="{% url 'events:terms' %}">Terms</a>
-      <a href="https://github.com/openfotos/openfotos-platform" rel="noopener noreferrer">Source code</a>
     </footer>
   {% endblock %}
   {% block scripts %}{% endblock %}

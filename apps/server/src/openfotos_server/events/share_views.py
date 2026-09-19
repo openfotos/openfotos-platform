@@ -129,6 +129,7 @@ def _render_gallery(
             "sub_events": event.sub_events.filter(is_archived=False),
             "selected_sub_event": selected_sub_event,
             "search_form": search_form or FaceSearchForm(),
+            "cover_url": _cover_url(event),
             **_route_context(capability),
         },
         status=status,

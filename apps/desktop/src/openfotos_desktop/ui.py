@@ -319,6 +319,40 @@ class ResumeWorker(QObject):
             QThread.currentThread().quit()
 
 
+class StartupPage(QWidget):
+    """Branded wait state shown while exactly one saved session is restored."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(52, 34, 52, 36)
+        layout.setSpacing(14)
+        layout.addStretch(1)
+        mark = QLabel()
+        mark.setObjectName("StartupMark")
+        mark.setFixedSize(96, 96)
+        mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setPixmap(
+            QPixmap(str(asset_path("logo.png"))).scaled(
+                60,
+                60,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        layout.addWidget(mark, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addSpacing(8)
+        self.product_name = QLabel("OneNodeAI Studio")
+        self.product_name.setObjectName("StartupTitle")
+        self.product_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status = QLabel("Restoring the saved session…")
+        self.status.setObjectName("PageDescription")
+        self.status.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self.product_name)
+        layout.addWidget(self.status)
+        layout.addStretch(1)
+
+
 class LoginPage(QWidget):
     photographer_requested = Signal(str, str, str, str)
 
@@ -1381,11 +1415,12 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.stack.setObjectName("PageStack")
+        self.startup = StartupPage()
         self.login = LoginPage()
         self.events = EventSelectorPage()
         self.sub_events = SubEventSelectorPage()
         self.upload_page = UploadPage()
-        for page in (self.login, self.events, self.sub_events, self.upload_page):
+        for page in (self.startup, self.login, self.events, self.sub_events, self.upload_page):
             self.stack.addWidget(page)
         shell_layout.addWidget(self.stack, 1)
         self.setCentralWidget(shell)
@@ -1413,6 +1448,9 @@ class MainWindow(QMainWindow):
         if len(cached_origins) == 1:
             [origin] = cached_origins
             self.login.server.setText(origin)
+        cached_label = self.store.workstation_label()
+        if cached_label:
+            self.login.device_label.setText(cached_label)
 
     def _connect_actions(self) -> None:
         self.header.retry_models_requested.connect(self._retry_model_download)
@@ -1503,7 +1541,7 @@ class MainWindow(QMainWindow):
             origin = None
         if not origin:
             return
-        self.login.show_notice("Restoring the saved session…")
+        self.stack.setCurrentWidget(self.startup)
         self.login.sign_in_button.setEnabled(False)
         thread = QThread(self)
         worker = ResumeWorker(self.gateway, origin)

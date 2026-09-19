@@ -24,6 +24,7 @@ from openfotos_desktop.ui import (
     EventSelectorPage,
     LoginPage,
     MainWindow,
+    StartupPage,
     SubEventSelectorPage,
     UploadPage,
     WatermarkSettingsDialog,
@@ -146,6 +147,20 @@ class FakeGateway:
 
     def upload(self, *args, **kwargs):
         raise AssertionError("The UI tests never start a real upload.")
+
+
+class BlockingResumeGateway(FakeGateway):
+    """Hold auto-resume open so the startup page can be observed deterministically."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.resume_started = threading.Event()
+        self.resume_release = threading.Event()
+
+    def resume(self, server_url: str):
+        self.resume_started.set()
+        assert self.resume_release.wait(5.0)
+        return super().resume(server_url)
 
 
 def _approved_batch(store: CheckpointStore, event: EventCache, directory: Path):
@@ -522,6 +537,47 @@ def test_auto_resume_restores_a_single_saved_session(tmp_path: Path) -> None:
     assert wait_for(app, lambda: isinstance(window.stack.currentWidget(), EventSelectorPage))
     assert not window.header.sign_out.isHidden()
     assert window.header.context.text() != ""
+    window.close()
+
+
+def test_auto_resume_shows_the_branded_startup_page_until_the_session_returns(
+    tmp_path: Path,
+) -> None:
+    app = application()
+    store = CheckpointStore(tmp_path / "startup.sqlite3")
+    store.cache_event(DEMO_EVENT)
+    gateway = BlockingResumeGateway(
+        saved_origin="https://studio.example",
+        resume_events=[DEMO_EVENT],
+    )
+    window = MainWindow(
+        store=store,
+        gateway=gateway,
+        face_model_store=FakeFaceModelStore(ready=True),
+    )
+
+    assert isinstance(window.stack.currentWidget(), StartupPage)
+    assert window.startup.product_name.text() == "OneNodeAI Studio"
+    assert "saved session" in window.startup.status.text()
+    assert wait_for(app, lambda: gateway.resume_started.is_set())
+    assert isinstance(window.stack.currentWidget(), StartupPage)
+
+    gateway.resume_release.set()
+    assert wait_for(app, lambda: isinstance(window.stack.currentWidget(), EventSelectorPage))
+    window.close()
+
+
+def test_sign_in_form_prefills_the_saved_workstation_label(tmp_path: Path) -> None:
+    application()
+    store = CheckpointStore(tmp_path / "workstation-label.sqlite3")
+    store.set_workstation_label("Yashas Nadig")
+    window = MainWindow(
+        store=store,
+        gateway=Session3Gateway(),
+        face_model_store=FakeFaceModelStore(ready=True),
+    )
+
+    assert window.login.device_label.text() == "Yashas Nadig"
     window.close()
 
 

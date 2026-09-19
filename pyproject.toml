@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "openfotos"
-version = "0.1.1"
+version = "0.1.2"
 description = "Private event photo delivery and face-based discovery pilot"
 readme = "README.md"
 license = "AGPL-3.0-only"

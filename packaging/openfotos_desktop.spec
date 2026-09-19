@@ -1,12 +1,16 @@
 # PyInstaller specification for the unsigned supervised desktop pilot.
 
 import sys
+import tomllib
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files
 
 
 repository = Path(SPECPATH).resolve().parent
+project_version = tomllib.loads((repository / "pyproject.toml").read_text(encoding="utf-8"))[
+    "project"
+]["version"]
 desktop_source = repository / "apps" / "desktop" / "src"
 package_sources = [
     repository / "packages" / name / "src"
@@ -74,7 +78,7 @@ if sys.platform == "darwin":
         bundle_identifier="com.onenodeai.studio",
         info_plist={
             "CFBundleDisplayName": "OneNodeAI Studio",
-            "CFBundleShortVersionString": "0.1.0",
+            "CFBundleShortVersionString": project_version,
             "NSHighResolutionCapable": True,
         },
         target_arch="arm64",

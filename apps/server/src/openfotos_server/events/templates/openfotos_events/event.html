@@ -10,8 +10,8 @@
       <span class="gallery-event-name">{{ event.name }}</span>
     </div>
     <nav class="sub-event-filters" aria-label="Gallery sub-events">
-      <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url gallery_route route_identifier %}">All</a>
-      {% for sub_event in sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url sub_event_route route_identifier sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
+      <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url gallery_route route_identifier %}#gallery">All</a>
+      {% for sub_event in sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url sub_event_route route_identifier sub_event.id %}#gallery">{{ sub_event.name }}</a>{% endfor %}
     </nav>
     <div class="gallery-actions">
       {% if search_mode %}
@@ -24,7 +24,7 @@
       {% else %}
         <details class="gallery-search"{% if search_form.errors or search_form.non_field_errors %} open{% endif %}>
           <summary class="icon-button" aria-label="Search with your face" title="Search with your face">
-            <img src="{% static 'openfotos_events/icons/search.svg' %}" alt="">
+            <img src="{% static 'openfotos_events/icons/face.svg' %}" alt="">
           </summary>
           <div class="gallery-search-panel">
             <h2>Search with your face</h2>
@@ -50,8 +50,21 @@
   </header>
 {% endblock %}
 
+{% block hero %}
+  {% if cover_url %}
+    <section class="gallery-hero" aria-label="{{ event.name }}">
+      <img class="cover-image" src="{{ cover_url }}" alt="">
+      <div class="cover-copy">
+        <p class="cover-studio">{{ event.photographer.display_name }}</p>
+        <h1>{{ event.name }}</h1>
+        <a class="cover-action" href="#gallery">View gallery</a>
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}
+
 {% block content %}
-  <div class="gallery-body">
+  <div class="gallery-body" id="gallery">
     {% if search_mode %}
       <section class="gallery-notice" aria-live="polite">
         <div>

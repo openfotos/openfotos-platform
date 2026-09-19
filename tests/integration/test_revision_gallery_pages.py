@@ -229,6 +229,12 @@ def test_gallery_keeps_face_search_behind_a_button_and_one_aligned_grid(monkeypa
     # The reference-photo form is disclosed by a details/summary action, not always visible.
     assert b'<details class="gallery-search">' in gallery.content
     assert b'<details class="gallery-search" open>' not in gallery.content
+    # The gallery opens on the same cover image with a scroll-down action.
+    assert b'class="gallery-hero"' in gallery.content
+    assert b'href="#gallery"' in gallery.content
+    assert b'id="gallery"' in gallery.content
+    assert b'#gallery">All</a>' in gallery.content
+    assert b"face.svg" in gallery.content
     assert b'<div class="gallery-grid">' in gallery.content
     assert b'class="gallery-tile"' in gallery.content
     # One shared grid container; the old results view double-wrapped it inside a card.
@@ -251,6 +257,7 @@ def test_gallery_keeps_face_search_behind_a_button_and_one_aligned_grid(monkeypa
     assert b'class="gallery-tile"' in results.content
     assert results.content.count(b'<div class="gallery-grid">') == 1
     assert b'<details class="gallery-search" open>' not in results.content
+    assert b'class="gallery-hero"' not in results.content
 
 
 def test_photo_page_uses_gallery_chrome_and_exact_download(monkeypatch) -> None:
@@ -273,19 +280,28 @@ def test_photo_page_uses_gallery_chrome_and_exact_download(monkeypatch) -> None:
     assert b"https://storage.invalid/events/" in response.content
 
 
-def test_gallery_and_portfolio_css_pin_thumbnail_alignment() -> None:
+def test_gallery_and_portfolio_css_pin_a_consistent_responsive_grid() -> None:
     static_root = Path(openfotos_server.events.__file__).parent / "static" / "openfotos_events"
     css = (static_root / "app.css").read_text(encoding="utf-8")
 
-    portfolio_block = css.split(".portfolio-card-media img {")[1].split("}")[0]
-    assert "height: auto;" in portfolio_block
-    assert "aspect-ratio: 3 / 2;" in portfolio_block
-    tile_block = css.split(".gallery-tile img {")[1].split("}")[0]
-    assert "height: auto;" in tile_block
-    assert "width: 100%;" in tile_block
+    portfolio_grid = css.split(".portfolio-grid {")[1].split("}")[0]
+    assert "repeat(3, minmax(0, 1fr));" in portfolio_grid
+    portfolio_media = css.split(".portfolio-card-media img {")[1].split("}")[0]
+    assert "aspect-ratio: 3 / 2;" in portfolio_media
+    tile = css.split(".gallery-tile {")[1].split("}")[0]
+    assert "aspect-ratio: 4 / 5;" in tile
+    tile_image = css.split(".gallery-tile img {")[1].split("}")[0]
+    assert "height: 100%;" in tile_image
+    assert "object-fit: cover;" in tile_image
+    dashboard_filters = css.split(".dashboard-gallery-filters {")[1].split("}")[0]
+    assert "border-bottom:" in dashboard_filters
+    assert "margin:" in dashboard_filters
+    phone_block = css[css.index("@media (max-width: 42rem) {") :][:400]
+    assert ".portfolio-grid" in phone_block
+    assert ".gallery-grid" in phone_block
 
 
-def test_public_pages_use_studio_branding_and_keep_the_agpl_footer(monkeypatch) -> None:
+def test_public_pages_use_studio_branding_without_a_source_footer(monkeypatch) -> None:
     event, _batch, portal = _published_event()
     store = SigningStore()
     monkeypatch.setattr(share_views, "configured_object_store", lambda: store)
@@ -308,5 +324,5 @@ def test_public_pages_use_studio_branding_and_keep_the_agpl_footer(monkeypatch) 
         assert page.status_code == 200
         assert b"OpenFotos" not in page.content
         assert b"OneNodeAI" in page.content
-        assert b"Source code" in page.content
+        assert b"Source code" not in page.content
     assert b"Ballads of Love" in pages[0].content

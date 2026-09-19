@@ -120,4 +120,4 @@ jobs:
           --prerelease
           --verify-tag
           --title "OneNodeAI Studio ${{ github.ref_name }} supervised pilot"
-          --notes-file docs/release/v0.1.1.md
+          --notes-file "docs/release/${{ github.ref_name }}.md"

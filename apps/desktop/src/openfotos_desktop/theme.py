@@ -94,6 +94,17 @@ QLabel#PageTitle {
     font-weight: 650;
 }
 
+QLabel#StartupMark {
+    background: #101828;
+    border-radius: 22px;
+}
+
+QLabel#StartupTitle {
+    color: #101828;
+    font-size: 25px;
+    font-weight: 650;
+}
+
 QLabel#PageDescription {
     color: #667085;
     font-size: 14px;

@@ -389,6 +389,7 @@ def test_event_dashboard_has_five_sections_and_requires_in_flight_confirmation(
     assert "Studio workstation 2 has 3 photos mid-upload" in content
     assert "Do you really want to publish?" in content
     assert "Generate a new event PIN" not in content
+    assert 'class="sub-event-filters dashboard-gallery-filters"' in content
 
     publish_url = reverse("events:publish-event", args=(context.event.id,))
     unconfirmed = client.post(publish_url, headers={"host": "alpha.localhost"})
@@ -408,6 +409,29 @@ def test_event_dashboard_has_five_sections_and_requires_in_flight_confirmation(
 
     published_dashboard = client.get(dashboard_url, headers={"host": "alpha.localhost"})
     assert b"Generate a new event PIN" in published_dashboard.content
+
+
+def test_dashboard_explains_processing_blockers(monkeypatch) -> None:
+    context = _publication_context()
+    monkeypatch.setattr(views, "configured_object_store", lambda: MemoryObjectStore())
+    context.included_asset.derivative_failure_code = "invalid_color_profile"
+    context.included_asset.derivative_attempt_count = 5
+    context.included_asset.save(
+        update_fields=("derivative_failure_code", "derivative_attempt_count")
+    )
+    client = Client()
+    client.force_login(context.user)
+
+    response = client.get(
+        reverse("events:photographer-event", args=(context.event.id,)),
+        headers={"host": "alpha.localhost"},
+    )
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Preview and thumbnail blockers" in content
+    assert "block publication until you exclude them" in content
+    assert "Derivative blockers" not in content
 
 
 def test_republish_after_unpublish_revalidates_every_included_photo() -> None:

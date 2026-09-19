@@ -424,6 +424,21 @@ confirmation. `logo.png`-derived ICO and ICNS files are validated by
 `tests/unit/test_release_artifacts.py`. Migrations `0001` through `0014` apply successfully to a
 fresh SQLite database.
 
+**Follow-up fixes (2026-09-19):** The desktop checkpoint migrates cached
+`preview_logo_kind = 'ofts'` policies to `onenodeai` (schema version 7), and server migration
+`0015` renames the same value on `PreviewPolicy`. The workstation label entered at sign-in is
+persisted per installation, applied to events first seen during auto-resume, and prefilled on the
+login form. Auto-resume holds a branded startup page instead of flashing the login form. Window
+and installer icons place the extracted mark on a white disc so they stay visible on dark
+desktops.
+
+Web follow-ups: the portfolio shows three event cards per row (two on tablets, one on phones);
+the gallery uses a uniform 4:5 tile grid (two per row on phones); the unlocked gallery opens on
+the same full-bleed event cover with a "View gallery" action that scrolls to the grid; the gallery
+search control uses a face/selfie icon; the photographer dashboard separates its sub-event tabs
+from the grid and explains its processing blockers; and the public footer no longer links the
+source repository (the Terms page retains the AGPL source offer).
+
 **Next action:** The user destroys the old rehearsal resources and deploys this build per runbook
 Phases 3 and 1, then re-runs the Phase 2 exercises (multi-batch upload, publish with an unfinished
 batch, PIN unlock, hidden-then-opened face search, exact-original download, PIN rotation as the leak

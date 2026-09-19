@@ -132,6 +132,11 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                     "events": [event_data()],
                 },
             )
+        if path == "/api/v1/auth/refresh/":
+            return httpx.Response(
+                200,
+                json={"access_token": "access-token", "refresh_token": "refresh-token"},
+            )
         if path == "/api/v1/events/":
             if state.get("policy_after_refresh"):
                 state["policy"] = state["policy_after_refresh"]
@@ -570,6 +575,61 @@ def test_saved_session_origin_requires_exactly_one_cached_origin_with_a_token(
         )
     )
     assert service.saved_session_origin() is None
+    service.close()
+    store.close()
+
+
+def test_sign_in_persists_the_workstation_label_for_later_resumes(tmp_path: Path) -> None:
+    store, event_id, batch_id, _photo = approved_batch(tmp_path)
+    asset_id = store.list_items(batch_id)[0].id
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        face_engine_factory=NoFaceEngine,
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, {}))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+
+    service.sign_in_photographer("http://localhost:8000", "photographer", "password", "Yashas")
+
+    assert store.workstation_label() == "Yashas"
+    assert store.get_event(event_id).device_label == "Yashas"
+    service.close()
+    store.close()
+
+
+def test_resume_applies_the_saved_workstation_label_to_server_events(tmp_path: Path) -> None:
+    store = CheckpointStore(tmp_path / "checkpoint.sqlite3")
+    event_id = uuid4()
+    store.cache_event(
+        EventCache(
+            id=event_id,
+            name="Reception",
+            storage_limit_bytes=50_000_000_000,
+            processing_profile_id="pilot-profile-v1",
+            server_url="http://localhost:8000",
+            sub_events=(_SUB_EVENT,),
+        )
+    )
+    store.set_workstation_label("Yashas")
+    token_store = MemoryTokenStore()
+    token_store.tokens[("http://localhost:8000", store.installation_id)] = "refresh-token"
+    service = DesktopNetworkService(
+        store,
+        token_store=token_store,
+        face_engine_factory=NoFaceEngine,
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, uuid4(), uuid4(), {}))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+
+    events = service.resume("http://localhost:8000")
+
+    assert events[0].device_label == "Yashas"
+    assert store.get_event(event_id).device_label == "Yashas"
     service.close()
     store.close()
 

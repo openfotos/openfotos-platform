@@ -186,7 +186,8 @@ CREATE TABLE IF NOT EXISTS face_analysis_checkpoints (
     updated_at TEXT NOT NULL
 );
 """
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
+_WORKSTATION_LABEL_KEY = "workstation_label"
 
 
 def normalize_path(path: Path) -> str:
@@ -234,6 +235,8 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                     self._migrate_version_4()
                 if 1 <= schema_version <= 5:
                     self._migrate_version_5()
+                if 1 <= schema_version <= 6:
+                    self._migrate_version_6()
         except Exception:
             self._connection.close()
             raise
@@ -343,6 +346,15 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             """
         )
 
+    def _migrate_version_6(self) -> None:
+        self._connection.executescript(
+            """
+            UPDATE events SET preview_logo_kind = 'onenodeai'
+            WHERE preview_logo_kind = 'ofts';
+            PRAGMA user_version = 7;
+            """
+        )
+
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.close()
 
@@ -353,6 +365,31 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
     @property
     def installation_id(self) -> UUID:
         return self._installation_id
+
+    def workstation_label(self) -> str:
+        """Return the label chosen at sign-in, upgrading one cached before labels persisted."""
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT value FROM metadata WHERE key = ?", (_WORKSTATION_LABEL_KEY,)
+            ).fetchone()
+            if row is not None:
+                return row["value"]
+        labels = {event.device_label for event in self.list_events() if event.device_label}
+        if len(labels) != 1:
+            return ""
+        [label] = labels
+        self.set_workstation_label(label)
+        return label
+
+    def set_workstation_label(self, label: str) -> None:
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO metadata(key, value) VALUES (?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (_WORKSTATION_LABEL_KEY, label),
+            )
 
     def _load_or_create_installation_id(self) -> UUID:
         with self._lock, self._connection:
