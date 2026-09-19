@@ -24,7 +24,10 @@ cron services receive only the restricted-role `DATABASE_URL` and never the migr
 Both URLs must set `sslmode=verify-full` and
 `sslrootcert=/tmp/openfotos-supabase-ca.pem`, plus the URL-encoded option
 `options=-csearch_path%3Dopenfotos%2Cextensions`. The second command reapplies runtime grants after
-each migration. The container build collects versioned static assets for WhiteNoise.
+each migration. Because a database pooler may discard startup options, every deployed PostgreSQL
+connection also executes and verifies `SET search_path TO openfotos, extensions` before use. Web
+startup fails if any Django migration is unapplied. The container build collects versioned static
+assets for WhiteNoise.
 
 Use one web replica until migration execution and face-model memory behavior are proven. Add the
 health check path `/health/live/`; monitor dependency readiness separately at `/health/ready/`.

@@ -11,6 +11,7 @@ from django.views.decorators.http import require_safe
 from openfotos_server.events.object_store import configured_object_store
 
 logger = logging.getLogger("openfotos.health")
+REQUIRED_DATABASE_MIGRATION = ("events", "0011_event_erasure_tracking")
 
 
 @require_safe
@@ -30,8 +31,11 @@ def readiness(_request):
 def _database_is_ready() -> bool:
     try:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-            return cursor.fetchone() == (1,)
+            cursor.execute(
+                "SELECT EXISTS (SELECT 1 FROM django_migrations WHERE app = %s AND name = %s)",
+                list(REQUIRED_DATABASE_MIGRATION),
+            )
+            return cursor.fetchone() == (True,)
     except Exception:
         logger.warning("readiness_check_failed", extra={"dependency": "database"})
         return False

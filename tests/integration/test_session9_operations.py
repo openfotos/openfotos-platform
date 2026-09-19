@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from django.db import connection
 from django.http import HttpResponse
 from django.test import Client, RequestFactory, override_settings
 
@@ -60,6 +61,21 @@ def test_readiness_failure_is_generic() -> None:
     assert response.status_code == 503
     assert response.json() == {"status": "unavailable"}
     assert b"object" not in response.content
+
+
+def test_readiness_fails_when_required_database_migration_is_absent() -> None:
+    store = SimpleNamespace(head=lambda key: SimpleNamespace(key=key))
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "DELETE FROM django_migrations WHERE app = %s AND name = %s",
+            ["events", "0011_event_erasure_tracking"],
+        )
+
+    with patch("openfotos_server.health.configured_object_store", return_value=store):
+        response = Client().get("/health/ready/", headers={"host": "localhost"})
+
+    assert response.status_code == 503
+    assert response.json() == {"status": "unavailable"}
 
 
 @override_settings(

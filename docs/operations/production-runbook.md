@@ -42,6 +42,11 @@ access.
    sslmode=verify-full&sslrootcert=/tmp/openfotos-supabase-ca.pem&options=-csearch_path%3Dopenfotos%2Cextensions
    ```
 
+   OpenFotos also explicitly sets and verifies `openfotos,extensions` after every deployed
+   PostgreSQL connection because a pooler may discard URL startup options. A migration run is not
+   accepted until `django_migrations` and `auth_user` exist in `openfotos` and are absent from
+   `public`.
+
 7. Base64-encode the CA certificate as one line locally. Store the result only in Railway as
    `DATABASE_CA_CERT_BASE64`. The migration and web services each receive the CA, but never each
    other's database URL.
@@ -78,13 +83,14 @@ access.
    DJANGO_DEBUG=false
    PUBLIC_BASE_DOMAIN=onenodeai.com
    ADMIN_HOST=admin.onenodeai.com
-   DJANGO_ALLOWED_HOSTS=.onenodeai.com
+   DJANGO_ALLOWED_HOSTS=.onenodeai.com,healthcheck.railway.app,<generated Railway hostname>
    DJANGO_CSRF_TRUSTED_ORIGINS=https://*.onenodeai.com
    STUDIO_PRIVACY_EMAIL=balladsoflove@gmail.com
    OPENFOTOS_RUNTIME_DB_ROLE=openfotos_runtime
    DJANGO_SECURE_HSTS_SECONDS=0
    GUNICORN_WORKERS=1
    GUNICORN_THREADS=4
+   PORT=8000
    ```
 
 4. Set the health path to `/health/live/`. Readiness is monitored separately at `/health/ready/`.
@@ -115,8 +121,12 @@ access.
 
 ## Phase 2: seed and rehearse
 
-1. Create the private Django superuser interactively through a Railway shell. Never pass its
-   password on the command line.
+1. Create the private Django superuser interactively through Railway SSH. Railway's SSH maintenance
+   session is root even though deployed PID 1 must have UID 10001. Verify `/proc/1/status`, repair
+   `/tmp/openfotos-supabase-ca.pem` to owner/group 10001 and mode 0600 if a prior root diagnostic
+   replaced it, then enter `openfotos` with a preserved service environment and
+   `HOME=/home/openfotos`. Never pass the password on the command line, and never run migrations
+   from the runtime service.
 2. Through the dedicated admin host, create the photographer user, `balladsoflove` Photographer,
    and active membership. The photographer is nonstaff. Do not create the local testing account in
    production.
