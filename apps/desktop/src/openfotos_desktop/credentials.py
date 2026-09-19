@@ -7,7 +7,7 @@ from uuid import UUID
 import keyring
 from keyring.errors import KeyringError
 
-_SERVICE_NAME = "OpenFotos Desktop"
+_SERVICE_NAME = "OneNodeAI Studio"
 
 
 @dataclass
@@ -25,7 +25,7 @@ class RefreshTokenStore:
         except KeyringError:
             self.persistence_warning = (
                 "The operating-system credential store is unavailable. "
-                "This session will require sign-in after OpenFotos closes."
+                "This session will require sign-in after OneNodeAI Studio closes."
             )
             return False
         self.persistence_warning = None

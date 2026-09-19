@@ -17,9 +17,7 @@ from .models import (
     ContributionBatch,
     Event,
     EventInstallation,
-    GuestCapability,
     IngestionManifest,
-    OwnerCapability,
     Photographer,
     PhotographerMembership,
     PortalCapability,
@@ -27,7 +25,6 @@ from .models import (
     SubEvent,
 )
 from .services import transition_event
-from .sharing_services import ShareAccessError, revoke_owner_capability
 
 
 class EventAdminForm(forms.ModelForm):
@@ -117,12 +114,13 @@ class PhotographerMembershipAdmin(admin.ModelAdmin):
 @admin.register(Event)
 class EventAdmin(admin.ModelAdmin):
     form = EventAdminForm
-    list_display = ("name", "photographer", "state", "expires_at", "updated_at")
+    list_display = ("name", "slug", "photographer", "state", "expires_at", "updated_at")
     list_filter = ("state", "photographer")
     search_fields = ("name", "photographer__display_name")
     autocomplete_fields = ("photographer",)
     readonly_fields = (
         "id",
+        "slug",
         "state",
         "storage_limit_bytes",
         "reserved_original_bytes",
@@ -156,7 +154,6 @@ class EventAdmin(admin.ModelAdmin):
         "move_to_archived",
         "move_to_failed",
         "move_to_cancelled",
-        "revoke_owner_access",
     )
 
     def get_readonly_fields(self, request, obj=None):
@@ -217,18 +214,6 @@ class EventAdmin(admin.ModelAdmin):
     @admin.action(description="Move selected events to Cancelled")
     def move_to_cancelled(self, request, queryset):
         self._transition(request, queryset, EventState.CANCELLED)
-
-    @admin.action(description="Revoke owner access and all guest links")
-    def revoke_owner_access(self, request, queryset):
-        changed = 0
-        for event in queryset:
-            try:
-                revoke_owner_capability(event=event, actor=request.user, request=request)
-            except ShareAccessError:
-                continue
-            else:
-                changed += 1
-        self.message_user(request, f"Revoked owner access for {changed} event(s).")
 
     def _transition(self, request, queryset, target):
         changed = 0
@@ -338,22 +323,6 @@ class _IngestionRecordAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
-
-
-@admin.register(OwnerCapability)
-class OwnerCapabilityAdmin(_IngestionRecordAdmin):
-    list_display = ("event", "expires_at", "revoked_at", "created_at")
-    list_filter = ("revoked_at", "event__photographer")
-    search_fields = ("id", "event__name")
-    exclude = ("secret_digest", "pin_hash", "access_version")
-
-
-@admin.register(GuestCapability)
-class GuestCapabilityAdmin(_IngestionRecordAdmin):
-    list_display = ("id", "owner", "sub_event", "label", "expires_at", "revoked_at")
-    list_filter = ("revoked_at", "owner__event__photographer")
-    search_fields = ("id", "label", "owner__event__name")
-    exclude = ("secret_digest", "pin_hash", "access_version")
 
 
 @admin.register(EventInstallation)

@@ -14,15 +14,18 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
+from django.utils.text import slugify
 from PIL import Image, ImageCms, ImageOps, UnidentifiedImageError
 from pillow_heif import register_heif_opener
 
-from openfotos_contracts import EventState
+from openfotos_contracts import EventState, IntakeState
 from openfotos_storage import event_cover_key, photographer_logo_key
 from openfotos_storage.backend import ObjectAlreadyExists, ObjectStoreError, S3ObjectStore
 
 from .audit import record_audit
+from .ingestion_services import IngestionError, commit_publication_snapshot
 from .models import (
+    EVENT_SLUG_MAX_LENGTH,
     AuditAction,
     AuditResult,
     ConsentAttestation,
@@ -32,7 +35,6 @@ from .models import (
     PortalCapability,
     generate_share_pin,
 )
-from .services import transition_event
 
 CONSENT_NOTICE_VERSION = "portfolio-face-index-consent-v1"
 _ACCEPTED_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "HEIF", "HEIC"})
@@ -275,30 +277,69 @@ def update_portfolio_profile(
         return locked
 
 
+def _assign_event_slug(event: Event) -> None:
+    if event.slug:
+        return
+    normalized = slugify(event.name).replace("_", "-")
+    base = "-".join(part for part in normalized.split("-") if part)
+    base = base[:EVENT_SLUG_MAX_LENGTH].rstrip("-") or "event"
+    candidate = base
+    suffix_number = 2
+    while (
+        Event.objects.filter(
+            photographer_id=event.photographer_id,
+            slug=candidate,
+        )
+        .exclude(pk=event.pk)
+        .exists()
+    ):
+        suffix = f"-{suffix_number}"
+        candidate = f"{base[: EVENT_SLUG_MAX_LENGTH - len(suffix)].rstrip('-')}{suffix}"
+        suffix_number += 1
+    event.slug = candidate
+    event.save(update_fields=("slug", "updated_at"))
+
+
 @transaction.atomic
-def publish_event_with_portal(*, event: Event, actor, request=None) -> PublishedPortal:
+def publish_event_with_portal(
+    *, event: Event, actor, object_store: S3ObjectStore | None = None, request=None
+) -> PublishedPortal:
     locked = Event.objects.select_for_update().select_related("photographer").get(pk=event.pk)
     if not locked.cover_object_key or not ConsentAttestation.objects.filter(event=locked).exists():
         raise ValidationError(
             "An event cover and the current customer-consent attestation are required."
         )
+    Photographer.objects.select_for_update().only("id").get(pk=locked.photographer_id)
+    _assign_event_slug(locked)
     now = timezone.now()
     if locked.first_published_at is None:
         locked.first_published_at = now
         locked.expires_at = now + timedelta(days=settings.EVENT_RETENTION_DAYS)
         locked.purge_after = locked.expires_at + timedelta(days=settings.EVENT_PURGE_GRACE_DAYS)
         locked.save(update_fields=("first_published_at", "expires_at", "purge_after", "updated_at"))
-    published = transition_event(
-        event_id=locked.id,
-        target=EventState.PUBLISHED,
-        actor=actor,
-        request=request,
-    )
+    if locked.state == EventState.PUBLISHED.value:
+        published = locked
+    else:
+        if object_store is None:
+            raise IngestionError(
+                "object_store_unavailable",
+                "Object storage is required to publish this event.",
+                retryable=True,
+            )
+        published, _manifest = commit_publication_snapshot(
+            event_id=locked.id,
+            actor=actor,
+            object_store=object_store,
+            request=request,
+        )
     capability = PortalCapability.objects.select_for_update().filter(event=published).first()
     pin = None
-    if capability is None:
+    if capability is None or capability.revoked_at is not None:
         pin = generate_share_pin()
-        capability = PortalCapability(event=published, expires_at=published.expires_at)
+        capability = capability or PortalCapability(event=published)
+        capability.expires_at = published.expires_at
+        capability.revoked_at = None
+        capability.access_version = uuid4()
         capability.set_pin(pin)
         capability.save()
         record_audit(
@@ -311,6 +352,49 @@ def publish_event_with_portal(*, event: Event, actor, request=None) -> Published
             metadata={"portal_capability_id": str(capability.id)},
         )
     return PublishedPortal(event=published, capability=capability, pin=pin)
+
+
+@transaction.atomic
+def unpublish_event_for_upload(*, event: Event, actor, request=None) -> Event:
+    locked = Event.objects.select_for_update().select_related("photographer").get(pk=event.pk)
+    if locked.state != EventState.PUBLISHED.value:
+        raise PortfolioError("event_not_published", "Only a published event can be unpublished.")
+    previous_generation = locked.intake_generation
+    locked.intake_generation += 1
+    locked.intake_state = IntakeState.OPEN.value
+    locked.current_ingestion_manifest = None
+    locked.derivatives_ready_generation = None
+    locked.face_index_ready_generation = None
+    locked.state = EventState.UPLOADING.value
+    locked.share_access_version = uuid4()
+    locked.save(
+        update_fields=(
+            "intake_generation",
+            "intake_state",
+            "current_ingestion_manifest",
+            "derivatives_ready_generation",
+            "face_index_ready_generation",
+            "state",
+            "share_access_version",
+            "updated_at",
+        )
+    )
+    FaceSearchResultSet.objects.filter(event=locked).delete()
+    record_audit(
+        photographer=locked.photographer,
+        event=locked,
+        actor=actor,
+        action=AuditAction.EVENT_STATE_CHANGED,
+        result=AuditResult.SUCCEEDED,
+        request=request,
+        metadata={
+            "from": EventState.PUBLISHED.value,
+            "to": EventState.UPLOADING.value,
+            "from_generation": previous_generation,
+            "to_generation": locked.intake_generation,
+        },
+    )
+    return locked
 
 
 @transaction.atomic
@@ -330,7 +414,8 @@ def rotate_portal_pin(*, event: Event, actor, request=None) -> PublishedPortal:
     pin = generate_share_pin()
     capability.set_pin(pin)
     capability.access_version = uuid4()
-    capability.save(update_fields=("pin_hash", "access_version", "updated_at"))
+    capability.revoked_at = None
+    capability.save(update_fields=("pin_hash", "access_version", "revoked_at", "updated_at"))
     FaceSearchResultSet.objects.filter(portal_capability=capability).delete()
     record_audit(
         photographer=capability.event.photographer,

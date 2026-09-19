@@ -88,6 +88,7 @@ class BatchSyncService:
         sleeper: Callable[[float], None],
         jitter: Callable[[float, float], float],
         face_engine_factory: Callable[[], FaceEngine] = create_accepted_face_engine,
+        ensure_preview_policy: Callable[[UUID], EventCache] | None = None,
     ) -> None:
         self.store = store
         self._request = request
@@ -96,6 +97,7 @@ class BatchSyncService:
         self._sleep = sleeper
         self._jitter = jitter
         self._face_engine_factory = face_engine_factory
+        self._ensure_preview_policy = ensure_preview_policy
 
     def upload(
         self,
@@ -164,6 +166,8 @@ class BatchSyncService:
         event = self.store.get_event(event.id)
         if event.preview_policy is None:
             event = self._refresh_cached_event(event.id)
+        if event.preview_policy is None and self._ensure_preview_policy is not None:
+            event = self._ensure_preview_policy(event.id)
         if event.preview_policy is None:
             raise DesktopApiError(
                 "preview_policy_not_confirmed",
@@ -910,6 +914,8 @@ class BatchSyncService:
                         derivative_variant,
                         item["failure_code"] or "server_rejected",
                     )
+        if response.get("state") == "not_included":
+            self.store.mark_batch_not_included(batch_id)
 
 
 def operation_key(identifier: UUID, operation: str) -> UUID:

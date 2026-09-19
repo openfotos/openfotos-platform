@@ -50,17 +50,15 @@ from .desktop_auth import (
     authenticate_access_token,
     authenticate_photographer,
     refresh_session,
+    revoke_session,
 )
 from .face_services import report_face_analysis_failure, submit_face_analysis
 from .ingestion_services import (
     IngestionError,
     cancel_batch,
-    close_intake,
     event_for_session,
     exclude_asset,
-    finalize_ingestion,
     issue_upload_leases,
-    reopen_intake,
     reserve_contribution,
     revoke_installation,
     verify_uploaded_object,
@@ -423,6 +421,22 @@ def refresh(request: HttpRequest) -> JsonResponse:
     except (ContractError, DesktopAuthError) as exc:
         return _domain_error(exc)
     return JsonResponse(_tokens_data(tokens))
+
+
+@csrf_exempt
+@require_POST
+def logout(request: HttpRequest) -> JsonResponse:
+    photographer = _tenant(request)
+    try:
+        body = _json_body(request, fields={"refresh_token"})
+        revoke_session(
+            str(body["refresh_token"]),
+            photographer=photographer,
+            request=request,
+        )
+    except (ContractError, DesktopAuthError) as exc:
+        return _domain_error(exc)
+    return JsonResponse({"revoked": True})
 
 
 @require_GET
@@ -882,72 +896,6 @@ def complete_asset(request: HttpRequest, event_id: UUID, asset_id: UUID) -> Json
             request,
             session=session,
             operation="complete_asset",
-            command=command,
-        )
-    except ImproperlyConfigured:
-        return _error(
-            "object_store_unavailable",
-            "Object storage is not configured.",
-            status=503,
-            retryable=True,
-        )
-    except (ContractError, DesktopAuthError, IngestionError) as exc:
-        return _domain_error(exc)
-
-
-@csrf_exempt
-@require_POST
-def intake_action(request: HttpRequest, event_id: UUID, action: str) -> JsonResponse:
-    try:
-        session = _bearer_session(request)
-
-        def command() -> tuple[dict, int]:
-            _json_body(request, fields=set())
-            if action == "close":
-                event = close_intake(session=session, event_id=event_id, request=request)
-            elif action == "reopen":
-                event = reopen_intake(session=session, event_id=event_id, request=request)
-            else:
-                raise Http404
-            return _event_data(event, session=session), 200
-
-        return _execute_mutation(
-            request,
-            session=session,
-            operation=f"{action}_intake",
-            command=command,
-        )
-    except (ContractError, DesktopAuthError, IngestionError) as exc:
-        return _domain_error(exc)
-
-
-@csrf_exempt
-@require_POST
-def finalize(request: HttpRequest, event_id: UUID) -> JsonResponse:
-    try:
-        session = _bearer_session(request)
-
-        def command() -> tuple[dict, int]:
-            _json_body(request, fields=set())
-            manifest = finalize_ingestion(
-                session=session,
-                event_id=event_id,
-                object_store=configured_object_store(),
-                request=request,
-            )
-            return {
-                "manifest_id": str(manifest.id),
-                "generation": manifest.generation,
-                "state": manifest.state,
-                "asset_count": manifest.asset_count,
-                "original_bytes": manifest.original_bytes,
-                "excluded_asset_count": manifest.excluded_asset_count,
-            }, 200
-
-        return _execute_mutation(
-            request,
-            session=session,
-            operation="finalize_ingestion",
             command=command,
         )
     except ImproperlyConfigured:

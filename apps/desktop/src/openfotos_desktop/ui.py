@@ -1,7 +1,8 @@
-"""Qt Widgets screens for Session 3 local inventory."""
+"""Qt Widgets screens for the OneNodeAI Studio photographer workflow."""
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from pathlib import Path
 from threading import Event
@@ -11,7 +12,7 @@ from uuid import UUID
 from PIL import Image, ImageDraw, ImageOps, UnidentifiedImageError
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import QObject, QSize, Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -21,23 +22,18 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
-    QGridLayout,
     QHBoxLayout,
-    QHeaderView,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
-    QScrollArea,
     QSizePolicy,
-    QSpinBox,
     QStackedWidget,
-    QTableWidget,
-    QTableWidgetItem,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -45,7 +41,6 @@ from PySide6.QtWidgets import (
 
 from openfotos_contracts import (
     MAX_WATERMARK_TEXT_LENGTH,
-    AssetVariant,
     WatermarkLogoKind,
     WatermarkTemplate,
 )
@@ -74,7 +69,15 @@ if TYPE_CHECKING:
     from PySide6.QtGui import QCloseEvent
 
 SUPPORTED_PROCESSING_PROFILE_ID = "pilot-profile-v1"
+DEFAULT_TRANSFER_LIMIT = 3
 LOGGER = logging.getLogger(__name__)
+
+_PROGRESS_SCALE = 1000
+_STAGE_WEIGHTS = (
+    ("originals", 500),
+    ("derivatives", 300),
+    ("face-index", 200),
+)
 
 
 def _asset_icon(name: str) -> QIcon:
@@ -94,6 +97,17 @@ def _style_button(
         button.setProperty("kind", kind)
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     return button
+
+
+def format_bytes(value: int) -> str:
+    if value < 1024:
+        return f"{value} B"
+    amount = float(value)
+    for unit in ("KiB", "MiB", "GiB", "TiB"):
+        amount /= 1024
+        if amount < 1024 or unit == "TiB":
+            return f"{amount:.1f} {unit}"
+    raise AssertionError("unreachable")
 
 
 class PageHeading(QFrame):
@@ -121,24 +135,9 @@ class PageHeading(QFrame):
         layout.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
 
 
-class StatCard(QFrame):
-    def __init__(self, label: str, *, tone: str = "accent") -> None:
-        super().__init__()
-        self.setObjectName("StatCard")
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 13, 16, 13)
-        layout.setSpacing(3)
-        self.value = QLabel("—")
-        self.value.setObjectName("StatValue")
-        self.value.setProperty("tone", tone)
-        caption = QLabel(label.upper())
-        caption.setObjectName("StatLabel")
-        layout.addWidget(self.value)
-        layout.addWidget(caption)
-
-
 class BrandHeader(QFrame):
-    settings_requested = Signal()
+    retry_models_requested = Signal()
+    sign_out_requested = Signal()
 
     def __init__(self, *, demo: bool) -> None:
         super().__init__()
@@ -146,7 +145,7 @@ class BrandHeader(QFrame):
         self.setFixedHeight(72)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(28, 12, 28, 12)
-        layout.setSpacing(16)
+        layout.setSpacing(14)
         self.product_name = QLabel("OneNodeAI Studio")
         self.product_name.setObjectName("HeaderBrand")
         layout.addWidget(self.product_name)
@@ -161,26 +160,37 @@ class BrandHeader(QFrame):
         product.addWidget(self.context)
         layout.addLayout(product)
         layout.addStretch()
+
+        self.model_status = QLabel()
+        self.model_status.setObjectName("ModelStatus")
+        self.model_status.hide()
+        layout.addWidget(self.model_status)
+        self.model_retry = _style_button(QPushButton("Retry download"), kind="ghost")
+        self.model_retry.hide()
+        self.model_retry.clicked.connect(self.retry_models_requested)
+        layout.addWidget(self.model_retry)
+
         mode = QLabel("Demo workspace" if demo else "Secure workspace")
         mode.setObjectName("ModeBadge")
         layout.addWidget(mode)
-        self.settings = _style_button(QPushButton("Face model settings"), kind="ghost")
-        self.settings.clicked.connect(self.settings_requested)
-        layout.addWidget(self.settings)
+        self.sign_out = _style_button(QPushButton("Sign out"), kind="ghost")
+        self.sign_out.hide()
+        self.sign_out.clicked.connect(self.sign_out_requested)
+        layout.addWidget(self.sign_out)
 
     def set_context(self, text: str) -> None:
         self.context.setText(text)
 
+    def set_session_active(self, active: bool) -> None:
+        self.sign_out.setVisible(active)
 
-def format_bytes(value: int) -> str:
-    if value < 1024:
-        return f"{value} B"
-    amount = float(value)
-    for unit in ("KiB", "MiB", "GiB", "TiB"):
-        amount /= 1024
-        if amount < 1024 or unit == "TiB":
-            return f"{amount:.1f} {unit}"
-    raise AssertionError("unreachable")
+    def set_model_state(self, state: str, message: str) -> None:
+        self.model_status.setText(message)
+        self.model_status.setProperty("state", state)
+        self.model_status.style().unpolish(self.model_status)
+        self.model_status.style().polish(self.model_status)
+        self.model_status.show()
+        self.model_retry.setVisible(state == "error")
 
 
 class ScanWorker(QObject):
@@ -209,6 +219,8 @@ class ScanWorker(QObject):
             self.failed.emit(str(exc))
         else:
             self.completed.emit(summary)
+        finally:
+            QThread.currentThread().quit()
 
 
 class UploadWorker(QObject):
@@ -248,165 +260,67 @@ class UploadWorker(QObject):
                 self.cancelled.emit()
             else:
                 self.completed.emit()
+        finally:
+            QThread.currentThread().quit()
 
 
-class FaceModelSetupWorker(QObject):
+class FaceModelDownloadWorker(QObject):
     progressed = Signal(int, int)
     completed = Signal()
+    cancelled = Signal()
     failed = Signal(str)
 
-    def __init__(self, store: FaceModelStore, source_directory: Path | None) -> None:
+    def __init__(self, store: FaceModelStore, stop: Event) -> None:
         super().__init__()
         self.store = store
-        self.source_directory = source_directory
+        self.stop = stop
 
     @Slot()
     def run(self) -> None:
         try:
-            if self.source_directory is None:
-                self.store.download(progress=self.progressed.emit)
+            self.store.download(
+                progress=self.progressed.emit,
+                is_cancelled=self.stop.is_set,
+            )
+        except FaceModelSetupError as exc:
+            if self.stop.is_set() or exc.code == "face_model_download_cancelled":
+                self.cancelled.emit()
             else:
-                self.store.install_from_directory(self.source_directory)
-        except (FaceModelSetupError, OSError) as exc:
+                self.failed.emit(str(exc))
+        except OSError as exc:
             self.failed.emit(str(exc))
         except Exception:
-            LOGGER.exception("Unexpected face-model setup failure")
-            self.failed.emit("Unexpected model setup failure. Check the application log.")
+            LOGGER.exception("Unexpected face-model download failure")
+            self.failed.emit("Unexpected model download failure. Check the application log.")
         else:
             self.completed.emit()
+        finally:
+            QThread.currentThread().quit()
 
 
-class FaceModelSettingsDialog(QDialog):
-    def __init__(self, store: FaceModelStore, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.store = store
-        self._thread: QThread | None = None
-        self._worker: FaceModelSetupWorker | None = None
-        self.setWindowTitle("Face model settings")
-        self.setModal(True)
-        self.setMinimumSize(620, 300)
-        self.resize(680, 340)
+class ResumeWorker(QObject):
+    completed = Signal(object)
+    failed = Signal(str)
 
-        layout = QVBoxLayout(self)
-        heading = QLabel("Accepted face models")
-        heading.setObjectName("SectionTitle")
-        layout.addWidget(heading)
-        description = QLabel(
-            "Face indexing runs only on this workstation. Model files are hash-verified "
-            "before use and remain in the private application data directory."
-        )
-        description.setWordWrap(True)
-        description.setObjectName("BodyMuted")
-        layout.addWidget(description)
-        self.status = QLabel()
-        self.status.setWordWrap(True)
-        layout.addWidget(self.status)
-        location = QLabel(f"Storage: {store.directory}")
-        location.setWordWrap(True)
-        location.setObjectName("BodyMuted")
-        layout.addWidget(location)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 2)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        layout.addWidget(self.progress)
+    def __init__(self, gateway: DesktopGateway, server_url: str) -> None:
+        super().__init__()
+        self.gateway = gateway
+        self.server_url = server_url
 
-        buttons = QHBoxLayout()
-        self.locate = _style_button(QPushButton("Locate existing files"), kind="ghost")
-        self.locate.clicked.connect(self._locate)
-        self.download = _style_button(QPushButton("Download / verify"), kind="primary")
-        self.download.clicked.connect(lambda: self._start_setup(None))
-        self.close_button = _style_button(QPushButton("Close"), kind="ghost")
-        self.close_button.clicked.connect(self.accept)
-        buttons.addWidget(self.locate)
-        buttons.addStretch()
-        buttons.addWidget(self.close_button)
-        buttons.addWidget(self.download)
-        layout.addLayout(buttons)
-        self.refresh_status()
-
-    def refresh_status(self) -> None:
-        if self.store.verified_paths() is None:
-            self.status.setText(
-                "Not ready — download the accepted files or select a folder containing them."
-            )
-            self.progress.setValue(0)
+    @Slot()
+    def run(self) -> None:
+        try:
+            events = list(self.gateway.resume(self.server_url))
+        except Exception as exc:  # Auto-resume never blocks sign-in on an unexpected failure.
+            self.failed.emit(str(exc))
         else:
-            self.status.setText("Ready — both accepted model files passed SHA-256 verification.")
-            self.progress.setValue(2)
-
-    @Slot()
-    def _locate(self) -> None:
-        selected = QFileDialog.getExistingDirectory(
-            self,
-            "Locate accepted face-model files",
-            str(Path.home()),
-        )
-        if selected:
-            self._start_setup(Path(selected))
-
-    def _start_setup(self, source_directory: Path | None) -> None:
-        if self._thread is not None:
-            return
-        self._set_busy(True)
-        self.progress.setRange(0, 2)
-        self.progress.setValue(0)
-        self.status.setText(
-            "Verifying selected files…" if source_directory else "Downloading and verifying…"
-        )
-        thread = QThread(self)
-        worker = FaceModelSetupWorker(self.store, source_directory)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.progressed.connect(self._setup_progressed)
-        worker.completed.connect(self._setup_completed)
-        worker.failed.connect(self._setup_failed)
-        for signal in (worker.completed, worker.failed):
-            signal.connect(thread.quit)
-        thread.finished.connect(worker.deleteLater)
-        thread.finished.connect(self._setup_finished)
-        self._thread = thread
-        self._worker = worker
-        thread.start()
-
-    @Slot()
-    def _setup_completed(self) -> None:
-        self.refresh_status()
-
-    @Slot(int, int)
-    def _setup_progressed(self, completed: int, total: int) -> None:
-        self.progress.setRange(0, max(total, 1))
-        self.progress.setValue(completed)
-
-    @Slot(str)
-    def _setup_failed(self, message: str) -> None:
-        self.status.setText(f"Setup failed — {message}")
-
-    @Slot()
-    def _setup_finished(self) -> None:
-        if self._thread is not None:
-            self._thread.deleteLater()
-        self._thread = None
-        self._worker = None
-        self._set_busy(False)
-
-    def _set_busy(self, busy: bool) -> None:
-        self.locate.setEnabled(not busy)
-        self.download.setEnabled(not busy)
-        self.close_button.setEnabled(not busy)
-
-    @property
-    def is_busy(self) -> bool:
-        return self._thread is not None
-
-    def reject(self) -> None:
-        if not self.is_busy:
-            super().reject()
+            self.completed.emit(events)
+        finally:
+            QThread.currentThread().quit()
 
 
 class LoginPage(QWidget):
     photographer_requested = Signal(str, str, str, str)
-    resume_requested = Signal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -416,8 +330,8 @@ class LoginPage(QWidget):
         layout.addWidget(
             PageHeading(
                 "Workspace access",
-                "Sign in to OpenFotos",
-                "Use the photographer account assigned to the event workspace.",
+                "Sign in to OneNodeAI Studio",
+                "Use the photographer account assigned to the studio workspace.",
                 "Secure access",
             )
         )
@@ -430,11 +344,11 @@ class LoginPage(QWidget):
         hero_layout = QVBoxLayout(hero)
         hero_layout.setContentsMargins(30, 30, 30, 30)
         hero_layout.setSpacing(14)
-        hero_title = QLabel("Desktop media ingestion")
+        hero_title = QLabel("Event photo delivery")
         hero_title.setObjectName("HeroTitle")
         hero_copy = QLabel(
             "Prepare and validate event media before upload. Source files remain on this "
-            "workstation until the contribution is approved."
+            "workstation until the contribution is submitted."
         )
         hero_copy.setObjectName("HeroCopy")
         hero_copy.setWordWrap(True)
@@ -464,7 +378,7 @@ class LoginPage(QWidget):
         sign_in_form.setContentsMargins(20, 22, 20, 20)
         sign_in_form.setHorizontalSpacing(18)
         sign_in_form.setVerticalSpacing(14)
-        self.server = QLineEdit("https://openfotos.example")
+        self.server = QLineEdit("https://studio.example")
         self.username = QLineEdit()
         self.username.setPlaceholderText("photographer@example.com")
         self.password = QLineEdit()
@@ -489,11 +403,6 @@ class LoginPage(QWidget):
         self.error.setWordWrap(True)
         self.error.hide()
         access_layout.addWidget(self.error)
-        self.resume_button = _style_button(QPushButton("Resume saved session"), kind="ghost")
-        self.resume_button.clicked.connect(
-            lambda: self.resume_requested.emit(self.server.text().strip())
-        )
-        access_layout.addWidget(self.resume_button)
         self.notice = QLabel("Credentials are never written to the local photo checkpoint.")
         self.notice.setObjectName("InfoBanner")
         self.notice.setWordWrap(True)
@@ -570,7 +479,7 @@ class EventSelectorPage(QWidget):
         footer.addWidget(hint)
         footer.addStretch()
         self.open_button = _style_button(
-            QPushButton("Open local inventory"),
+            QPushButton("Open event"),
             kind="primary",
         )
         self.open_button.clicked.connect(self._select)
@@ -603,6 +512,7 @@ class EventSelectorPage(QWidget):
 class SubEventSelectorPage(QWidget):
     selected = Signal(object)
     back_requested = Signal()
+    watermark_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -610,10 +520,10 @@ class SubEventSelectorPage(QWidget):
         layout.setContentsMargins(52, 34, 52, 38)
         layout.setSpacing(22)
         self.heading = PageHeading(
-            "Event section",
+            "Event sections",
             "Choose where these photos belong",
             "One contribution belongs to exactly one active section.",
-            "2 of 4",
+            "2 of 3",
         )
         layout.addWidget(self.heading)
 
@@ -638,12 +548,26 @@ class SubEventSelectorPage(QWidget):
         panel_layout.addWidget(self.empty)
         layout.addWidget(panel, 1)
 
+        policy_row = QHBoxLayout()
+        self.policy_note = QLabel()
+        self.policy_note.setObjectName("BodyMuted")
+        self.policy_note.setWordWrap(True)
+        policy_row.addWidget(self.policy_note, 1)
+        self.watermark = _style_button(
+            QPushButton("Watermark settings"),
+            icon="file.svg",
+            kind="ghost",
+        )
+        self.watermark.clicked.connect(self.watermark_requested)
+        policy_row.addWidget(self.watermark)
+        layout.addLayout(policy_row)
+
         footer = QHBoxLayout()
         back = _style_button(QPushButton("Back to events"), kind="ghost")
         back.clicked.connect(self.back_requested)
         footer.addWidget(back)
         footer.addStretch()
-        self.open_button = _style_button(QPushButton("Open section"), kind="primary")
+        self.open_button = _style_button(QPushButton("Upload photos"), kind="primary")
         self.open_button.clicked.connect(self._select)
         footer.addWidget(self.open_button)
         layout.addLayout(footer)
@@ -664,6 +588,16 @@ class SubEventSelectorPage(QWidget):
         self.open_button.setEnabled(has_sub_events)
         if has_sub_events:
             self.sub_events.setCurrentRow(0)
+        if event.preview_policy is None:
+            self.policy_note.setText(
+                "Previews stay clean unless you configure an optional watermark before the "
+                "first contribution is submitted."
+            )
+        else:
+            self.policy_note.setText(
+                "Watermark settings are already recorded for this event; unpublishing does "
+                "not reopen them."
+            )
 
     @Slot()
     def _select(self) -> None:
@@ -672,27 +606,36 @@ class SubEventSelectorPage(QWidget):
             self.selected.emit(item.data(Qt.ItemDataRole.UserRole))
 
 
-class PreviewPolicyPage(QWidget):
+class WatermarkSettingsDialog(QDialog):
     confirmed = Signal(object)
-    back_requested = Signal()
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
         self._event: EventCache | None = None
         self._custom_logo_path: Path | None = None
         self._sample_path: Path | None = None
+        self._locked = False
+        self.setWindowTitle("Watermark settings")
+        self.setModal(True)
+        self.setMinimumSize(760, 460)
+
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(52, 28, 52, 34)
-        layout.setSpacing(16)
-        layout.addWidget(
-            PageHeading(
-                "Preview policy",
-                "Choose gallery preview branding",
-                "These settings are locked for the event. They affect previews only; "
-                "thumbnails stay clean and original downloads keep their exact bytes.",
-                "Event setup",
-            )
+        layout.setContentsMargins(22, 20, 22, 20)
+        layout.setSpacing(12)
+        heading = QLabel("Optional gallery watermark")
+        heading.setObjectName("SectionTitle")
+        layout.addWidget(heading)
+        self.note = QLabel()
+        self.note.setObjectName("BodyMuted")
+        self.note.setWordWrap(True)
+        layout.addWidget(self.note)
+        self.locked_note = QLabel(
+            "These settings are already recorded for this event and can no longer change."
         )
+        self.locked_note.setObjectName("InfoBanner")
+        self.locked_note.setWordWrap(True)
+        self.locked_note.hide()
+        layout.addWidget(self.locked_note)
 
         content = QHBoxLayout()
         content.setSpacing(18)
@@ -716,7 +659,7 @@ class PreviewPolicyPage(QWidget):
         self.template.currentIndexChanged.connect(self._render_preview)
         form.addRow("Template", self.template)
         self.logo = QComboBox()
-        self.logo.addItem("Built-in OFTS wordmark", WatermarkLogoKind.OFTS)
+        self.logo.addItem("OneNodeAI wordmark", WatermarkLogoKind.ONENODEAI)
         self.logo.addItem("Custom transparent PNG", WatermarkLogoKind.CUSTOM)
         self.logo.addItem("No logo", WatermarkLogoKind.NONE)
         self.logo.currentIndexChanged.connect(self._logo_changed)
@@ -726,19 +669,12 @@ class PreviewPolicyPage(QWidget):
         form.addRow("Custom file", self.custom_logo)
         self.text = QLineEdit()
         self.text.setMaxLength(MAX_WATERMARK_TEXT_LENGTH)
-        self.text.setPlaceholderText("Optional, e.g. © OFTS Studio")
+        self.text.setPlaceholderText("Optional, e.g. © OneNodeAI")
         self.text.textChanged.connect(self._render_preview)
         form.addRow("Watermark text", self.text)
         self.sample = _style_button(QPushButton("Use a local photo sample"), kind="ghost")
         self.sample.clicked.connect(self._choose_sample)
         form.addRow("Preview sample", self.sample)
-        self.note = QLabel(
-            "The sample stays on this workstation. Custom logos preserve their original "
-            "colors and transparency."
-        )
-        self.note.setObjectName("BodyMuted")
-        self.note.setWordWrap(True)
-        form.addRow(self.note)
         content.addWidget(controls, 4)
 
         preview_panel = QFrame()
@@ -749,7 +685,7 @@ class PreviewPolicyPage(QWidget):
         preview_title.setObjectName("SectionTitle")
         preview_layout.addWidget(preview_title)
         self.preview = QLabel()
-        self.preview.setMinimumSize(520, 320)
+        self.preview.setMinimumSize(480, 300)
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setStyleSheet("background: #111827; border-radius: 8px;")
         preview_layout.addWidget(self.preview, 1)
@@ -762,13 +698,13 @@ class PreviewPolicyPage(QWidget):
         layout.addLayout(content, 1)
 
         footer = QHBoxLayout()
-        self.back = _style_button(QPushButton("Back to events"), kind="ghost")
-        self.back.clicked.connect(self.back_requested)
-        self.confirm = _style_button(QPushButton("Confirm and lock settings"), kind="primary")
-        self.confirm.clicked.connect(self._confirm)
-        footer.addWidget(self.back)
         footer.addStretch()
-        footer.addWidget(self.confirm)
+        self.cancel = _style_button(QPushButton("Cancel"), kind="ghost")
+        self.cancel.clicked.connect(self.reject)
+        footer.addWidget(self.cancel)
+        self.save = _style_button(QPushButton("Save watermark settings"), kind="primary")
+        self.save.clicked.connect(self._save)
+        footer.addWidget(self.save)
         layout.addLayout(footer)
         self._watermark_toggled(False)
 
@@ -776,11 +712,48 @@ class PreviewPolicyPage(QWidget):
         self._event = event
         self._custom_logo_path = None
         self._sample_path = None
-        self.enabled.setChecked(False)
-        self.template.setCurrentIndex(0)
-        self.logo.setCurrentIndex(0)
-        self.text.clear()
-        self._render_preview()
+        self.error.clear()
+        self.error.hide()
+        policy = event.preview_policy
+        self._set_locked(policy is not None)
+        if policy is None:
+            self.note.setText(
+                "Watermarking is off. Saving clean previews locks the choice once a "
+                "contribution is submitted."
+            )
+            self.enabled.setChecked(False)
+            self.template.setCurrentIndex(0)
+            self.logo.setCurrentIndex(0)
+            self.text.clear()
+            self._render_preview()
+            return
+        self.note.setText("This event already has a locked preview setting.")
+        self.enabled.setChecked(policy.enabled)
+        self.template.setCurrentIndex(max(0, self.template.findData(policy.template)))
+        self.logo.setCurrentIndex(max(0, self.logo.findData(policy.logo_kind)))
+        self.text.setText(policy.text)
+        self.enabled.setChecked(policy.enabled)
+        if self._locked:
+            self.preview.clear()
+            self.preview.setText("Saved preview settings are locked for this event.")
+
+    def _set_locked(self, locked: bool) -> None:
+        self._locked = locked
+        self.locked_note.setVisible(locked)
+        self.save.setVisible(not locked)
+        for control in (
+            self.enabled,
+            self.template,
+            self.logo,
+            self.text,
+            self.sample,
+        ):
+            control.setEnabled(not locked)
+        self.custom_logo.setEnabled(
+            not locked
+            and self.enabled.isChecked()
+            and WatermarkLogoKind(self.logo.currentData()) is WatermarkLogoKind.CUSTOM
+        )
 
     def draft(self) -> dict:
         enabled = self.enabled.isChecked()
@@ -807,21 +780,36 @@ class PreviewPolicyPage(QWidget):
             ),
         }
 
+    def show_error(self, message: str) -> None:
+        self.error.setText(message)
+        self.error.show()
+
+    @Slot()
+    def _save(self) -> None:
+        try:
+            draft = self.draft()
+        except WatermarkCompositionError as exc:
+            self.show_error(str(exc))
+            return
+        self.confirmed.emit(draft)
+
     @Slot(bool)
     def _watermark_toggled(self, enabled: bool) -> None:
-        for control in (self.template, self.logo, self.text):
-            control.setEnabled(enabled)
-        self.custom_logo.setEnabled(
-            enabled and WatermarkLogoKind(self.logo.currentData()) is WatermarkLogoKind.CUSTOM
-        )
+        if not self._locked:
+            for control in (self.template, self.logo, self.text):
+                control.setEnabled(enabled)
+            self.custom_logo.setEnabled(
+                enabled and WatermarkLogoKind(self.logo.currentData()) is WatermarkLogoKind.CUSTOM
+            )
         self._render_preview()
 
     @Slot()
     def _logo_changed(self) -> None:
-        self.custom_logo.setEnabled(
-            self.enabled.isChecked()
-            and WatermarkLogoKind(self.logo.currentData()) is WatermarkLogoKind.CUSTOM
-        )
+        if not self._locked:
+            self.custom_logo.setEnabled(
+                self.enabled.isChecked()
+                and WatermarkLogoKind(self.logo.currentData()) is WatermarkLogoKind.CUSTOM
+            )
         self._render_preview()
 
     @Slot()
@@ -849,6 +837,8 @@ class PreviewPolicyPage(QWidget):
 
     @Slot()
     def _render_preview(self) -> None:
+        if self._locked:
+            return
         try:
             draft = self.draft()
             rendered = render_for_review(
@@ -891,97 +881,68 @@ class PreviewPolicyPage(QWidget):
         draw.text((54, 680), "LOCAL PREVIEW SAMPLE", fill="#f8fafc")
         return image
 
-    @Slot()
-    def _confirm(self) -> None:
-        try:
-            draft = self.draft()
-        except WatermarkCompositionError as exc:
-            self.error.setText(str(exc))
-            self.error.show()
-            return
-        choice = QMessageBox.question(
-            self,
-            "Lock preview settings?",
-            "These preview settings apply to every contribution and cannot change after "
-            "processing starts. Originals will remain untouched. Continue?",
-        )
-        if choice == QMessageBox.StandardButton.Yes:
-            self.confirmed.emit(draft)
 
+class UploadPage(QWidget):
+    """One page for selection, inline verification, submission, and progress."""
 
-class SelectionPage(QWidget):
     add_files_requested = Signal()
     add_folder_requested = Signal()
     remove_selection_requested = Signal()
-    scan_requested = Signal()
-    pause_requested = Signal()
+    submit_requested = Signal()
+    pause_resume_requested = Signal()
     new_batch_requested = Signal()
-    intake_requested = Signal()
-    finalize_requested = Signal()
     back_requested = Signal()
+    export_requested = Signal()
+    rescan_requested = Signal()
+    cleanup_requested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
-        self._batch_frozen = False
-        self._intake_open = True
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(52, 30, 52, 34)
-        layout.setSpacing(18)
-        layout.addWidget(
-            PageHeading(
-                "Contribution setup",
-                "Add source media",
-                "Select individual photos, complete folders, or both. "
-                "Folders are scanned recursively.",
-                "2 of 3",
-            )
-        )
+        self._batch_id: UUID | None = None
+        self._event: EventCache | None = None
+        self._store: CheckpointStore | None = None
+        self._uploadable = True
+        self._busy = False
+        self._stage_counts = {name: (0, 0) for name, _weight in _STAGE_WEIGHTS}
+        self._detail_rows: list[tuple[str, str]] = []
 
-        event_panel = QFrame()
-        event_panel.setObjectName("HeroPanel")
-        event_layout = QHBoxLayout(event_panel)
-        event_layout.setContentsMargins(22, 17, 22, 17)
-        event_copy = QVBoxLayout()
-        event_copy.setSpacing(3)
-        self.heading = QLabel()
-        self.heading.setObjectName("SectionTitle")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(52, 28, 52, 32)
+        layout.setSpacing(14)
+        self.heading = PageHeading(
+            "Contribution",
+            "Upload photos",
+            "Add photos or a folder. Verification runs inline and skipped files never block "
+            "the contribution.",
+            "3 of 3",
+        )
+        layout.addWidget(self.heading)
+
+        hero = QFrame()
+        hero.setObjectName("HeroPanel")
+        hero_layout = QHBoxLayout(hero)
+        hero_layout.setContentsMargins(22, 15, 22, 15)
+        hero_copy = QVBoxLayout()
+        hero_copy.setSpacing(3)
+        self.event_label = QLabel()
+        self.event_label.setObjectName("SectionTitle")
         self.batch_meta = QLabel()
         self.batch_meta.setObjectName("BatchMeta")
-        event_copy.addWidget(self.heading)
-        event_copy.addWidget(self.batch_meta)
-        event_layout.addLayout(event_copy, 1)
+        hero_copy.addWidget(self.event_label)
+        hero_copy.addWidget(self.batch_meta)
+        hero_layout.addLayout(hero_copy, 1)
         self.batch_status = QLabel("COLLECTING")
         self.batch_status.setObjectName("StatusBadge")
-        event_layout.addWidget(self.batch_status)
-        self.intake = _style_button(QPushButton("Close intake"), kind="ghost")
-        self.intake.clicked.connect(self.intake_requested)
-        event_layout.addWidget(self.intake)
-        self.finalize = _style_button(QPushButton("Finalize ingestion"), kind="primary")
-        self.finalize.clicked.connect(self.finalize_requested)
-        event_layout.addWidget(self.finalize)
-        layout.addWidget(event_panel)
+        hero_layout.addWidget(self.batch_status)
+        layout.addWidget(hero)
 
         source_actions = QHBoxLayout()
         source_actions.setSpacing(14)
-        self.add_files = QToolButton()
-        self.add_files.setText("Add photos")
-        self.add_files.setToolTip("Choose one or multiple individual photo files")
-        self.add_files.setIcon(_asset_icon("file.svg"))
-        self.add_files.setIconSize(QSize(30, 30))
-        self.add_files.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.add_files.setProperty("actionCard", True)
-        self.add_files.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.add_files.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_files = self._source_action("Add photos", "Choose photo files", "file.svg")
         self.add_files.clicked.connect(self.add_files_requested)
-        self.add_folder = QToolButton()
-        self.add_folder.setText("Add a folder")
-        self.add_folder.setToolTip("Choose a folder to discover photos recursively")
-        self.add_folder.setIcon(_asset_icon("folder.svg"))
-        self.add_folder.setIconSize(QSize(30, 30))
-        self.add_folder.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self.add_folder.setProperty("actionCard", True)
-        self.add_folder.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.add_folder.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_folder = self._source_action(
+            "Add a folder", "Choose a folder to discover photos recursively", "folder.svg"
+        )
         self.add_folder.clicked.connect(self.add_folder_requested)
         source_actions.addWidget(self.add_files)
         source_actions.addWidget(self.add_folder)
@@ -990,589 +951,391 @@ class SelectionPage(QWidget):
         selection_panel = QFrame()
         selection_panel.setObjectName("Panel")
         selection_layout = QVBoxLayout(selection_panel)
-        selection_layout.setContentsMargins(18, 15, 18, 16)
-        selection_layout.setSpacing(10)
+        selection_layout.setContentsMargins(18, 14, 18, 15)
+        selection_layout.setSpacing(9)
         selection_header = QHBoxLayout()
         selected_title = QLabel("Selected sources")
         selected_title.setObjectName("SectionTitle")
         self.selection_count = QLabel("0 SOURCES")
         self.selection_count.setObjectName("StatusBadge")
+        self.remove_selection = _style_button(
+            QPushButton("Remove selected"), icon="trash.svg", kind="ghost"
+        )
+        self.remove_selection.clicked.connect(self.remove_selection_requested)
         selection_header.addWidget(selected_title)
         selection_header.addStretch()
+        selection_header.addWidget(self.remove_selection)
         selection_header.addWidget(self.selection_count)
         selection_layout.addLayout(selection_header)
         self.selections = QListWidget()
         self.selections.setAlternatingRowColors(True)
-        self.selections.setMinimumHeight(130)
+        self.selections.setMinimumHeight(110)
         selection_layout.addWidget(self.selections, 1)
-        self.empty_hint = QLabel("No sources yet. Add photos, a folder, or both to begin.")
+        self.empty_hint = QLabel("No photos selected yet. Add photos, a folder, or both.")
         self.empty_hint.setObjectName("BodyMuted")
         self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         selection_layout.addWidget(self.empty_hint)
         layout.addWidget(selection_panel, 1)
 
-        self.progress_panel = QFrame()
-        self.progress_panel.setObjectName("ProgressPanel")
-        progress_layout = QVBoxLayout(self.progress_panel)
-        progress_layout.setContentsMargins(18, 13, 18, 13)
-        progress_layout.setSpacing(9)
+        verification_panel = QFrame()
+        verification_panel.setObjectName("ProgressPanel")
+        verification_layout = QVBoxLayout(verification_panel)
+        verification_layout.setContentsMargins(18, 13, 18, 14)
+        verification_layout.setSpacing(8)
+        verification_header = QHBoxLayout()
+        verification_title = QLabel("Verification")
+        verification_title.setObjectName("SectionTitle")
+        self.verification = QLabel("No files verified yet.")
+        self.verification.setObjectName("BodyMuted")
+        self.details_toggle = QToolButton()
+        self.details_toggle.setText("Details")
+        self.details_toggle.setCheckable(True)
+        self.details_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.details_toggle.toggled.connect(self._details_toggled)
+        self.details_toggle.hide()
+        verification_header.addWidget(verification_title)
+        verification_header.addWidget(self.verification, 1)
+        verification_header.addWidget(self.details_toggle)
+        verification_layout.addLayout(verification_header)
+        self.details = QListWidget()
+        self.details.setAlternatingRowColors(True)
+        self.details.setMaximumHeight(150)
+        self.details.hide()
+        verification_layout.addWidget(self.details)
+        layout.addWidget(verification_panel)
+
+        progress_panel = QFrame()
+        progress_panel.setObjectName("ProgressPanel")
+        progress_layout = QVBoxLayout(progress_panel)
+        progress_layout.setContentsMargins(18, 13, 18, 14)
+        progress_layout.setSpacing(8)
         progress_header = QHBoxLayout()
-        progress_title = QLabel("Checking local photos")
-        progress_title.setObjectName("SectionTitle")
-        self.pause = _style_button(QPushButton("Pause scan"), icon="pause.svg")
-        self.pause.clicked.connect(self.pause_requested)
-        progress_header.addWidget(progress_title)
-        progress_header.addStretch()
+        self.stage_text = QLabel("Add photos to begin.")
+        self.stage_text.setObjectName("BodyMuted")
+        self.pause = _style_button(QPushButton("Pause"), icon="pause.svg", kind="ghost")
+        self.pause.clicked.connect(self.pause_resume_requested)
+        self.pause.hide()
+        progress_header.addWidget(self.stage_text, 1)
         progress_header.addWidget(self.pause)
         progress_layout.addLayout(progress_header)
         self.progress = QProgressBar()
+        self.progress.setRange(0, _PROGRESS_SCALE)
+        self.progress.setValue(0)
         self.progress.setTextVisible(False)
         progress_layout.addWidget(self.progress)
-        self.progress_text = QLabel()
-        self.progress_text.setObjectName("BodyMuted")
-        self.progress_text.setWordWrap(True)
-        progress_layout.addWidget(self.progress_text)
-        self.progress_panel.hide()
-        layout.addWidget(self.progress_panel)
+        layout.addWidget(progress_panel)
 
-        buttons = QHBoxLayout()
+        footer = QHBoxLayout()
         self.back = _style_button(
-            QPushButton("Back to sections"),
-            icon="arrow-left.svg",
-            kind="ghost",
+            QPushButton("Back to sections"), icon="arrow-left.svg", kind="ghost"
         )
         self.back.clicked.connect(self.back_requested)
-        self.remove_selection = _style_button(
-            QPushButton("Remove selected"),
-            icon="trash.svg",
-            kind="ghost",
-        )
-        self.remove_selection.clicked.connect(self.remove_selection_requested)
-        self.scan = _style_button(
-            QPushButton("Scan and validate"),
-            kind="primary",
-        )
-        self.scan.clicked.connect(self.scan_requested)
+        self.overflow = QToolButton()
+        self.overflow.setText("More")
+        self.overflow.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self.overflow.setCursor(Qt.CursorShape.PointingHandCursor)
+        menu = QMenu(self.overflow)
+        menu.addAction("Export redacted diagnostics", self.export_requested.emit)
+        menu.addAction("Verify sources again", self.rescan_requested.emit)
+        menu.addAction("Remove local checkpoint", self.cleanup_requested.emit)
+        self.overflow.setMenu(menu)
         self.new_batch = _style_button(
-            QPushButton("New contribution"),
-            icon="plus.svg",
+            QPushButton("New contribution"), icon="plus.svg", kind="ghost"
         )
         self.new_batch.clicked.connect(self.new_batch_requested)
-        buttons.addWidget(self.back)
-        buttons.addWidget(self.remove_selection)
-        buttons.addStretch()
-        buttons.addWidget(self.new_batch)
-        buttons.addWidget(self.scan)
-        layout.addLayout(buttons)
+        self.submit = _style_button(QPushButton("Submit contribution"), kind="primary")
+        self.submit.clicked.connect(self.submit_requested)
+        footer.addWidget(self.back)
+        footer.addWidget(self.overflow)
+        footer.addStretch()
+        footer.addWidget(self.new_batch)
+        footer.addWidget(self.submit)
+        layout.addLayout(footer)
+
+    def _source_action(self, text: str, tooltip: str, icon: str) -> QToolButton:
+        button = QToolButton()
+        button.setText(text)
+        button.setToolTip(tooltip)
+        button.setIcon(_asset_icon(icon))
+        button.setIconSize(QSize(30, 30))
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        button.setProperty("actionCard", True)
+        button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        return button
 
     def show_batch(self, event: EventCache, batch_id: UUID, store: CheckpointStore) -> None:
+        self._event = event
+        self._batch_id = batch_id
+        self._store = store
         batch = store.get_batch(batch_id)
         sub_event = next(
             (value for value in event.sub_events if value.id == batch.sub_event_id),
             None,
         )
         section_name = sub_event.name if sub_event else "Archived section"
-        self.heading.setText(f"{event.name}  /  {section_name}")
+        self.event_label.setText(f"{event.name}  /  {section_name}")
         self.batch_meta.setText(f"Contribution  {batch_id}")
+        self._uploadable = event.intake_state == "open"
+        self._refresh_sources(store, batch)
+        self._refresh_status(batch)
+        self.refresh_verification(store)
+        self.refresh_progress(store, batch)
+
+    def _refresh_sources(self, store: CheckpointStore, batch) -> None:
         self.selections.clear()
-        for selection in store.list_selections(batch_id):
+        for selection in store.list_selections(batch.id):
             icon = "folder.svg" if selection.kind.value == "folder" else "file.svg"
             item = QListWidgetItem(
                 _asset_icon(icon),
                 f"{selection.kind.value.title()}    {selection.source_path}",
             )
-            item.setSizeHint(QSize(0, 48))
+            item.setSizeHint(QSize(0, 44))
             item.setData(Qt.ItemDataRole.UserRole, selection.id)
             self.selections.addItem(item)
-        self._batch_frozen = batch.frozen
-        self.batch_status.setText("FROZEN" if batch.frozen else "COLLECTING")
-        self.batch_status.setProperty("status", "ready" if batch.frozen else "collecting")
-        self.batch_status.style().unpolish(self.batch_status)
-        self.batch_status.style().polish(self.batch_status)
         count = self.selections.count()
         self.selection_count.setText(f"{count} {'SOURCE' if count == 1 else 'SOURCES'}")
         self.empty_hint.setVisible(count == 0)
-        self.add_files.setEnabled(not batch.frozen)
-        self.add_folder.setEnabled(not batch.frozen)
-        self.remove_selection.setEnabled(not batch.frozen)
-        intake_open = event.intake_state == "open"
-        self._intake_open = intake_open
-        self.intake.setText("Close intake" if intake_open else "Reopen intake")
-        self.finalize.setEnabled(not intake_open)
-        self.add_files.setEnabled(not batch.frozen and intake_open)
-        self.add_folder.setEnabled(not batch.frozen and intake_open)
-        self.remove_selection.setEnabled(not batch.frozen and intake_open)
-        self.scan.setEnabled(intake_open)
-        self.new_batch.setEnabled(intake_open)
-        self.back.setEnabled(True)
-        self.progress_panel.hide()
-        self.progress_text.clear()
+        editable = not batch.frozen and self._uploadable
+        self.add_files.setEnabled(editable)
+        self.add_folder.setEnabled(editable)
+        self.remove_selection.setEnabled(editable)
+        self.new_batch.setEnabled(self._uploadable)
 
-    def scan_started(self) -> None:
-        self.progress.setRange(0, 0)
-        self.progress_panel.show()
-        for button in (
-            self.add_files,
-            self.add_folder,
-            self.remove_selection,
-            self.scan,
-            self.new_batch,
-            self.back,
-            self.intake,
-            self.finalize,
-        ):
-            button.setEnabled(False)
-        self.progress_text.setText("Discovering and validating local files…")
+    def _refresh_status(self, batch) -> None:
+        if batch.state is BatchState.NOT_INCLUDED:
+            label, status = "NOT INCLUDED", "collecting"
+        elif batch.state is BatchState.COMPLETE:
+            label, status = "COMPLETE", "ready"
+        elif batch.state in {BatchState.APPROVED, BatchState.NEEDS_REVIEW}:
+            label, status = "READY", "ready"
+        elif batch.state in {BatchState.RESERVED, BatchState.UPLOADING}:
+            label, status = batch.state.value.upper(), "ready"
+        else:
+            label, status = "COLLECTING", "collecting"
+        self.batch_status.setText(label)
+        self.batch_status.setProperty("status", status)
+        self.batch_status.style().unpolish(self.batch_status)
+        self.batch_status.style().polish(self.batch_status)
 
-    def scan_progressed(self, progress: ScanProgress) -> None:
-        self.progress_text.setText(
-            f"Checked {progress.processed_count} files: {progress.accepted_count} accepted, "
-            f"{progress.rejected_count} rejected. Current: {progress.current_path}"
-        )
+    def refresh_verification(
+        self,
+        store: CheckpointStore,
+        *,
+        summary: ScanSummary | None = None,
+    ) -> None:
+        if self._batch_id is None:
+            return
+        batch_id = self._batch_id
+        if summary is None:
+            summary = store.summary(batch_id)
+        attention = summary.blocking_item_count + summary.blocking_issue_count
+        if summary.accepted_count == 0 and summary.rejected_count == 0 and attention == 0:
+            text = "No files verified yet."
+        else:
+            parts = [
+                f"{summary.accepted_count} accepted",
+                f"{summary.rejected_count} skipped",
+            ]
+            if attention:
+                parts.append(f"{attention} need attention")
+            text = " · ".join(parts)
+            if summary.accepted_bytes:
+                text += f" · {format_bytes(summary.accepted_bytes)}"
+        self.verification.setText(text)
+        self._detail_rows = self._verification_details(store, batch_id)
+        self.details_toggle.setVisible(bool(self._detail_rows))
+        self.details.clear()
+        for path, reason in self._detail_rows:
+            self.details.addItem(f"{path}  —  {reason}")
+        self.details.setVisible(self.details_toggle.isChecked() and bool(self._detail_rows))
+        self._update_submit_state(store, summary)
 
-    def scan_stopped(self) -> None:
-        self.progress_panel.hide()
-        self.add_files.setEnabled(not self._batch_frozen and self._intake_open)
-        self.add_folder.setEnabled(not self._batch_frozen and self._intake_open)
-        self.remove_selection.setEnabled(not self._batch_frozen and self._intake_open)
-        self.scan.setEnabled(self._intake_open)
-        self.new_batch.setEnabled(self._intake_open)
-        self.back.setEnabled(True)
-        self.intake.setEnabled(True)
-        self.finalize.setEnabled(not self._intake_open)
-
-
-class ValidationPage(QWidget):
-    approve_requested = Signal()
-    rescan_requested = Signal()
-    export_requested = Signal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(52, 30, 52, 34)
-        layout.setSpacing(18)
-        layout.addWidget(
-            PageHeading(
-                "Local inventory",
-                "Review inventory",
-                "Accepted photos are ready. Resolve any blocking rows before freezing the batch.",
-                "3 of 3",
-            )
-        )
-
-        stats = QGridLayout()
-        stats.setHorizontalSpacing(12)
-        self.accepted_stat = StatCard("Accepted", tone="success")
-        self.rejected_stat = StatCard("Rejected", tone="danger")
-        self.blocking_stat = StatCard("Blocking", tone="warning")
-        self.reused_stat = StatCard("Checkpoints reused", tone="accent")
-        for column, card in enumerate(
-            (self.accepted_stat, self.rejected_stat, self.blocking_stat, self.reused_stat)
-        ):
-            stats.addWidget(card, 0, column)
-        layout.addLayout(stats)
-
-        self.summary = QLabel()
-        self.summary.setObjectName("InfoBanner")
-        self.summary.setWordWrap(True)
-        layout.addWidget(self.summary)
-
-        review_panel = QFrame()
-        review_panel.setObjectName("Panel")
-        review_layout = QVBoxLayout(review_panel)
-        review_layout.setContentsMargins(18, 15, 18, 16)
-        review_layout.setSpacing(10)
-        review_title = QLabel("Items needing attention")
-        review_title.setObjectName("SectionTitle")
-        review_layout.addWidget(review_title)
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["Local file", "Status", "Reason"])
-        self.table.setAlternatingRowColors(True)
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.verticalHeader().setVisible(False)
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        review_layout.addWidget(self.table, 1)
-        self.review_empty = QLabel("Everything passed local validation.")
-        self.review_empty.setObjectName("BodyMuted")
-        self.review_empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        review_layout.addWidget(self.review_empty)
-        layout.addWidget(review_panel, 1)
-
-        buttons = QHBoxLayout()
-        self.approve = _style_button(
-            QPushButton("Approve contribution"),
-            kind="primary",
-        )
-        self.approve.clicked.connect(self.approve_requested)
-        self.rescan = _style_button(QPushButton("Back to sources"), icon="arrow-left.svg")
-        self.rescan.clicked.connect(self.rescan_requested)
-        self.export = _style_button(
-            QPushButton("Export redacted diagnostics"),
-            icon="download.svg",
-            kind="ghost",
-        )
-        self.export.clicked.connect(self.export_requested)
-        buttons.addWidget(self.export)
-        buttons.addStretch()
-        buttons.addWidget(self.rescan)
-        buttons.addWidget(self.approve)
-        layout.addLayout(buttons)
-
-    def show_summary(self, summary: ScanSummary, store: CheckpointStore, *, batch_id: UUID) -> None:
-        self.summary.setText(
-            f"{format_bytes(summary.accepted_bytes)} accepted and "
-            f"{format_bytes(summary.rejected_bytes)} rejected. "
-            "Only local metadata and checksums have been created; no photos were transferred."
-        )
-        self.accepted_stat.value.setText(str(summary.accepted_count))
-        self.rejected_stat.value.setText(str(summary.rejected_count))
-        self.blocking_stat.value.setText(
-            str(summary.blocking_item_count + summary.blocking_issue_count)
-        )
-        self.reused_stat.value.setText(str(summary.reused_count))
-        rows: list[tuple[str, str, str]] = []
+    def _verification_details(
+        self, store: CheckpointStore, batch_id: UUID
+    ) -> list[tuple[str, str]]:
+        rows: list[tuple[str, str]] = []
         for item in store.list_items(batch_id):
-            if item.status is not InventoryStatus.ACCEPTED:
-                rows.append(
-                    (
-                        str(item.source_path),
-                        item.status.value,
-                        item.reason.value.replace("_", " ").title() if item.reason else "",
-                    )
-                )
+            if item.status is InventoryStatus.ACCEPTED:
+                continue
+            reason = item.reason.value.replace("_", " ").title() if item.reason else ""
+            rows.append((str(item.source_path), f"{item.status.value} · {reason}"))
         for issue in store.list_scan_issues(batch_id):
+            label = "blocking" if issue.blocking else "warning"
             rows.append(
                 (
                     str(issue.source_path),
-                    "blocking" if issue.blocking else "warning",
-                    issue.reason.value.replace("_", " ").title(),
+                    f"{label} · {issue.reason.value.replace('_', ' ').title()}",
                 )
             )
-        self.table.setRowCount(len(rows))
-        for row_index, row in enumerate(rows):
-            for column_index, value in enumerate(row):
-                item = QTableWidgetItem(value)
-                if column_index == 1:
-                    color = "#ff8294" if value in {"rejected", "blocking"} else "#f7c66d"
-                    item.setForeground(QColor(color))
-                self.table.setItem(row_index, column_index, item)
-        self.review_empty.setVisible(not rows)
-        self.approve.setEnabled(summary.can_approve and summary.state is BatchState.NEEDS_REVIEW)
+        return rows
 
-
-class ApprovedPage(QWidget):
-    upload_requested = Signal(int)
-    pause_requested = Signal()
-    new_batch_requested = Signal()
-    verify_requested = Signal()
-    export_requested = Signal()
-    cleanup_requested = Signal()
-    intake_requested = Signal()
-    finalize_requested = Signal()
-    back_requested = Signal()
-
-    def __init__(self) -> None:
-        super().__init__()
-        page_layout = QVBoxLayout(self)
-        page_layout.setContentsMargins(0, 0, 0, 0)
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(52, 34, 52, 38)
-        layout.setSpacing(22)
-        layout.addWidget(
-            PageHeading(
-                "Local approval",
-                "Contribution approved",
-                "The verified batch is frozen and protected from accidental source changes.",
-                "Complete",
-            )
+    def _update_submit_state(self, store: CheckpointStore, summary: ScanSummary) -> None:
+        if self._batch_id is None:
+            return
+        batch = store.get_batch(self._batch_id)
+        if batch.state is BatchState.NOT_INCLUDED:
+            self.submit.setText("Not included in published event")
+            self.submit.setEnabled(False)
+            return
+        fully_complete = batch.state is BatchState.COMPLETE and (
+            store.derivatives_complete(batch.id) and store.face_analysis_complete(batch.id)
+        )
+        if fully_complete:
+            self.submit.setText("Contribution complete")
+            self.submit.setEnabled(False)
+            return
+        resumable = batch.state in {BatchState.RESERVED, BatchState.UPLOADING} or (
+            batch.state is BatchState.COMPLETE
+        )
+        if resumable:
+            self.submit.setText("Resume upload")
+            self.submit.setEnabled(self._uploadable and not self._busy)
+            return
+        self.submit.setText("Submit contribution")
+        self.submit.setEnabled(
+            self._uploadable
+            and not self._busy
+            and summary.can_approve
+            and batch.state in {BatchState.NEEDS_REVIEW, BatchState.APPROVED}
         )
 
-        hero = QFrame()
-        hero.setObjectName("HeroPanel")
-        hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(28, 24, 28, 24)
-        success_icon = QLabel("✓")
-        success_icon.setObjectName("SuccessMark")
-        success_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hero_layout.addWidget(success_icon, 0, Qt.AlignmentFlag.AlignTop)
-        copy = QVBoxLayout()
-        title = QLabel("Local inventory locked")
-        title.setObjectName("HeroTitle")
-        copy.addWidget(title)
-        self.message = QLabel()
-        self.message.setObjectName("HeroCopy")
-        self.message.setWordWrap(True)
-        copy.addWidget(self.message)
-        hero_layout.addLayout(copy, 1)
-        self.ready_status = QLabel("READY")
-        self.ready_status.setObjectName("StatusBadge")
-        self.ready_status.setProperty("status", "ready")
-        hero_layout.addWidget(self.ready_status, 0, Qt.AlignmentFlag.AlignTop)
-        layout.addWidget(hero)
-
-        stages = QHBoxLayout()
-        stages.setSpacing(12)
-        for number, title_text, detail in (
-            ("01", "Inventory", "Photos checked locally"),
-            ("02", "Approval", "Contribution frozen"),
-            ("03", "Cloud upload", "Ready for private transfer"),
-        ):
-            stage = QFrame()
-            stage.setObjectName("StatCard")
-            stage_layout = QVBoxLayout(stage)
-            stage_layout.setContentsMargins(18, 16, 18, 16)
-            stage_number = QLabel(number)
-            stage_number.setObjectName("PageEyebrow")
-            stage_title = QLabel(title_text)
-            stage_title.setObjectName("SectionTitle")
-            stage_detail = QLabel(detail)
-            stage_detail.setObjectName("BodyMuted")
-            if number == "03":
-                self.cloud_stage_detail = stage_detail
-            stage_layout.addWidget(stage_number)
-            stage_layout.addWidget(stage_title)
-            stage_layout.addWidget(stage_detail)
-            stages.addWidget(stage, 1)
-        layout.addLayout(stages)
-
-        transfer_panel = QFrame()
-        transfer_panel.setObjectName("Panel")
-        transfer_layout = QVBoxLayout(transfer_panel)
-        transfer_layout.setContentsMargins(22, 18, 22, 18)
-        transfer_layout.setSpacing(10)
-        transfer_heading = QHBoxLayout()
-        transfer_title = QLabel("Private cloud transfer")
-        transfer_title.setObjectName("SectionTitle")
-        transfer_heading.addWidget(transfer_title)
-        transfer_heading.addStretch()
-        transfer_heading.addWidget(QLabel("Concurrent uploads"))
-        self.transfer_limit = QSpinBox()
-        self.transfer_limit.setRange(1, 4)
-        self.transfer_limit.setValue(3)
-        transfer_heading.addWidget(self.transfer_limit)
-        transfer_layout.addLayout(transfer_heading)
-        self.upload_progress = QProgressBar()
-        self.upload_progress.setRange(0, 1)
-        self.upload_progress.setValue(0)
-        self.upload_progress.setTextVisible(False)
-        self.original_progress = self.upload_progress
-        transfer_layout.addWidget(QLabel("Originals"))
-        transfer_layout.addWidget(self.upload_progress)
-        transfer_layout.addWidget(QLabel("Gallery previews and thumbnails"))
-        self.derivative_progress = QProgressBar()
-        self.derivative_progress.setRange(0, 1)
-        self.derivative_progress.setValue(0)
-        self.derivative_progress.setTextVisible(False)
-        transfer_layout.addWidget(self.derivative_progress)
-        transfer_layout.addWidget(QLabel("Face index"))
-        self.face_progress = QProgressBar()
-        self.face_progress.setRange(0, 1)
-        self.face_progress.setValue(0)
-        self.face_progress.setTextVisible(False)
-        transfer_layout.addWidget(self.face_progress)
-        transfer_buttons = QHBoxLayout()
-        self.upload = _style_button(QPushButton("Process and upload contribution"), kind="primary")
-        self.upload.clicked.connect(lambda: self.upload_requested.emit(self.transfer_limit.value()))
-        self.pause = _style_button(QPushButton("Pause after active uploads"), kind="ghost")
-        self.pause.clicked.connect(self.pause_requested)
-        self.pause.setEnabled(False)
-        transfer_buttons.addStretch()
-        transfer_buttons.addWidget(self.pause)
-        transfer_buttons.addWidget(self.upload)
-        transfer_layout.addLayout(transfer_buttons)
-        layout.addWidget(transfer_panel)
-
-        self.event_controls = QFrame()
-        self.event_controls.setObjectName("Panel")
-        event_layout = QHBoxLayout(self.event_controls)
-        event_layout.setContentsMargins(22, 16, 22, 16)
-        event_copy = QLabel("Event controls")
-        event_copy.setObjectName("SectionTitle")
-        event_layout.addWidget(event_copy)
-        event_layout.addStretch()
-        self.intake = _style_button(QPushButton("Close intake"), kind="ghost")
-        self.intake.clicked.connect(self.intake_requested)
-        self.finalize = _style_button(QPushButton("Finalize ingestion"), kind="primary")
-        self.finalize.clicked.connect(self.finalize_requested)
-        event_layout.addWidget(self.intake)
-        event_layout.addWidget(self.finalize)
-        layout.addWidget(self.event_controls)
-
-        buttons = QHBoxLayout()
-        self.back = _style_button(
-            QPushButton("Back to sections"),
-            icon="arrow-left.svg",
-            kind="ghost",
+    def refresh_progress(self, store: CheckpointStore, batch) -> None:
+        uploads = store.list_upload_checkpoints(batch.id)
+        derivatives = store.list_derivative_checkpoints(batch.id)
+        faces = store.list_face_analysis_checkpoints(batch.id)
+        self._stage_counts["originals"] = (
+            sum(
+                checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                for checkpoint in uploads
+            ),
+            len(uploads),
         )
-        self.back.clicked.connect(self.back_requested)
-        self.new_batch = _style_button(
-            QPushButton("Create another contribution"),
-            kind="primary",
+        self._stage_counts["derivatives"] = (
+            sum(
+                checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                for checkpoint in derivatives
+            ),
+            len(derivatives),
         )
-        self.new_batch.clicked.connect(self.new_batch_requested)
-        self.verify = _style_button(QPushButton("Verify sources again"), icon="refresh.svg")
-        self.verify.clicked.connect(self.verify_requested)
-        self.export = _style_button(
-            QPushButton("Export diagnostics"),
-            icon="download.svg",
-            kind="ghost",
+        self._stage_counts["face-index"] = (
+            sum(
+                checkpoint.state
+                in {LocalFaceState.INDEXED, LocalFaceState.NO_USABLE_FACE, LocalFaceState.EXCLUDED}
+                for checkpoint in faces
+            ),
+            len(faces),
         )
-        self.export.clicked.connect(self.export_requested)
-        self.cleanup = _style_button(
-            QPushButton("Remove local checkpoint"),
-            icon="trash.svg",
-            kind="danger",
+        complete = (
+            batch.state is BatchState.COMPLETE
+            and store.derivatives_complete(batch.id)
+            and store.face_analysis_complete(batch.id)
         )
-        self.cleanup.clicked.connect(self.cleanup_requested)
-        buttons.addWidget(self.back)
-        buttons.addWidget(self.export)
-        buttons.addWidget(self.cleanup)
-        buttons.addStretch()
-        buttons.addWidget(self.verify)
-        buttons.addWidget(self.new_batch)
-        layout.addLayout(buttons)
-        layout.addStretch()
-        self.scroll.setWidget(content)
-        page_layout.addWidget(self.scroll)
-
-    def show_batch(
-        self,
-        batch_id: UUID,
-        *,
-        state: BatchState,
-        event: EventCache,
-        original_completed_count: int = 0,
-        original_total_count: int = 0,
-        excluded_count: int = 0,
-        derivative_failure_count: int = 0,
-        derivatives_complete: bool = False,
-        face_failure_count: int = 0,
-        face_analysis_complete: bool = False,
-        derivative_completed_count: int = 0,
-        derivative_total_count: int = 0,
-        face_completed_count: int = 0,
-        face_total_count: int = 0,
-    ) -> None:
-        originals_complete = state is BatchState.COMPLETE
-        complete = originals_complete and derivatives_complete and face_analysis_complete
-        self.upload_progress.setRange(0, max(original_total_count, 1))
-        self.upload_progress.setValue(original_completed_count)
-        self.derivative_progress.setRange(0, max(derivative_total_count, 1))
-        self.derivative_progress.setValue(derivative_completed_count)
-        self.face_progress.setRange(0, max(face_total_count, 1))
-        self.face_progress.setValue(face_completed_count)
-        self.ready_status.setText("READY" if complete else "PROCESSING")
-        self.ready_status.setProperty("status", "ready" if complete else "collecting")
-        self.ready_status.style().unpolish(self.ready_status)
-        self.ready_status.style().polish(self.ready_status)
         if complete:
-            if excluded_count:
-                self.message.setText(
-                    f"Batch {batch_id} is resolved with {excluded_count} photographer-approved "
-                    "exclusion(s). New photos belong in a new contribution."
-                )
-                self.cloud_stage_detail.setText("Verified originals stored; exclusions recorded")
-            else:
-                self.message.setText(
-                    f"Batch {batch_id}, its gallery media, and its face index are complete. "
-                    "New photos belong in a new contribution."
-                )
-                self.cloud_stage_detail.setText("Originals, gallery media, and face index verified")
-        elif originals_complete and derivatives_complete:
-            if face_failure_count:
-                self.message.setText(
-                    f"Batch {batch_id} has verified gallery media, but {face_failure_count} "
-                    "photo(s) need face-analysis retry or photographer review."
-                )
-                self.cloud_stage_detail.setText("Face-analysis failure")
-            else:
-                self.message.setText(
-                    f"Batch {batch_id} has verified gallery media. Face indexing is ready "
-                    "to resume on this workstation."
-                )
-                self.cloud_stage_detail.setText("Face indexing pending")
-        elif originals_complete:
-            if derivative_failure_count:
-                self.message.setText(
-                    f"Batch {batch_id} has verified originals, but {derivative_failure_count} "
-                    "photo(s) need gallery processing retry or photographer review."
-                )
-                self.cloud_stage_detail.setText("Gallery derivative failure")
-            else:
-                self.message.setText(
-                    f"Batch {batch_id} has verified originals. Gallery previews and clean "
-                    "thumbnails are ready to resume."
-                )
-                self.cloud_stage_detail.setText("Gallery processing pending")
-        else:
-            self.message.setText(
-                f"Batch {batch_id} is locally verified and ready for private upload. "
-                "New photos belong in a new contribution."
+            self.stage_text.setText("Contribution complete; every file is verified on the server.")
+            self.progress.setValue(_PROGRESS_SCALE)
+            self.pause.hide()
+            return
+        if self._busy:
+            return
+        stage = self._first_incomplete_stage()
+        if stage is None:
+            self.progress.setValue(0)
+            self.stage_text.setText(
+                "Ready to submit."
+                if batch.state is not BatchState.NOT_INCLUDED
+                else "Event published — not included."
             )
-            self.cloud_stage_detail.setText("Resume-safe transfer pending")
-        can_sync = event.intake_state == "open" or originals_complete
-        if originals_complete and derivatives_complete:
-            self.upload.setText("Resume face indexing")
-        elif originals_complete:
-            self.upload.setText("Resume gallery processing")
-        elif state in {BatchState.RESERVED, BatchState.UPLOADING}:
-            self.upload.setText("Resume upload and processing")
-        else:
-            self.upload.setText("Process and upload contribution")
-        self.upload.setEnabled(not complete and can_sync)
-        self.pause.setEnabled(False)
-        self.transfer_limit.setEnabled(True)
+            self.pause.hide()
+            return
+        self._render_stage(stage)
+        if batch.state in {BatchState.RESERVED, BatchState.UPLOADING}:
+            self.pause.setVisible(True)
+            self.pause.setText("Resume")
+            self.pause.setIcon(_asset_icon("refresh.svg"))
+            self.pause.setEnabled(True)
+            self.stage_text.setText(f"{self.stage_text.text()} — ready to resume.")
+
+    def _first_incomplete_stage(self) -> str | None:
+        for name, _weight in _STAGE_WEIGHTS:
+            completed, total = self._stage_counts[name]
+            if total and completed < total:
+                return name
+        return None
+
+    def _render_stage(self, stage: str) -> None:
+        completed, total = self._stage_counts[stage]
+        labels = {
+            "originals": "Uploading originals",
+            "derivatives": "Generating thumbnails and previews",
+            "face-index": "Embedding faces",
+        }
+        self.stage_text.setText(f"{labels[stage]} — {completed} of {total}")
+        self._render_progress_value()
+
+    def _render_progress_value(self) -> None:
+        total = 0.0
+        for name, weight in _STAGE_WEIGHTS:
+            completed, count = self._stage_counts[name]
+            if count:
+                total += weight * (completed / count)
+        self.progress.setRange(0, _PROGRESS_SCALE)
+        self.progress.setValue(round(total))
+
+    @Slot(bool)
+    def _details_toggled(self, checked: bool) -> None:
+        self.details.setVisible(checked and bool(self._detail_rows))
+
+    def scan_started(self) -> None:
+        self.progress.setRange(0, 0)
+        self.stage_text.setText("Checking local photos…")
+        for button in (self.add_files, self.add_folder, self.remove_selection, self.submit):
+            button.setEnabled(False)
         self.back.setEnabled(True)
-        self.verify.setEnabled(state is BatchState.APPROVED)
-        self.new_batch.setEnabled(event.intake_state == "open")
-        self.intake.setText("Reopen intake" if event.intake_state == "closed" else "Close intake")
-        self.finalize.setEnabled(event.intake_state == "closed")
 
-    @Slot()
-    def upload_started(self) -> None:
-        self.upload.setEnabled(False)
+    def scan_progressed(self, progress: ScanProgress) -> None:
+        self.stage_text.setText(
+            f"Checked {progress.processed_count} files: {progress.accepted_count} accepted, "
+            f"{progress.rejected_count} skipped. Current: {progress.current_path}"
+        )
+
+    def scan_stopped(self) -> None:
+        self.progress.setRange(0, _PROGRESS_SCALE)
+        if self._store is not None and self._batch_id is not None:
+            batch = self._store.get_batch(self._batch_id)
+            self._refresh_sources(self._store, batch)
+            self._refresh_status(batch)
+
+    def submit_started(self) -> None:
+        self._busy = True
+        self.pause.show()
+        self.pause.setText("Pause")
+        self.pause.setIcon(_asset_icon("pause.svg"))
         self.pause.setEnabled(True)
-        self.transfer_limit.setEnabled(False)
-        self.back.setEnabled(False)
-        self.cloud_stage_detail.setText("Uploading originals")
+        self.submit.setEnabled(False)
+        self.new_batch.setEnabled(False)
+        self.add_files.setEnabled(False)
+        self.add_folder.setEnabled(False)
+        self.remove_selection.setEnabled(False)
+        self.stage_text.setText("Preparing contribution…")
+        self.progress.setRange(0, _PROGRESS_SCALE)
 
-    @Slot(int, int)
-    def upload_progressed(self, completed: int, total: int) -> None:
-        self.original_progress.setRange(0, max(total, 1))
-        self.original_progress.setValue(completed)
-        self.cloud_stage_detail.setText(f"{completed} of {total} originals verified")
-
-    @Slot(str, int, int)
     def stage_progressed(self, stage: str, completed: int, total: int) -> None:
-        if stage == AssetVariant.ORIGINAL.value:
-            self.upload_progressed(completed, total)
-            return
-        if stage == "face-index":
-            self.face_progress.setRange(0, max(total, 1))
-            self.face_progress.setValue(completed)
-            self.cloud_stage_detail.setText(f"{completed} of {total} photos face-indexed")
-            return
-        self.derivative_progress.setRange(0, max(total, 1))
-        self.derivative_progress.setValue(completed)
-        self.cloud_stage_detail.setText(f"{completed} of {total} gallery derivatives verified")
+        name = stage if stage in self._stage_counts else "derivatives"
+        self._stage_counts[name] = (completed, total)
+        self._render_stage(name)
 
     def upload_stopped(self, *, paused: bool = False) -> None:
-        self.pause.setEnabled(False)
-        self.upload.setEnabled(True)
-        self.transfer_limit.setEnabled(True)
-        self.back.setEnabled(True)
+        self._busy = False
         if paused:
-            self.cloud_stage_detail.setText("Paused; verified files will not restart")
+            self.stage_text.setText("Paused. Verified files will not restart.")
+            self.pause.setText("Resume")
+            self.pause.setIcon(_asset_icon("refresh.svg"))
+            self.pause.setEnabled(True)
+        else:
+            self.pause.hide()
+        if self._event is not None:
+            self._uploadable = self._event.intake_state == "open"
 
 
 class MainWindow(QMainWindow):
@@ -1590,8 +1353,8 @@ class MainWindow(QMainWindow):
             apply_corporate_theme(application)
         self.store = store
         self.gateway = gateway
-        self.face_model_store = face_model_store
-        self.model_settings: FaceModelSettingsDialog | None = None
+        self.demo = demo_event is not None
+        self.face_model_store = face_model_store or FaceModelStore()
         self.current_event: EventCache | None = None
         self.current_sub_event: SubEventCache | None = None
         self.current_batch_id: UUID | None = None
@@ -1599,13 +1362,21 @@ class MainWindow(QMainWindow):
         self.scan_stop: Event | None = None
         self.upload_thread: QThread | None = None
         self.upload_stop: Event | None = None
+        self.model_thread: QThread | None = None
+        self.model_stop: Event | None = None
+        self.resume_thread: QThread | None = None
+        self.watermark_dialog: WatermarkSettingsDialog | None = None
+        self._resume_worker: ResumeWorker | None = None
+        self._model_worker: FaceModelDownloadWorker | None = None
+        self._scan_worker: ScanWorker | None = None
+        self._upload_worker: UploadWorker | None = None
 
         shell = QWidget()
         shell.setObjectName("AppShell")
         shell_layout = QVBoxLayout(shell)
         shell_layout.setContentsMargins(0, 0, 0, 0)
         shell_layout.setSpacing(0)
-        self.header = BrandHeader(demo=demo_event is not None)
+        self.header = BrandHeader(demo=self.demo)
         shell_layout.addWidget(self.header)
 
         self.stack = QStackedWidget()
@@ -1613,82 +1384,163 @@ class MainWindow(QMainWindow):
         self.login = LoginPage()
         self.events = EventSelectorPage()
         self.sub_events = SubEventSelectorPage()
-        self.preview_policy = PreviewPolicyPage()
-        self.selection = SelectionPage()
-        self.validation = ValidationPage()
-        self.approved = ApprovedPage()
-        for page in (
-            self.login,
-            self.events,
-            self.sub_events,
-            self.preview_policy,
-            self.selection,
-            self.validation,
-            self.approved,
-        ):
+        self.upload_page = UploadPage()
+        for page in (self.login, self.events, self.sub_events, self.upload_page):
             self.stack.addWidget(page)
         shell_layout.addWidget(self.stack, 1)
         self.setCentralWidget(shell)
         self.setWindowTitle("OneNodeAI Studio")
-        self.setMinimumSize(900, 650)
-        self.resize(1180, 780)
+        self.setWindowIcon(_asset_icon("logo.png"))
+        self.setMinimumSize(940, 680)
+        self.resize(1220, 820)
         self._connect_actions()
 
-        if demo_event is None:
-            cached_origins = {
-                event.server_url for event in self.store.list_events() if event.server_url
-            }
-            if len(cached_origins) == 1:
-                [origin] = cached_origins
-                self.login.server.setText(origin)
-            self.stack.setCurrentWidget(self.login)
-        else:
-            self.store.cache_event(demo_event)
-            self.events.set_events([demo_event], demo=True)
+        if self.demo:
+            self.store.cache_event(demo_event)  # type: ignore[arg-type]
+            self.events.set_events([demo_event], demo=True)  # type: ignore[list-item]
             self.stack.setCurrentWidget(self.events)
+            self.header.set_model_state("ready", "Face models not required in demo")
+        else:
+            self._prefill_server_origin()
+            self.stack.setCurrentWidget(self.login)
+            self._start_auto_resume()
+            self._start_model_download()
+
+    def _prefill_server_origin(self) -> None:
+        cached_origins = {
+            event.server_url for event in self.store.list_events() if event.server_url
+        }
+        if len(cached_origins) == 1:
+            [origin] = cached_origins
+            self.login.server.setText(origin)
 
     def _connect_actions(self) -> None:
-        self.header.settings_requested.connect(self._show_face_model_settings)
+        self.header.retry_models_requested.connect(self._retry_model_download)
+        self.header.sign_out_requested.connect(self._sign_out)
         self.login.photographer_requested.connect(self._photographer_login)
-        self.login.resume_requested.connect(self._resume_session)
         self.events.selected.connect(self._open_event)
         self.sub_events.selected.connect(self._open_sub_event)
         self.sub_events.back_requested.connect(lambda: self.stack.setCurrentWidget(self.events))
-        self.preview_policy.confirmed.connect(self._confirm_preview_policy)
-        self.preview_policy.back_requested.connect(lambda: self.stack.setCurrentWidget(self.events))
-        self.selection.add_files_requested.connect(self._add_files)
-        self.selection.add_folder_requested.connect(self._add_folder)
-        self.selection.remove_selection_requested.connect(self._remove_selection)
-        self.selection.scan_requested.connect(self._start_scan)
-        self.selection.pause_requested.connect(self._pause_scan)
-        self.selection.new_batch_requested.connect(self._new_batch)
-        self.selection.back_requested.connect(self._back_to_sub_events)
-        self.selection.intake_requested.connect(self._toggle_intake)
-        self.selection.finalize_requested.connect(self._finalize_ingestion)
-        self.validation.approve_requested.connect(self._approve_batch)
-        self.validation.rescan_requested.connect(self._show_selection)
-        self.validation.export_requested.connect(self._export_diagnostics)
-        self.approved.new_batch_requested.connect(self._new_batch)
-        self.approved.verify_requested.connect(self._show_selection)
-        self.approved.export_requested.connect(self._export_diagnostics)
-        self.approved.cleanup_requested.connect(self._cleanup_event)
-        self.approved.upload_requested.connect(self._start_upload)
-        self.approved.pause_requested.connect(self._pause_upload)
-        self.approved.intake_requested.connect(self._toggle_intake)
-        self.approved.finalize_requested.connect(self._finalize_ingestion)
-        self.approved.back_requested.connect(self._back_to_sub_events)
+        self.sub_events.watermark_requested.connect(self._open_watermark_settings)
+        self.upload_page.add_files_requested.connect(self._add_files)
+        self.upload_page.add_folder_requested.connect(self._add_folder)
+        self.upload_page.remove_selection_requested.connect(self._remove_selection)
+        self.upload_page.submit_requested.connect(self._submit_batch)
+        self.upload_page.pause_resume_requested.connect(self._pause_or_resume_upload)
+        self.upload_page.new_batch_requested.connect(self._new_batch)
+        self.upload_page.back_requested.connect(self._back_to_sub_events)
+        self.upload_page.export_requested.connect(self._export_diagnostics)
+        self.upload_page.rescan_requested.connect(self._rescan_sources)
+        self.upload_page.cleanup_requested.connect(self._cleanup_event)
+
+    # ---------- Face models ----------
+
+    def _start_model_download(self) -> None:
+        if self.face_model_store.verified_paths() is not None:
+            self.header.set_model_state("ready", "Face models ready")
+            return
+        if self.model_thread is not None:
+            return
+        self.header.set_model_state("downloading", "Downloading face models…")
+        self.model_stop = Event()
+        thread = QThread(self)
+        worker = FaceModelDownloadWorker(self.face_model_store, self.model_stop)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progressed.connect(self._model_download_progressed)
+        worker.completed.connect(self._model_download_completed)
+        worker.cancelled.connect(self._model_download_cancelled)
+        worker.failed.connect(self._model_download_failed)
+        for signal in (worker.completed, worker.cancelled, worker.failed):
+            signal.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._model_thread_finished)
+        self.model_thread = thread
+        self._model_worker = worker
+        thread.start()
 
     @Slot()
-    def _show_face_model_settings(self) -> None:
-        if self.model_settings is None:
-            self.model_settings = FaceModelSettingsDialog(
-                self.face_model_store or FaceModelStore(),
-                self,
-            )
-        self.model_settings.refresh_status()
-        self.model_settings.show()
-        self.model_settings.raise_()
-        self.model_settings.activateWindow()
+    def _retry_model_download(self) -> None:
+        if self.model_thread is not None:
+            return
+        self._start_model_download()
+
+    @Slot(int, int)
+    def _model_download_progressed(self, completed: int, total: int) -> None:
+        self.header.set_model_state(
+            "downloading",
+            f"Downloading face models — {completed} of {total}",
+        )
+
+    @Slot()
+    def _model_download_completed(self) -> None:
+        self.header.set_model_state("ready", "Face models ready")
+
+    @Slot()
+    def _model_download_cancelled(self) -> None:
+        self.header.set_model_state("error", "Face model download stopped")
+        self.header.model_retry.setToolTip("Retry the verified model download.")
+
+    @Slot(str)
+    def _model_download_failed(self, message: str) -> None:
+        self.header.set_model_state("error", "Face models unavailable")
+        self.header.model_retry.setToolTip(message)
+
+    @Slot()
+    def _model_thread_finished(self) -> None:
+        if self.model_thread is not None:
+            self.model_thread.deleteLater()
+        self.model_thread = None
+        self.model_stop = None
+        self._model_worker = None
+
+    # ---------- Sessions ----------
+
+    def _start_auto_resume(self) -> None:
+        try:
+            origin = self.gateway.saved_session_origin()
+        except Exception:  # Simple test gateways may not implement the optional probe.
+            origin = None
+        if not origin:
+            return
+        self.login.show_notice("Restoring the saved session…")
+        self.login.sign_in_button.setEnabled(False)
+        thread = QThread(self)
+        worker = ResumeWorker(self.gateway, origin)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.completed.connect(self._resume_completed)
+        worker.failed.connect(self._resume_failed)
+        for signal in (worker.completed, worker.failed):
+            signal.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._resume_thread_finished)
+        self.resume_thread = thread
+        self._resume_worker = worker
+        thread.start()
+
+    @Slot(object)
+    def _resume_completed(self, events: list[EventCache]) -> None:
+        self._show_persistence_warning()
+        for event in events:
+            self.store.cache_event(event)
+        self.header.set_session_active(True)
+        self.events.set_events(events, demo=False)
+        self.stack.setCurrentWidget(self.events)
+
+    @Slot(str)
+    def _resume_failed(self, message: str) -> None:
+        del message
+        self.login.show_notice("The saved session could not be restored. Sign in to continue.")
+        self.stack.setCurrentWidget(self.login)
+
+    @Slot()
+    def _resume_thread_finished(self) -> None:
+        if self.resume_thread is not None:
+            self.resume_thread.deleteLater()
+        self.resume_thread = None
+        self._resume_worker = None
+        self.login.sign_in_button.setEnabled(True)
 
     @Slot(str, str, str, str)
     def _photographer_login(
@@ -1711,32 +1563,34 @@ class MainWindow(QMainWindow):
             self.login.show_error(str(exc))
             return
         self.login.password.clear()
+        self.login.show_notice("Credentials are never written to the local photo checkpoint.")
         self._show_persistence_warning()
         for event in events:
             self.store.cache_event(event)
+        self.header.set_session_active(True)
         self.events.set_events(events, demo=False)
         self.stack.setCurrentWidget(self.events)
 
-    @Slot(str)
-    def _resume_session(self, server_url: str) -> None:
-        try:
-            events = list(self.gateway.resume(server_url))
-        except RuntimeError as exc:
-            self.login.show_error(str(exc))
-            return
-        self._show_persistence_warning()
-        self.events.set_events(events, demo=False)
-        self.stack.setCurrentWidget(self.events)
+    @Slot()
+    def _sign_out(self) -> None:
+        if not self.demo:
+            with contextlib.suppress(RuntimeError):
+                self.gateway.sign_out()
+        self.current_event = None
+        self.current_sub_event = None
+        self.current_batch_id = None
+        self.header.set_context("Private event ingestion")
+        self.header.set_session_active(False)
+        self.login.show_notice("You have signed out. Sign in to continue.")
+        self.stack.setCurrentWidget(self.login)
+
+    # ---------- Event navigation ----------
 
     @Slot(object)
     def _open_event(self, event: EventCache) -> None:
         self.current_event = event
         self.current_sub_event = None
         self.header.set_context(event.name)
-        if event.preview_policy is None:
-            self.preview_policy.show_event(event)
-            self.stack.setCurrentWidget(self.preview_policy)
-            return
         self._show_sub_events()
 
     def _show_sub_events(self) -> None:
@@ -1760,9 +1614,9 @@ class MainWindow(QMainWindow):
             return
         self.current_sub_event = sub_event
         self.header.set_context(f"{self.current_event.name} / {sub_event.name}")
-        self._open_event_inventory()
+        self._show_upload_page()
 
-    def _open_event_inventory(self) -> None:
+    def _show_upload_page(self) -> None:
         if self.current_event is None or self.current_sub_event is None:
             return
         event = self.current_event
@@ -1782,17 +1636,12 @@ class MainWindow(QMainWindow):
             )
         )
         batch = self.store.get_batch(self.current_batch_id)
-        if batch.state in {
-            BatchState.APPROVED,
-            BatchState.RESERVED,
-            BatchState.UPLOADING,
-            BatchState.COMPLETE,
-        }:
-            self._show_approved()
-        elif batch.state is BatchState.NEEDS_REVIEW:
-            self._show_validation(self.store.summary(batch.id))
-        else:
-            self._show_selection()
+        self.upload_page.show_batch(event, batch.id, self.store)
+        self.stack.setCurrentWidget(self.upload_page)
+        if batch.state in {BatchState.DRAFT, BatchState.SCANNING} and (
+            self.store.list_selections(batch.id)
+        ):
+            self._start_scan()
 
     def _batch_needs_attention(self, batch) -> bool:
         if batch.state in {
@@ -1813,9 +1662,24 @@ class MainWindow(QMainWindow):
             )
         return False
 
-    @Slot(object)
-    def _confirm_preview_policy(self, draft: dict) -> None:
+    # ---------- Watermark settings ----------
+
+    @Slot()
+    def _open_watermark_settings(self) -> None:
         if self.current_event is None:
+            return
+        if self.watermark_dialog is None:
+            dialog = WatermarkSettingsDialog(self)
+            dialog.confirmed.connect(self._confirm_watermark)
+            self.watermark_dialog = dialog
+        self.watermark_dialog.show_event(self.current_event)
+        self.watermark_dialog.show()
+        self.watermark_dialog.raise_()
+        self.watermark_dialog.activateWindow()
+
+    @Slot(object)
+    def _confirm_watermark(self, draft: dict) -> None:
+        if self.current_event is None or self.watermark_dialog is None:
             return
         try:
             event = self.gateway.confirm_preview_policy(
@@ -1827,12 +1691,14 @@ class MainWindow(QMainWindow):
                 mark_png=draft["mark_png"],
             )
         except RuntimeError as exc:
-            self.preview_policy.error.setText(str(exc))
-            self.preview_policy.error.show()
+            self.watermark_dialog.show_error(str(exc))
             return
         self.current_event = event
         self.store.cache_event(event)
-        self._show_sub_events()
+        self.sub_events.show_event(event)
+        self.watermark_dialog.accept()
+
+    # ---------- Sources and verification ----------
 
     @Slot()
     def _new_batch(self) -> None:
@@ -1842,14 +1708,7 @@ class MainWindow(QMainWindow):
             self.current_event.id,
             self.current_sub_event.id,
         )
-        self._show_selection()
-
-    @Slot()
-    def _show_selection(self) -> None:
-        if self.current_event is None or self.current_batch_id is None:
-            return
-        self.selection.show_batch(self.current_event, self.current_batch_id, self.store)
-        self.stack.setCurrentWidget(self.selection)
+        self._show_upload_page()
 
     @Slot()
     def _add_files(self) -> None:
@@ -1866,7 +1725,7 @@ class MainWindow(QMainWindow):
                 self.store.add_files(self.current_batch_id, paths)
             except ValueError as exc:
                 self._show_error(str(exc))
-            self._show_selection()
+            self._show_upload_page()
 
     @Slot()
     def _add_folder(self) -> None:
@@ -1878,27 +1737,50 @@ class MainWindow(QMainWindow):
                 self.store.add_folder(self.current_batch_id, path)
             except ValueError as exc:
                 self._show_error(str(exc))
-            self._show_selection()
+            self._show_upload_page()
 
     @Slot()
     def _remove_selection(self) -> None:
-        item = self.selection.selections.currentItem()
+        item = self.upload_page.selections.currentItem()
         if item is None:
             return
         try:
             self.store.remove_selection(item.data(Qt.ItemDataRole.UserRole))
         except ValueError as exc:
             self._show_error(str(exc))
-        self._show_selection()
+        self._show_upload_page()
+
+    @Slot()
+    def _rescan_sources(self) -> None:
+        if self.current_batch_id is None:
+            return
+        batch = self.store.get_batch(self.current_batch_id)
+        started_uploading = bool(self.store.list_upload_checkpoints(batch.id))
+        if (
+            batch.state
+            in {
+                BatchState.RESERVED,
+                BatchState.UPLOADING,
+                BatchState.COMPLETE,
+                BatchState.NOT_INCLUDED,
+            }
+            or started_uploading
+        ):
+            self._show_error(
+                "A contribution that started uploading cannot be reverified; "
+                "create a new contribution for changed files."
+            )
+            return
+        self._start_scan()
 
     @Slot()
     def _start_scan(self) -> None:
         if self.current_batch_id is None or self.scan_thread is not None:
             return
         if not self.store.list_selections(self.current_batch_id):
-            self._show_error("Add at least one file or folder before scanning.")
+            self.upload_page.refresh_verification(self.store)
             return
-        self.selection.scan_started()
+        self.upload_page.scan_started()
         self.scan_stop = Event()
         thread = QThread(self)
         worker = ScanWorker(
@@ -1908,7 +1790,7 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.progressed.connect(self.selection.scan_progressed)
+        worker.progressed.connect(self.upload_page.scan_progressed)
         worker.completed.connect(self._scan_completed)
         worker.cancelled.connect(self._scan_cancelled)
         worker.failed.connect(self._scan_failed)
@@ -1921,121 +1803,72 @@ class MainWindow(QMainWindow):
         thread.start()
 
     @Slot()
-    def _pause_scan(self) -> None:
-        if self.scan_stop is not None:
-            self.scan_stop.set()
-            self.selection.progress_text.setText("Pausing after the current file…")
+    def _scan_cancelled(self) -> None:
+        self.upload_page.scan_stopped()
+        self._show_upload_page()
 
     @Slot(object)
     def _scan_completed(self, summary: ScanSummary) -> None:
-        self.selection.scan_stopped()
-        if summary.state is BatchState.APPROVED and summary.warning_count == 0:
-            self._show_approved()
-        else:
-            self._show_validation(summary)
-
-    @Slot()
-    def _scan_cancelled(self) -> None:
-        self.selection.scan_stopped()
-        self.selection.progress_text.setText("Scan paused. Run it again to resume checkpoints.")
+        self.upload_page.scan_stopped()
+        self.upload_page.refresh_verification(self.store, summary=summary)
+        if self.current_batch_id is not None:
+            self.upload_page.refresh_progress(
+                self.store, self.store.get_batch(self.current_batch_id)
+            )
 
     @Slot(str)
     def _scan_failed(self, message: str) -> None:
-        self.selection.scan_stopped()
-        self._show_error(f"Inventory failed: {message}")
+        self.upload_page.scan_stopped()
+        self._show_error(f"Verification failed: {message}")
 
     @Slot()
     def _scan_thread_finished(self) -> None:
-        if self.scan_thread:
+        if self.scan_thread is not None:
             self.scan_thread.deleteLater()
         self.scan_thread = None
         self.scan_stop = None
         self._scan_worker = None
 
-    def _show_validation(self, summary: ScanSummary) -> None:
-        if self.current_batch_id is None:
-            return
-        self.validation.show_summary(summary, self.store, batch_id=self.current_batch_id)
-        self.stack.setCurrentWidget(self.validation)
+    # ---------- Submission ----------
 
     @Slot()
-    def _approve_batch(self) -> None:
-        if self.current_batch_id is None:
-            return
-        try:
-            self.store.approve_batch(
-                self.current_batch_id,
-                supported_profile_id=SUPPORTED_PROCESSING_PROFILE_ID,
-            )
-        except ValueError as exc:
-            self._show_error(str(exc))
-            return
-        self._show_approved()
-
-    def _show_approved(self) -> None:
-        if self.current_event is None or self.current_batch_id is None:
+    def _submit_batch(self) -> None:
+        if self.current_batch_id is None or self.upload_thread is not None:
             return
         batch = self.store.get_batch(self.current_batch_id)
-        upload_checkpoints = self.store.list_upload_checkpoints(batch.id)
-        derivative_checkpoints = self.store.list_derivative_checkpoints(batch.id)
-        excluded_items = {
-            checkpoint.item_id
-            for checkpoint in (*upload_checkpoints, *derivative_checkpoints)
-            if checkpoint.state is LocalUploadState.EXCLUDED
-        }
-        failed_derivative_items = {
-            checkpoint.item_id
-            for checkpoint in derivative_checkpoints
-            if checkpoint.state is LocalUploadState.FAILED
-        }
-        face_checkpoints = self.store.list_face_analysis_checkpoints(batch.id)
-        excluded_items.update(
-            checkpoint.item_id
-            for checkpoint in face_checkpoints
-            if checkpoint.state is LocalFaceState.EXCLUDED
-        )
-        failed_face_items = {
-            checkpoint.item_id
-            for checkpoint in face_checkpoints
-            if checkpoint.state in {LocalFaceState.FAILED, LocalFaceState.CONFLICT}
-        }
-        self.approved.show_batch(
-            batch.id,
-            state=batch.state,
-            event=self.current_event,
-            original_completed_count=sum(
-                checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
-                for checkpoint in upload_checkpoints
-            ),
-            original_total_count=len(upload_checkpoints),
-            excluded_count=len(excluded_items),
-            derivative_failure_count=len(failed_derivative_items),
-            derivatives_complete=self.store.derivatives_complete(batch.id),
-            face_failure_count=len(failed_face_items),
-            face_analysis_complete=self.store.face_analysis_complete(batch.id),
-            derivative_completed_count=sum(
-                checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
-                for checkpoint in derivative_checkpoints
-            ),
-            derivative_total_count=len(derivative_checkpoints),
-            face_completed_count=sum(
-                checkpoint.state
-                in {
-                    LocalFaceState.INDEXED,
-                    LocalFaceState.NO_USABLE_FACE,
-                    LocalFaceState.EXCLUDED,
-                }
-                for checkpoint in face_checkpoints
-            ),
-            face_total_count=len(face_checkpoints),
-        )
-        self.stack.setCurrentWidget(self.approved)
+        if batch.state is BatchState.DRAFT or batch.state is BatchState.SCANNING:
+            self._show_error("Let verification finish before submitting the contribution.")
+            return
+        if batch.state is BatchState.NEEDS_REVIEW:
+            summary = self.store.summary(self.current_batch_id)
+            if not summary.can_approve:
+                self._show_error(
+                    "Resolve the blocking verification items before submitting the contribution."
+                )
+                return
+            try:
+                self.store.approve_batch(
+                    self.current_batch_id,
+                    supported_profile_id=SUPPORTED_PROCESSING_PROFILE_ID,
+                )
+            except ValueError as exc:
+                self._show_error(str(exc))
+                return
+        elif batch.state not in {
+            BatchState.APPROVED,
+            BatchState.RESERVED,
+            BatchState.UPLOADING,
+            BatchState.COMPLETE,
+        }:
+            self._show_error("This contribution cannot be submitted in its current state.")
+            return
+        self._start_upload(DEFAULT_TRANSFER_LIMIT)
 
     @Slot(int)
     def _start_upload(self, transfer_limit: int) -> None:
         if self.current_batch_id is None or self.upload_thread is not None:
             return
-        self.approved.upload_started()
+        self.upload_page.submit_started()
         self.upload_stop = Event()
         thread = QThread(self)
         worker = UploadWorker(
@@ -2046,8 +1879,7 @@ class MainWindow(QMainWindow):
         )
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
-        worker.progressed.connect(self.approved.upload_progressed)
-        worker.stage_progressed.connect(self.approved.stage_progressed)
+        worker.stage_progressed.connect(self.upload_page.stage_progressed)
         worker.completed.connect(self._upload_completed)
         worker.cancelled.connect(self._upload_cancelled)
         worker.failed.connect(self._upload_failed)
@@ -2060,73 +1892,49 @@ class MainWindow(QMainWindow):
         thread.start()
 
     @Slot()
-    def _pause_upload(self) -> None:
-        if self.upload_stop is not None:
-            self.upload_stop.set()
-            self.approved.cloud_stage_detail.setText("Pausing after active uploads…")
+    def _pause_or_resume_upload(self) -> None:
+        if self.upload_thread is not None:
+            if self.upload_stop is not None:
+                self.upload_stop.set()
+                self.upload_page.pause.setText("Pausing…")
+            return
+        if self.current_batch_id is None:
+            return
+        batch = self.store.get_batch(self.current_batch_id)
+        if batch.state in {
+            BatchState.APPROVED,
+            BatchState.RESERVED,
+            BatchState.UPLOADING,
+        }:
+            self._start_upload(DEFAULT_TRANSFER_LIMIT)
 
     @Slot()
     def _upload_completed(self) -> None:
-        self._show_approved()
+        self._show_upload_page()
 
     @Slot()
     def _upload_cancelled(self) -> None:
-        self.approved.upload_stopped(paused=True)
+        self.upload_page.upload_stopped(paused=True)
 
     @Slot(str)
     def _upload_failed(self, message: str) -> None:
-        self.approved.upload_stopped()
+        self.upload_page.upload_stopped()
         self._show_error(f"Upload stopped: {message}")
 
     @Slot()
     def _upload_thread_finished(self) -> None:
-        if self.upload_thread:
+        if self.upload_thread is not None:
             self.upload_thread.deleteLater()
         self.upload_thread = None
         self.upload_stop = None
         self._upload_worker = None
 
-    @Slot()
-    def _toggle_intake(self) -> None:
-        if self.current_event is None:
-            return
-        selection_visible = self.stack.currentWidget() is self.selection
-        try:
-            if self.current_event.intake_state == "open":
-                event = self.gateway.close_intake(self.current_event.id)
-            else:
-                event = self.gateway.reopen_intake(self.current_event.id)
-        except RuntimeError as exc:
-            self._show_error(str(exc))
-            return
-        self.current_event = event
-        self.store.cache_event(event)
-        if selection_visible:
-            self._show_selection()
-        else:
-            self._show_approved()
-
-    @Slot()
-    def _finalize_ingestion(self) -> None:
-        if self.current_event is None:
-            return
-        try:
-            result = self.gateway.finalize(self.current_event.id)
-        except RuntimeError as exc:
-            self._show_error(str(exc))
-            return
-        QMessageBox.information(
-            self,
-            "Ingestion finalized",
-            f"Generation {result['generation']} committed with {result['asset_count']} originals.",
-        )
-        self.selection.finalize.setEnabled(False)
-        self.approved.finalize.setEnabled(False)
-
     def _show_persistence_warning(self) -> None:
         warning = getattr(self.gateway, "persistence_warning", None)
         if warning:
             self.login.show_notice(warning)
+
+    # ---------- Local maintenance ----------
 
     @Slot()
     def _export_diagnostics(self) -> None:
@@ -2135,7 +1943,7 @@ class MainWindow(QMainWindow):
         destination, _ = QFileDialog.getSaveFileName(
             self,
             "Export redacted diagnostics",
-            "openfotos-diagnostic.json",
+            "onenodeai-studio-diagnostic.json",
             "JSON (*.json)",
         )
         if destination:
@@ -2150,7 +1958,7 @@ class MainWindow(QMainWindow):
         choice = QMessageBox.question(
             self,
             "Remove local checkpoint?",
-            "This removes local OpenFotos paths and checksums for this event. "
+            "This removes local OneNodeAI Studio paths and checksums for this event. "
             "It never deletes source photographs. Continue?",
         )
         if choice != QMessageBox.StandardButton.Yes:
@@ -2165,13 +1973,16 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.events if remaining else self.login)
 
     def _show_error(self, message: str) -> None:
-        QMessageBox.critical(self, "OpenFotos", message)
+        QMessageBox.critical(self, "OneNodeAI Studio", message)
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self.model_settings is not None and self.model_settings.is_busy:
-            self.model_settings.show()
-            self.model_settings.raise_()
-            self.model_settings.activateWindow()
+        if self.model_thread is not None:
+            if self.model_stop is not None:
+                self.model_stop.set()
+            if not self.model_thread.wait(5_000):
+                event.ignore()
+                return
+        if self.resume_thread is not None and not self.resume_thread.wait(5_000):
             event.ignore()
             return
         if self.scan_stop is not None:

@@ -23,6 +23,7 @@ from .batch_sync import operation_key as _operation_key
 from .credentials import RefreshTokenStore
 from .errors import DesktopApiError
 from .errors import SourceChangedError as SourceChangedError
+from .face_models import FaceModelStore, create_accepted_face_engine
 from .ingestion import CheckpointStore, EventCache, PreviewPolicyCache, SubEventCache
 from .object_transfer import ObjectTransferClient
 
@@ -40,6 +41,7 @@ class DesktopNetworkService:
         sleeper=time.sleep,
         jitter=random.uniform,
         face_engine_factory: Callable[[], FaceEngine] | None = None,
+        face_model_store: FaceModelStore | None = None,
     ) -> None:
         self.store = store
         self._api = AuthenticatedApiClient(
@@ -48,6 +50,11 @@ class DesktopNetworkService:
             client=api_client,
         )
         self._objects = ObjectTransferClient(storage_client)
+        if face_engine_factory is None and face_model_store is not None:
+
+            def face_engine_factory() -> FaceEngine:
+                return create_accepted_face_engine(face_model_store)
+
         self._batch_sync = BatchSyncService(
             store,
             request=self._request,
@@ -55,6 +62,7 @@ class DesktopNetworkService:
             objects=self._objects,
             sleeper=sleeper,
             jitter=jitter,
+            ensure_preview_policy=self._ensure_clean_preview_policy,
             **(
                 {"face_engine_factory": face_engine_factory}
                 if face_engine_factory is not None
@@ -99,22 +107,18 @@ class DesktopNetworkService:
         response = self._api.resume(origin)
         return self._cache_events(origin, response["events"])
 
-    def close_intake(self, event_id: UUID) -> EventCache:
-        return self._event_action(event_id, "intake/close")
+    def saved_session_origin(self) -> str | None:
+        """Return the only cached server origin holding a saved refresh token, if any."""
+        origins = {event.server_url for event in self.store.list_events() if event.server_url}
+        if len(origins) != 1:
+            return None
+        [origin] = origins
+        if self._api.saved_refresh_token(origin) is None:
+            return None
+        return origin
 
-    def reopen_intake(self, event_id: UUID) -> EventCache:
-        return self._event_action(event_id, "intake/reopen")
-
-    def finalize(self, event_id: UUID) -> dict:
-        event = self.store.get_event(event_id)
-        return self._request(
-            "POST",
-            f"/api/v1/events/{event_id}/finalize/",
-            json={},
-            idempotency_key=_operation_key(
-                event_id, f"finalize:generation:{event.intake_generation}"
-            ),
-        )
+    def sign_out(self) -> None:
+        self._api.end_session()
 
     def confirm_preview_policy(
         self,
@@ -140,6 +144,17 @@ class DesktopNetworkService:
         )
         return self._refresh_cached_event(event_id)
 
+    def _ensure_clean_preview_policy(self, event_id: UUID) -> EventCache:
+        """Record clean previews when the photographer never opened the watermark dialog."""
+        return self.confirm_preview_policy(
+            event_id,
+            enabled=False,
+            template=WatermarkTemplate.COMPACT_BOTTOM_RIGHT,
+            text="",
+            logo_kind=WatermarkLogoKind.NONE,
+            mark_png=b"",
+        )
+
     def upload(
         self,
         batch_id: UUID,
@@ -157,25 +172,14 @@ class DesktopNetworkService:
             on_stage=on_stage,
         )
 
-    def _event_action(self, event_id: UUID, action: str) -> EventCache:
-        event = self.store.get_event(event_id)
-        response = self._request(
-            "POST",
-            f"/api/v1/events/{event_id}/{action}/",
-            json={},
-            idempotency_key=_operation_key(
-                event_id, f"{action}:generation:{event.intake_generation}"
-            ),
-        )
-        return self._cache_events(self._api.server_url, [response])[0]
-
     def _refresh_cached_event(self, event_id: UUID) -> EventCache:
         response = self._request("GET", "/api/v1/events/")
         try:
             matches = [value for value in response["events"] if UUID(value["id"]) == event_id]
         except (KeyError, TypeError, ValueError) as exc:
             raise DesktopApiError(
-                "invalid_server_response", "The OpenFotos server returned an invalid response."
+                "invalid_server_response",
+                "The OneNodeAI Studio server returned an invalid response.",
             ) from exc
         if not matches:
             raise DesktopApiError("event_not_found", "The event is no longer available.")
@@ -198,7 +202,8 @@ class DesktopNetworkService:
                     "This desktop version cannot process the event's gallery profile.",
                 ) from exc
             raise DesktopApiError(
-                "invalid_server_response", "The OpenFotos server returned an invalid response."
+                "invalid_server_response",
+                "The OneNodeAI Studio server returned an invalid response.",
             ) from exc
         events = []
         for snapshot in snapshots:
@@ -264,7 +269,7 @@ class DesktopNetworkService:
 def _server_origin(value: str) -> str:
     parsed = urlparse(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
-        raise DesktopApiError("invalid_server_url", "Enter a valid OpenFotos server URL.")
+        raise DesktopApiError("invalid_server_url", "Enter a valid OneNodeAI Studio server URL.")
     local_hostname = parsed.hostname == "localhost" or parsed.hostname.endswith(".localhost")
     if (
         parsed.scheme != "https"
@@ -272,10 +277,12 @@ def _server_origin(value: str) -> str:
         and parsed.hostname not in {"127.0.0.1", "::1"}
     ):
         raise DesktopApiError(
-            "invalid_server_url", "OpenFotos requires HTTPS except for a local test server."
+            "invalid_server_url", "OneNodeAI Studio requires HTTPS except for a local test server."
         )
     if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-        raise DesktopApiError("invalid_server_url", "Enter the OpenFotos server origin only.")
+        raise DesktopApiError(
+            "invalid_server_url", "Enter the OneNodeAI Studio server origin only."
+        )
     return f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
 
 

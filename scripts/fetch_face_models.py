@@ -55,7 +55,7 @@ def _download_verified(artifact: Artifact, target: Path, *, opener) -> None:
     digest = hashlib.sha256()
     written = 0
     try:
-        request = Request(artifact.url, headers={"User-Agent": "OpenFotos-model-fetch/1"})
+        request = Request(artifact.url, headers={"User-Agent": "OneNodeAI-Studio-model-fetch/1"})
         with opener(request, timeout=120) as response, os.fdopen(descriptor, "wb") as output:
             final_url = response.geturl()
             if urlparse(final_url).scheme != "https":

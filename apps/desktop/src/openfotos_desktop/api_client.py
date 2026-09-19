@@ -57,6 +57,28 @@ class AuthenticatedApiClient:
         self._refresh()
         return self.request("GET", "/api/v1/events/")
 
+    def saved_refresh_token(self, origin: str) -> str | None:
+        return self.token_store.load(origin, self.installation_id)
+
+    def end_session(self) -> None:
+        """Revoke the server session when reachable, then forget the local refresh token."""
+        session = self._session
+        self._session = None
+        if session is None:
+            return
+        if session.refresh_token:
+            try:
+                self._public_post(
+                    session.server_url,
+                    "/api/v1/auth/logout/",
+                    {"refresh_token": session.refresh_token},
+                )
+            except DesktopApiError:
+                # A local sign-out must succeed even when the server cannot be reached.
+                pass
+            finally:
+                self.token_store.delete(session.server_url, self.installation_id)
+
     def request(self, method: str, path: str, *, json=None, idempotency_key=None) -> dict:
         session = self._require_session()
         headers = {"Authorization": f"Bearer {session.access_token}"}
@@ -79,7 +101,7 @@ class AuthenticatedApiClient:
         except httpx.HTTPError as exc:
             raise DesktopApiError(
                 "server_unavailable",
-                "The OpenFotos server could not be reached.",
+                "The OneNodeAI Studio server could not be reached.",
                 retryable=True,
             ) from exc
 
@@ -104,7 +126,7 @@ class AuthenticatedApiClient:
         except httpx.HTTPError as exc:
             raise DesktopApiError(
                 "server_unavailable",
-                "The OpenFotos server could not be reached.",
+                "The OneNodeAI Studio server could not be reached.",
                 retryable=True,
             ) from exc
         return _response_json(response)
@@ -129,17 +151,17 @@ def _response_json(response: httpx.Response) -> dict:
         body = response.json()
     except ValueError as exc:
         raise DesktopApiError(
-            "invalid_server_response", "The OpenFotos server returned an invalid response."
+            "invalid_server_response", "The OneNodeAI Studio server returned an invalid response."
         ) from exc
     if response.is_error:
         error = body.get("error", {}) if isinstance(body, dict) else {}
         raise DesktopApiError(
             str(error.get("code", "server_error")),
-            str(error.get("message", "The OpenFotos request failed.")),
+            str(error.get("message", "The OneNodeAI Studio request failed.")),
             retryable=bool(error.get("retryable")),
         )
     if not isinstance(body, dict):
         raise DesktopApiError(
-            "invalid_server_response", "The OpenFotos server returned an invalid response."
+            "invalid_server_response", "The OneNodeAI Studio server returned an invalid response."
         )
     return body

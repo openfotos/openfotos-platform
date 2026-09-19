@@ -20,8 +20,8 @@ def application():
 
 def test_builtin_wordmark_and_unicode_text_produce_a_transparent_png() -> None:
     content = compose_watermark_mark(
-        logo_kind=WatermarkLogoKind.OFTS,
-        text="OFTS · विवाह",
+        logo_kind=WatermarkLogoKind.ONENODEAI,
+        text="OneNodeAI · विवाह",
     )
 
     with Image.open(BytesIO(content)) as image:

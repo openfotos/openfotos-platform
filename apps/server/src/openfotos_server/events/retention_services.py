@@ -23,9 +23,7 @@ from .models import (
     Event,
     FaceAnalysis,
     FaceSearchResultSet,
-    GuestCapability,
     IngestionManifest,
-    OwnerCapability,
     PortalCapability,
     PreviewPolicy,
     SubEvent,
@@ -226,8 +224,6 @@ def _delete_and_verify_objects(object_store: S3ObjectStore, keys: set[str]) -> N
 
 def _delete_visitor_access(event: Event) -> None:
     FaceSearchResultSet.objects.filter(event=event).delete()
-    GuestCapability.objects.filter(owner__event=event).delete()
-    OwnerCapability.objects.filter(event=event).delete()
     PortalCapability.objects.filter(event=event).delete()
 
 

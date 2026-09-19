@@ -1,4 +1,4 @@
-# OpenFotos production runbook
+# OneNodeAI Studio production runbook
 
 This runbook is the source of truth for the isolated rehearsal and the clean first production
 deployment. Do not paste a secret, certificate, database URL, API token, photograph, or model file
@@ -42,7 +42,7 @@ access.
    sslmode=verify-full&sslrootcert=/tmp/openfotos-supabase-ca.pem&options=-csearch_path%3Dopenfotos%2Cextensions
    ```
 
-   OpenFotos also explicitly sets and verifies `openfotos,extensions` after every deployed
+   OneNodeAI Studio also explicitly sets and verifies `openfotos,extensions` after every deployed
    PostgreSQL connection because a pooler may discard URL startup options. A migration run is not
    accepted until `django_migrations` and `auth_user` exist in `openfotos` and are absent from
    `public`.
@@ -134,8 +134,10 @@ access.
    published `SHA256SUMS`; record the hashes and smoke-test results.
 4. Upload only the consented rehearsal set. The three reference files in
    `private_benchmark_media/myphotos` remain local and ignored by Git.
-5. Exercise: event create, multi-batch upload, pause/resume, retry, publish, PIN unlock, gallery,
-   reference search, download, capability revocation, password reset, and workstation revocation.
+5. Exercise: event create, multi-batch upload, pause/resume, retry, publish with an unfinished batch,
+   PIN unlock, whole-event gallery, reference search, exact-original download, PIN rotation,
+   unpublish/re-publish, password reset, and workstation revocation. Confirm public gallery URLs use
+   `/portfolio/events/<event-slug>/` and contain no capability UUID.
 6. Run gallery and unlock load checks from a trusted machine:
 
    ```text
@@ -161,7 +163,8 @@ access.
    `python apps/server/manage.py report_event_retention --days-ahead 7`. Both use the same TLS
    wrapper and runtime URL. Never schedule `purge_expired_event_media`; event purge requires studio
    confirmation and `--confirm`.
-9. Rehearse an R2 outage, leaked-link revocation, photographer password reset, pepper rotation,
+9. Rehearse an R2 outage, leaked-link containment by PIN rotation and unpublish, photographer
+   password reset, pepper rotation,
    whole-event privacy erasure, due retention purge, and the incident contacts below.
 10. Restore the daily database backup into a separate Supabase project, point a temporary Railway
     service at an empty rehearsal bucket, and verify schema, row counts, login, and expected missing
@@ -197,8 +200,9 @@ production superuser, photographer account, tenant, and membership.
 
 ## Incident response
 
-Contain first: unpublish the affected event, revoke capabilities or credentials, rotate the exposed
-secret, and block traffic if necessary. Do not wait for root-cause certainty. Notify Ballads of Love
+Contain first: unpublish an affected event and rotate its event PIN; revoke account or provider
+credentials when those credentials are implicated, and block traffic if necessary. There are no
+separate share links to revoke. Do not wait for root-cause certainty. Notify Ballads of Love
 within four hours of a suspected privacy or access incident, using a private channel. Include what is
 known, containment, affected event IDs (not names or photos), next update time, and required studio
 action. Preserve privacy-safe Railway/Django audit evidence; never export request bodies, private

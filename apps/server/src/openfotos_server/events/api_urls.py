@@ -7,6 +7,7 @@ app_name = "desktop-api"
 urlpatterns = [
     path("auth/login/", api.login, name="login"),
     path("auth/refresh/", api.refresh, name="refresh"),
+    path("auth/logout/", api.logout, name="logout"),
     path("events/", api.events, name="events"),
     path("events/<uuid:event_id>/batches/", api.reserve_batch, name="reserve-batch"),
     path(
@@ -81,9 +82,6 @@ urlpatterns = [
         api.face_analysis_failure,
         name="face-analysis-failure",
     ),
-    path("events/<uuid:event_id>/intake/close/", api.intake_action, {"action": "close"}),
-    path("events/<uuid:event_id>/intake/reopen/", api.intake_action, {"action": "reopen"}),
-    path("events/<uuid:event_id>/finalize/", api.finalize, name="finalize"),
     path(
         "events/<uuid:event_id>/installations/<uuid:installation_id>/revoke/",
         api.revoke_installation_view,

@@ -34,6 +34,11 @@ RESERVED_PHOTOGRAPHER_SLUGS = frozenset({"admin", "api", "media", "static", "www
 PIN_PATTERN = re.compile(r"[0-9]{4}\Z")
 SHA256_VALIDATOR = RegexValidator(r"^[0-9a-f]{64}$", "Enter a lowercase SHA-256 digest.")
 MD5_VALIDATOR = RegexValidator(r"^[A-Za-z0-9+/]{22}==$", "Enter a base64-encoded MD5 digest.")
+EVENT_SLUG_MAX_LENGTH = 200
+EVENT_SLUG_VALIDATOR = RegexValidator(
+    regex=r"^[a-z0-9]+(?:-[a-z0-9]+)*$",
+    message="Use lowercase letters, digits, and single hyphens.",
+)
 
 
 def generate_event_token() -> str:
@@ -75,17 +80,12 @@ class AuditAction(models.TextChoices):
     EVENT_MEDIA_PURGED = "event.media_purged", "Event media purged"
     PHOTOGRAPHER_LOGIN = "photographer.login", "Photographer login"
     PHOTOGRAPHER_LOGOUT = "photographer.logout", "Photographer logout"
-    OWNER_CAPABILITY_ISSUED = "owner_capability.issued", "Owner capability issued"
-    OWNER_CAPABILITY_REVOKED = "owner_capability.revoked", "Owner capability revoked"
-    OWNER_PIN_UNLOCK = "owner_capability.pin_unlock", "Owner PIN unlock"
-    GUEST_CAPABILITY_CREATED = "guest_capability.created", "Guest capability created"
-    GUEST_CAPABILITY_REVOKED = "guest_capability.revoked", "Guest capability revoked"
-    GUEST_PIN_UNLOCK = "guest_capability.pin_unlock", "Guest PIN unlock"
     SHARE_ACCESS_RESET = "share_access.reset", "Share access reset"
     FACE_SEARCH_COMPLETED = "face_search.completed", "Face search completed"
     FACE_SEARCH_REJECTED = "face_search.rejected", "Face search rejected"
     ORIGINAL_DOWNLOAD_ISSUED = "original_download.issued", "Original download issued"
     DESKTOP_LOGIN = "desktop.login", "Desktop login"
+    DESKTOP_LOGOUT = "desktop.logout", "Desktop sign out"
     DESKTOP_TOKEN_REFRESH = "desktop.token_refresh", "Desktop token refresh"
     SUB_EVENT_CREATED = "sub_event.created", "Sub-event created"
     SUB_EVENT_CHANGED = "sub_event.changed", "Sub-event changed"
@@ -107,6 +107,10 @@ class AuditAction(models.TextChoices):
     EVENT_INTAKE_CLOSED = "event.intake_closed", "Event intake closed"
     EVENT_INTAKE_REOPENED = "event.intake_reopened", "Event intake reopened"
     EVENT_INGESTION_FINALIZED = "event.ingestion_finalized", "Event ingestion finalized"
+    EVENT_PUBLICATION_SNAPSHOT = (
+        "event.publication_snapshot",
+        "Event publication snapshot committed",
+    )
     PREVIEW_POLICY_CONFIRMED = "preview_policy.confirmed", "Preview policy confirmed"
     DERIVATIVE_UPLOAD_VERIFIED = "derivative_upload.verified", "Derivative upload verified"
     DERIVATIVE_FAILED = "derivative.failed", "Derivative failed"
@@ -126,8 +130,6 @@ class AuditResult(models.TextChoices):
 
 class RateLimitPurpose(models.TextChoices):
     PHOTOGRAPHER_LOGIN = "photographer_login", "Photographer login"
-    OWNER_PIN = "owner_pin", "Owner PIN"
-    GUEST_PIN = "guest_pin", "Guest PIN"
     PORTAL_PIN = "portal_pin", "Portfolio PIN"
     FACE_SEARCH_CLIENT = "face_search_client", "Face search by client"
     FACE_SEARCH_CAPABILITY = "face_search_capability", "Face search by capability"
@@ -178,7 +180,7 @@ class Photographer(models.Model):
         super().clean()
         self.slug = self.slug.lower()
         if self.slug in RESERVED_PHOTOGRAPHER_SLUGS:
-            raise ValidationError({"slug": "This hostname is reserved by OpenFotos."})
+            raise ValidationError({"slug": "This hostname is reserved by OneNodeAI Studio."})
 
     def save(self, *args, **kwargs) -> None:
         self.slug = self.slug.lower()
@@ -226,6 +228,13 @@ class Event(models.Model):
         related_name="events",
     )
     name = models.CharField(max_length=200)
+    slug = models.SlugField(
+        max_length=EVENT_SLUG_MAX_LENGTH,
+        blank=True,
+        null=True,
+        editable=False,
+        validators=[EVENT_SLUG_VALIDATOR],
+    )
     cover_object_key = models.CharField(max_length=255, blank=True)
     cover_sha256 = models.CharField(max_length=64, blank=True, validators=[SHA256_VALIDATOR])
     cover_width = models.PositiveIntegerField(blank=True, null=True)
@@ -285,6 +294,10 @@ class Event(models.Model):
 
     class Meta:
         constraints = [
+            models.UniqueConstraint(
+                fields=("photographer", "slug"),
+                name="unique_photographer_event_slug",
+            ),
             models.CheckConstraint(
                 condition=~Q(state=EventState.PUBLISHED.value) | Q(expires_at__isnull=False),
                 name="published_event_has_expiry",
@@ -397,15 +410,6 @@ class PinCapability(models.Model):
         return self.revoked_at is None and self.expires_at > checked_at
 
 
-class ShareCapability(PinCapability):
-    """High-entropy URL secret state shared by owner and guest capabilities."""
-
-    secret_digest = models.CharField(max_length=64, unique=True, validators=[SHA256_VALIDATOR])
-
-    class Meta:
-        abstract = True
-
-
 class PortalCapability(PinCapability):
     event = models.OneToOneField(
         Event,
@@ -417,65 +421,10 @@ class PortalCapability(PinCapability):
         return f"Portfolio access for {self.event}"
 
 
-class OwnerCapability(ShareCapability):
-    event = models.OneToOneField(
-        Event,
-        on_delete=models.PROTECT,
-        related_name="owner_capability",
-    )
-    created_by = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
-        on_delete=models.PROTECT,
-        related_name="issued_openfotos_owner_capabilities",
-    )
-
-    def __str__(self) -> str:
-        return f"Owner access for {self.event}"
-
-
-class GuestCapability(ShareCapability):
-    owner = models.ForeignKey(
-        OwnerCapability,
-        on_delete=models.PROTECT,
-        related_name="guest_capabilities",
-    )
-    sub_event = models.ForeignKey(
-        SubEvent,
-        blank=True,
-        null=True,
-        on_delete=models.PROTECT,
-        related_name="guest_capabilities",
-    )
-    label = models.CharField(max_length=80, blank=True)
-
-    class Meta:
-        ordering = ("-created_at", "id")
-
-    def __str__(self) -> str:
-        scope = self.sub_event.name if self.sub_event_id else "All Photos"
-        return f"Guest access to {scope}"
-
-
 class FaceSearchResultSet(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
-    owner_capability = models.ForeignKey(
-        OwnerCapability,
-        blank=True,
-        null=True,
-        on_delete=models.CASCADE,
-        related_name="face_search_results",
-    )
-    guest_capability = models.ForeignKey(
-        GuestCapability,
-        blank=True,
-        null=True,
-        on_delete=models.CASCADE,
-        related_name="face_search_results",
-    )
     portal_capability = models.ForeignKey(
         PortalCapability,
-        blank=True,
-        null=True,
         on_delete=models.CASCADE,
         related_name="face_search_results",
     )
@@ -492,28 +441,6 @@ class FaceSearchResultSet(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        constraints = [
-            models.CheckConstraint(
-                condition=(
-                    Q(
-                        owner_capability__isnull=False,
-                        guest_capability__isnull=True,
-                        portal_capability__isnull=True,
-                    )
-                    | Q(
-                        owner_capability__isnull=True,
-                        guest_capability__isnull=False,
-                        portal_capability__isnull=True,
-                    )
-                    | Q(
-                        owner_capability__isnull=True,
-                        guest_capability__isnull=True,
-                        portal_capability__isnull=False,
-                    )
-                ),
-                name="face_search_has_one_capability",
-            )
-        ]
         indexes = [models.Index(fields=("expires_at",), name="face_search_expiry_idx")]
 
 
@@ -590,7 +517,9 @@ class ContributionBatch(models.Model):
     intake_generation = models.PositiveIntegerField()
     state = models.CharField(
         max_length=16,
-        choices=tuple((state.value, state.value.title()) for state in ContributionState),
+        choices=tuple(
+            (state.value, state.value.replace("_", " ").title()) for state in ContributionState
+        ),
         default=ContributionState.RESERVED.value,
     )
     label = models.CharField(max_length=100, blank=True)

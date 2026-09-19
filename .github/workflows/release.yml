@@ -64,10 +64,10 @@ jobs:
         include:
           - platform: windows
             runner: windows-2025
-            bundle: dist/OpenFotos
+            bundle: dist/OneNodeAIStudio
           - platform: macos
             runner: macos-15
-            bundle: dist/OpenFotos.app
+            bundle: dist/OneNodeAI Studio.app
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -93,7 +93,7 @@ jobs:
       - run: uv run python scripts/release_artifacts.py archive ${{ matrix.platform }} "${{ matrix.bundle }}" release
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          name: openfotos-${{ matrix.platform }}
+          name: onenodeai-studio-${{ matrix.platform }}
           path: release/*
           if-no-files-found: error
 
@@ -106,7 +106,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: openfotos-*
+          pattern: onenodeai-studio-*
           path: release
           merge-multiple: true
       - run: python scripts/release_artifacts.py checksums release
@@ -119,5 +119,5 @@ jobs:
           --draft
           --prerelease
           --verify-tag
-          --title "OpenFotos ${{ github.ref_name }} supervised pilot"
-          --notes-file docs/release/v0.1.0.md
+          --title "OneNodeAI Studio ${{ github.ref_name }} supervised pilot"
+          --notes-file docs/release/v0.1.1.md

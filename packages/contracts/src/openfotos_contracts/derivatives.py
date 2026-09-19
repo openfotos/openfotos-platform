@@ -24,7 +24,7 @@ class WatermarkTemplate(StrEnum):
 
 class WatermarkLogoKind(StrEnum):
     NONE = "none"
-    OFTS = "ofts"
+    ONENODEAI = "onenodeai"
     CUSTOM = "custom"
 
 

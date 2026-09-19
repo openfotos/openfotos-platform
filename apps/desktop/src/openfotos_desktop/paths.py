@@ -12,6 +12,8 @@ def user_data_directory() -> Path:
         parent = Path.home() / "Library" / "Application Support"
     else:
         parent = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share"))
+    # The directory name is a storage identity, not a user-visible product label; renaming it
+    # would silently discard every existing workstation checkpoint.
     destination = parent / "OpenFotos"
     destination.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "nt":

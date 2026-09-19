@@ -21,11 +21,9 @@ class PhotographerSessionGateway(Protocol):
 
     def resume(self, server_url: str) -> Sequence[EventCache]: ...
 
-    def close_intake(self, event_id: UUID) -> EventCache: ...
+    def saved_session_origin(self) -> str | None: ...
 
-    def reopen_intake(self, event_id: UUID) -> EventCache: ...
-
-    def finalize(self, event_id: UUID) -> dict: ...
+    def sign_out(self) -> None: ...
 
     def confirm_preview_policy(
         self,
@@ -69,7 +67,7 @@ class Session3Gateway:
 
     _MESSAGE = (
         "Online photographer authentication is delivered in Session 4. "
-        "Launch with --demo to exercise Session 3 local inventory."
+        "Launch with --demo to exercise local inventory."
     )
 
     def sign_in_photographer(
@@ -86,17 +84,11 @@ class Session3Gateway:
         del server_url
         raise OnlineServicesUnavailable(self._MESSAGE)
 
-    def close_intake(self, event_id: UUID) -> EventCache:
-        del event_id
-        raise OnlineServicesUnavailable(self._MESSAGE)
+    def saved_session_origin(self) -> str | None:
+        return None
 
-    def reopen_intake(self, event_id: UUID) -> EventCache:
-        del event_id
-        raise OnlineServicesUnavailable(self._MESSAGE)
-
-    def finalize(self, event_id: UUID) -> dict:
-        del event_id
-        raise OnlineServicesUnavailable(self._MESSAGE)
+    def sign_out(self) -> None:
+        return None
 
     def confirm_preview_policy(
         self,

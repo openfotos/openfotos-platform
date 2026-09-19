@@ -9,7 +9,7 @@ from django.contrib.auth import get_user_model
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.core.management import call_command
 from django.core.management.base import CommandError
-from django.db import connection
+from django.db import IntegrityError, connection, transaction
 from django.test import Client, RequestFactory
 from django.urls import reverse
 from django.utils import timezone
@@ -31,16 +31,11 @@ from openfotos_server.events.models import (
     FaceSearchResultSet,
     Photographer,
     PhotographerMembership,
+    PortalCapability,
     RateLimitPurpose,
     SubEvent,
 )
 from openfotos_server.events.rate_limits import consume_attempt
-from openfotos_server.events.sharing_services import (
-    ShareAccessError,
-    create_guest_capability,
-    issue_owner_capability,
-    revoke_owner_capability,
-)
 from openfotos_storage import PresignedGet
 from openfotos_vision import (
     ACCEPTED_FACE_MODEL_CONTRACT,
@@ -120,6 +115,7 @@ def _event_context(*, slug="alpha", expires_in_days=500):
     event = Event.objects.create(
         photographer=photographer,
         name="Private Wedding",
+        slug=f"private-wedding-{slug}",
         state=EventState.PUBLISHED.value,
         expires_at=timezone.now() + timedelta(days=expires_in_days),
     )
@@ -128,19 +124,21 @@ def _event_context(*, slug="alpha", expires_in_days=500):
     return user, event, reception, haldi
 
 
-def _unlock(client, capability, *, secret, pin, kind, host="alpha.localhost"):
-    client.post(
-        reverse(f"events:{kind}-present", args=(capability.id,)),
-        {"secret": secret},
-        headers={"host": host},
-    )
+def _portal(event, *, pin="0427"):
+    portal = PortalCapability(event=event, expires_at=event.expires_at)
+    portal.set_pin(pin)
+    portal.save()
+    return portal
+
+
+def _unlock(client, portal, *, pin="0427", host="alpha.localhost"):
     response = client.post(
-        reverse(f"events:{kind}-unlock", args=(capability.id,)),
+        reverse("events:portal-unlock", args=(portal.event.slug,)),
         {"pin": pin},
         headers={"host": host},
     )
     assert response.status_code == 302
-    assert access_cookie_name(capability) in response.cookies
+    assert access_cookie_name(portal) in response.cookies
 
 
 def _asset(event, sub_event, installation, *, position):
@@ -188,53 +186,19 @@ def _asset(event, sub_event, installation, *, position):
     return asset
 
 
-def test_capabilities_have_one_year_expiry_limits_and_owner_revocation_cascades(settings) -> None:
-    user, event, reception, _haldi = _event_context()
-    before = timezone.now()
-    owner_issued = issue_owner_capability(event=event, actor=user)
-    owner = owner_issued.capability
+def test_event_has_one_internal_portal_record_with_pin_and_expiry() -> None:
+    _user, event, _reception, _haldi = _event_context()
+    portal = _portal(event)
 
-    assert (
-        timedelta(days=364, hours=23) < owner.expires_at - before <= timedelta(days=365, seconds=1)
-    )
-    assert owner.check_pin(owner_issued.pin)
-    assert owner_issued.secret not in owner.secret_digest
-
-    guest_issued = create_guest_capability(
-        owner=owner,
-        label="Bride's family",
-        sub_event_id=reception.id,
-    )
-    guest = guest_issued.capability
-    assert guest.expires_at <= owner.expires_at
-    assert guest.check_pin(guest_issued.pin)
-    audit = event.audit_events.get(action=AuditAction.GUEST_CAPABILITY_CREATED)
-    assert "Bride's family" not in str(audit.metadata)
-
-    FaceSearchResultSet.objects.create(
-        guest_capability=guest,
-        event=event,
-        sub_event=reception,
-        ordered_asset_ids=[],
-        expires_at=timezone.now() + timedelta(hours=1),
-    )
-    revoke_owner_capability(event=event, actor=user)
-    owner.refresh_from_db()
-    guest.refresh_from_db()
-    assert owner.revoked_at is not None
-    assert guest.revoked_at is not None
-    assert not FaceSearchResultSet.objects.exists()
-
-    settings.MAX_ACTIVE_GUEST_CAPABILITIES = 1
-    replacement = issue_owner_capability(event=event, actor=user).capability
-    create_guest_capability(owner=replacement, label="Family", sub_event_id=None)
-    with pytest.raises(ShareAccessError, match="Revoke a guest link"):
-        create_guest_capability(owner=replacement, label="Friends", sub_event_id=None)
+    assert portal.expires_at == event.expires_at
+    assert portal.check_pin("0427")
+    with pytest.raises(IntegrityError), transaction.atomic():
+        PortalCapability.objects.create(event=event, expires_at=event.expires_at)
 
 
 def test_reference_processing_keeps_only_short_lived_ordered_asset_ids(monkeypatch) -> None:
-    user, event, reception, _haldi = _event_context()
-    owner = issue_owner_capability(event=event, actor=user).capability
+    _user, event, reception, _haldi = _event_context()
+    portal = _portal(event)
     expected_asset_id = uuid4()
     monkeypatch.setattr(
         "openfotos_server.events.face_search_services.search_face_index",
@@ -244,7 +208,7 @@ def test_reference_processing_keeps_only_short_lived_ordered_asset_ids(monkeypat
     upload = SimpleUploadedFile("private-name.jpg", raw, content_type="image/jpeg")
 
     result = create_face_search(
-        capability=owner,
+        capability=portal,
         sub_event=reception,
         uploaded_photo=upload,
         engine=FakeEngine((_face(),)),
@@ -265,7 +229,7 @@ def test_reference_processing_keeps_only_short_lived_ordered_asset_ids(monkeypat
         rejected = SimpleUploadedFile("rejected.jpg", raw, content_type="image/jpeg")
         with pytest.raises(FaceSearchError) as error:
             create_face_search(
-                capability=owner,
+                capability=portal,
                 sub_event=None,
                 uploaded_photo=rejected,
                 engine=FakeEngine(faces),
@@ -276,16 +240,16 @@ def test_reference_processing_keeps_only_short_lived_ordered_asset_ids(monkeypat
 
 
 def test_expired_search_records_are_purged_without_removing_active_results() -> None:
-    user, event, _reception, _haldi = _event_context()
-    owner = issue_owner_capability(event=event, actor=user).capability
+    _user, event, _reception, _haldi = _event_context()
+    portal = _portal(event)
     expired = FaceSearchResultSet.objects.create(
-        owner_capability=owner,
+        portal_capability=portal,
         event=event,
         ordered_asset_ids=[],
         expires_at=timezone.now() - timedelta(seconds=1),
     )
     active = FaceSearchResultSet.objects.create(
-        owner_capability=owner,
+        portal_capability=portal,
         event=event,
         ordered_asset_ids=[],
         expires_at=timezone.now() + timedelta(hours=1),
@@ -337,23 +301,18 @@ def test_face_search_limits_are_browser_link_scoped_and_capability_wide() -> Non
     ).limited
 
 
-def test_emergency_share_reset_requires_confirmation_and_revokes_every_link() -> None:
-    user, event, _reception, _haldi = _event_context()
-    owner = issue_owner_capability(event=event, actor=user).capability
-    guest = create_guest_capability(owner=owner, label="Family", sub_event_id=None).capability
+def test_emergency_share_reset_requires_confirmation_and_revokes_every_portal() -> None:
+    _user, event, _reception, _haldi = _event_context()
+    portal = _portal(event)
 
     with pytest.raises(CommandError, match="RESET-ALL-SHARE-ACCESS"):
         call_command("reset_share_access", confirm="wrong")
-    owner.refresh_from_db()
-    guest.refresh_from_db()
-    assert owner.revoked_at is None
-    assert guest.revoked_at is None
+    portal.refresh_from_db()
+    assert portal.revoked_at is None
 
     call_command("reset_share_access", confirm="RESET-ALL-SHARE-ACCESS")
-    owner.refresh_from_db()
-    guest.refresh_from_db()
-    assert owner.revoked_at is not None
-    assert guest.revoked_at is not None
+    portal.refresh_from_db()
+    assert portal.revoked_at is not None
     assert event.audit_events.filter(action=AuditAction.SHARE_ACCESS_RESET).exists()
 
 
@@ -361,7 +320,7 @@ def test_emergency_share_reset_requires_confirmation_and_revokes_every_link() ->
     connection.vendor != "postgresql",
     reason="public face search requires the PostgreSQL pgvector query boundary",
 )
-def test_sub_event_guest_search_and_download_never_sign_a_sibling_photo(monkeypatch) -> None:
+def test_portal_search_and_download_span_every_sub_event(monkeypatch) -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     user = get_user_model().objects.create_user(
         username="alpha-photographer", password="correct-password"
@@ -370,6 +329,7 @@ def test_sub_event_guest_search_and_download_never_sign_a_sibling_photo(monkeypa
     event = Event.objects.create(
         photographer=photographer,
         name="Private Wedding",
+        slug="private-wedding",
         state=EventState.PROCESSING.value,
         expires_at=timezone.now() + timedelta(days=500),
     )
@@ -406,21 +366,9 @@ def test_sub_event_guest_search_and_download_never_sign_a_sibling_photo(monkeypa
         )
     event.state = EventState.PUBLISHED.value
     event.save(update_fields=("state",))
-    owner = issue_owner_capability(event=event, actor=user).capability
-    guest_issued = create_guest_capability(
-        owner=owner,
-        label="Reception family",
-        sub_event_id=reception.id,
-    )
-    guest = guest_issued.capability
+    portal = _portal(event)
     client = Client()
-    _unlock(
-        client,
-        guest,
-        secret=guest_issued.secret,
-        pin=guest_issued.pin,
-        kind="guest",
-    )
+    _unlock(client, portal)
     store = TrackingStore()
     monkeypatch.setattr(share_views, "configured_object_store", lambda: store)
     monkeypatch.setattr(
@@ -430,7 +378,7 @@ def test_sub_event_guest_search_and_download_never_sign_a_sibling_photo(monkeypa
     )
 
     search = client.post(
-        reverse("events:guest-search", args=(guest.id,)),
+        reverse("events:portal-search", args=(event.slug,)),
         {
             "reference_photo": SimpleUploadedFile(
                 "reference.jpg", _jpeg_bytes(), content_type="image/jpeg"
@@ -440,29 +388,29 @@ def test_sub_event_guest_search_and_download_never_sign_a_sibling_photo(monkeypa
         headers={"host": "alpha.localhost"},
     )
     assert search.status_code == 302
-    result_set = FaceSearchResultSet.objects.get(guest_capability=guest)
-    assert result_set.ordered_asset_ids == [str(reception_asset.id)]
-    assert str(haldi_asset.id) not in result_set.ordered_asset_ids
+    result_set = FaceSearchResultSet.objects.get(portal_capability=portal)
+    assert set(result_set.ordered_asset_ids) == {
+        str(reception_asset.id),
+        str(haldi_asset.id),
+    }
 
     results = client.get(search.url, headers={"host": "alpha.localhost"})
     assert results.status_code == 200
-    assert all(str(haldi_asset.id) not in key for key, _disposition in store.requests)
+    assert any(str(haldi_asset.id) in key for key, _disposition in store.requests)
 
-    before = list(store.requests)
     sibling_photo = client.get(
-        reverse("events:guest-photo", args=(guest.id, haldi_asset.id)),
+        reverse("events:portal-photo", args=(event.slug, haldi_asset.id)),
         headers={"host": "alpha.localhost"},
     )
     sibling_download = client.get(
-        reverse("events:guest-download", args=(guest.id, haldi_asset.id)),
+        reverse("events:portal-download", args=(event.slug, haldi_asset.id)),
         headers={"host": "alpha.localhost"},
     )
-    assert sibling_photo.status_code == 404
-    assert sibling_download.status_code == 404
-    assert store.requests == before
+    assert sibling_photo.status_code == 200
+    assert sibling_download.status_code == 302
 
     valid_download = client.get(
-        reverse("events:guest-download", args=(guest.id, reception_asset.id)),
+        reverse("events:portal-download", args=(event.slug, reception_asset.id)),
         headers={"host": "alpha.localhost"},
     )
     assert valid_download.status_code == 302

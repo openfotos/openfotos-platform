@@ -1,4 +1,4 @@
-"""Frozen OpenFotos desktop entry point."""
+"""Frozen OneNodeAI Studio desktop entry point."""
 
 from openfotos_desktop.__main__ import main
 

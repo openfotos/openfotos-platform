@@ -1,11 +1,11 @@
 {% extends "openfotos_events/base.html" %}
 
-{% block title %}Photographer sign in · OpenFotos{% endblock %}
+{% block title %}Photographer sign in · OneNodeAI Studio{% endblock %}
 
 {% block content %}
 <section class="card narrow">
   <p class="eyebrow">Photographer access</p>
-  <h1>Sign in to OpenFotos</h1>
+  <h1>Sign in to OneNodeAI Studio</h1>
   <form method="post" novalidate>
     {% csrf_token %}
     {% if form.non_field_errors %}

@@ -32,20 +32,16 @@ from .gallery_services import (
     original_download,
     restore_to_gallery,
 )
-from .ingestion_services import IngestionError
+from .ingestion_services import IngestionError, publication_status
 from .models import (
     Asset,
     AuditAction,
     AuditResult,
     ContributionBatch,
     Event,
-    FaceAnalysis,
     FaceAnalysisState,
-    GuestCapability,
-    OwnerCapability,
     PhotographerMembership,
     PortalCapability,
-    PreviewPolicy,
     RateLimitPurpose,
     SubEvent,
 )
@@ -55,18 +51,11 @@ from .portfolio_services import (
     create_event_with_cover,
     publish_event_with_portal,
     rotate_portal_pin,
+    unpublish_event_for_upload,
     update_portfolio_profile,
 )
 from .rate_limits import clear_failures, rate_limit_status, register_failure
-from .services import transition_event
-from .sharing_services import (
-    ShareAccessError,
-    issue_owner_capability,
-    owner_is_available,
-    portal_is_available,
-    revoke_guest_capability,
-    revoke_owner_capability,
-)
+from .sharing_services import portal_is_available
 from .sub_event_services import (
     create_sub_event,
     reassign_contribution,
@@ -393,13 +382,6 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
         variant_objects__state=UploadObjectState.VERIFIED.value,
         gallery_excluded_at__isnull=True,
     ).distinct()
-    face_analyses = FaceAnalysis.objects.filter(asset__in=visible_face_assets)
-    face_total_count = visible_face_assets.count()
-    indexed_count = face_analyses.filter(state=FaceAnalysisState.INDEXED).count()
-    no_face_count = face_analyses.filter(state=FaceAnalysisState.NO_USABLE_FACE).count()
-    failed_face_count = face_analyses.filter(
-        state__in=(FaceAnalysisState.FAILED, FaceAnalysisState.CONFLICT)
-    ).count()
     face_failed_assets = (
         visible_face_assets.filter(
             face_analysis__state__in=(FaceAnalysisState.FAILED, FaceAnalysisState.CONFLICT)
@@ -407,29 +389,18 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
         .select_related("face_analysis")
         .order_by("id")
     )
-    gallery_ready = event.derivatives_ready_generation == event.intake_generation
-    face_ready = event.face_index_ready_generation == event.intake_generation
-    owner_capability = OwnerCapability.objects.filter(event=event).first()
+    publish_status = publication_status(event)
     portal_capability = PortalCapability.objects.filter(event=event).first()
     return _private_render(
         request,
         "openfotos_events/dashboard_event.html",
         {
             "event": event,
-            "policy": PreviewPolicy.objects.filter(event=event).first(),
             "page": page,
             "images": images,
             "excluded_assets": excluded_assets,
             "failed_assets": failed_assets,
             "face_failed_assets": face_failed_assets,
-            "face_total_count": face_total_count,
-            "face_indexed_count": indexed_count,
-            "face_no_usable_count": no_face_count,
-            "face_failed_count": failed_face_count,
-            "face_pending_count": max(
-                0,
-                face_total_count - indexed_count - no_face_count - failed_face_count,
-            ),
             "sub_events": event.sub_events.all(),
             "active_sub_events": event.sub_events.filter(is_archived=False),
             "selected_sub_event": selected_sub_event,
@@ -437,21 +408,11 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
             "batches": ContributionBatch.objects.filter(installation__event=event).select_related(
                 "sub_event", "installation"
             ),
-            "gallery_ready": gallery_ready,
-            "face_ready": face_ready,
-            "ready": gallery_ready and face_ready,
-            "owner_capability": owner_capability,
+            "publication_status": publish_status,
+            "ready": publish_status["ready"],
             "portal_capability": portal_capability,
             "portal_capability_active": (
                 portal_is_available(portal_capability) if portal_capability else False
-            ),
-            "owner_capability_active": (
-                owner_is_available(owner_capability) if owner_capability else False
-            ),
-            "guest_capabilities": (
-                owner_capability.guest_capabilities.select_related("sub_event").all()
-                if owner_capability
-                else GuestCapability.objects.none()
             ),
         },
     )
@@ -553,17 +514,26 @@ def reassign_event_batch(request: HttpRequest, event_id, batch_id) -> HttpRespon
 @require_POST
 def publish_event(request: HttpRequest, event_id) -> HttpResponse:
     event = _photographer_event(request, event_id)
+    if publication_status(event)["in_flight"] and request.POST.get("confirm_in_flight") != "yes":
+        messages.error(
+            request,
+            "Confirm that unfinished workstation batches will be excluded before publishing.",
+        )
+        return redirect("events:photographer-event", event_id=event.id)
     try:
         published = publish_event_with_portal(
             event=event,
             actor=request.user,
+            object_store=configured_object_store(),
             request=request,
         )
-    except ValidationError as exc:
-        messages.error(request, "; ".join(exc.messages))
+    except ImproperlyConfigured:
+        messages.error(request, "Object storage is not configured; the event was not published.")
+    except (ValidationError, IngestionError) as exc:
+        messages.error(request, "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc))
     else:
         if published.pin is not None:
-            path = reverse("events:portal-gallery", args=(published.capability.id,))
+            path = reverse("events:portal-gallery", args=(published.event.slug,))
             return _private_render(
                 request,
                 "openfotos_events/credential_reveal.html",
@@ -577,7 +547,7 @@ def publish_event(request: HttpRequest, event_id) -> HttpResponse:
                     "return_url": reverse("events:photographer-event", args=(event.id,)),
                 },
             )
-        messages.success(request, "The private gallery and portfolio card are published.")
+        messages.success(request, "The event gallery is published.")
     return redirect("events:photographer-event", event_id=event.id)
 
 
@@ -589,7 +559,7 @@ def rotate_event_portal_pin(request: HttpRequest, event_id) -> HttpResponse:
     except PortfolioError as exc:
         messages.error(request, str(exc))
         return redirect("events:photographer-event", event_id=event.id)
-    path = reverse("events:portal-gallery", args=(published.capability.id,))
+    path = reverse("events:portal-gallery", args=(published.event.slug,))
     return _private_render(
         request,
         "openfotos_events/credential_reveal.html",
@@ -609,18 +579,13 @@ def rotate_event_portal_pin(request: HttpRequest, event_id) -> HttpResponse:
 def unpublish_event(request: HttpRequest, event_id) -> HttpResponse:
     event = _photographer_event(request, event_id)
     try:
-        transition_event(
-            event_id=event.id,
-            target=EventState.REVIEW,
-            actor=request.user,
-            request=request,
-        )
-    except ValidationError as exc:
-        messages.error(request, "; ".join(exc.messages))
+        unpublish_event_for_upload(event=event, actor=request.user, request=request)
+    except PortfolioError as exc:
+        messages.error(request, str(exc))
     else:
         messages.success(
             request,
-            "The gallery returned to Review and owner/guest sessions were invalidated.",
+            "The event is unpublished and accepting uploads again.",
         )
     return redirect("events:photographer-event", event_id=event.id)
 
@@ -748,59 +713,6 @@ def photographer_download(
         metadata={"asset_id": str(download.asset.id), "sha256": download.sha256},
     )
     return _private_response(redirect(download.url))
-
-
-@require_POST
-def issue_event_owner_capability(request: HttpRequest, event_id) -> HttpResponse:
-    event = _photographer_event(request, event_id)
-    try:
-        issued = issue_owner_capability(event=event, actor=request.user, request=request)
-    except ShareAccessError as exc:
-        messages.error(request, str(exc))
-        return redirect("events:photographer-event", event_id=event.id)
-    path = reverse("events:owner-gallery", args=(issued.capability.id,))
-    share_url = f"{request.build_absolute_uri(path)}#secret={issued.secret}"
-    return _private_render(
-        request,
-        "openfotos_events/credential_reveal.html",
-        {
-            "event": event,
-            "share_url": share_url,
-            "pin": issued.pin,
-            "capability_label": "Owner",
-            "expires_at": issued.capability.expires_at,
-            "return_url": reverse("events:photographer-event", args=(event.id,)),
-        },
-    )
-
-
-@require_POST
-def revoke_event_owner_capability(request: HttpRequest, event_id) -> HttpResponse:
-    event = _photographer_event(request, event_id)
-    try:
-        revoke_owner_capability(event=event, actor=request.user, request=request)
-    except ShareAccessError as exc:
-        messages.error(request, str(exc))
-    else:
-        messages.success(request, "Owner access and every guest link were revoked.")
-    return redirect("events:photographer-event", event_id=event.id)
-
-
-@require_POST
-def revoke_event_guest_capability(request: HttpRequest, event_id, guest_id) -> HttpResponse:
-    event = _photographer_event(request, event_id)
-    try:
-        owner = OwnerCapability.objects.get(event=event)
-        revoke_guest_capability(
-            owner=owner,
-            guest_id=guest_id,
-            actor=request.user,
-            request=request,
-        )
-    except (OwnerCapability.DoesNotExist, ShareAccessError):
-        raise Http404 from None
-    messages.success(request, "Guest link revoked.")
-    return redirect("events:photographer-event", event_id=event.id)
 
 
 @require_POST

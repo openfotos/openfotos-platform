@@ -12,7 +12,7 @@ package_sources = [
     repository / "packages" / name / "src"
     for name in ("contracts", "storage", "vision")
 ]
-datas = collect_data_files("openfotos_desktop", includes=["assets/*.svg"])
+datas = collect_data_files("openfotos_desktop", includes=["assets/*.svg", "assets/*.png"])
 datas.extend(
     [
         (str(repository / "LICENSE"), "."),
@@ -22,6 +22,9 @@ datas.extend(
         (str(repository / "licenses" / "YuNet-MIT.txt"), "licenses"),
         (str(repository / "licenses" / "SFace-Apache-2.0.txt"), "licenses"),
     ]
+)
+icon = (
+    repository / "packaging" / "icons" / ("onenodeai-studio.icns" if sys.platform == "darwin" else "onenodeai-studio.ico")
 )
 
 analysis = Analysis(
@@ -43,7 +46,7 @@ executable = EXE(
     analysis.scripts,
     [],
     exclude_binaries=True,
-    name="OpenFotos",
+    name="OneNodeAIStudio",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -53,6 +56,7 @@ executable = EXE(
     target_arch="arm64" if sys.platform == "darwin" else None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=str(icon),
 )
 collected = COLLECT(
     executable,
@@ -60,15 +64,16 @@ collected = COLLECT(
     analysis.datas,
     strip=False,
     upx=False,
-    name="OpenFotos",
+    name="OneNodeAIStudio",
 )
 if sys.platform == "darwin":
     application = BUNDLE(
         collected,
-        name="OpenFotos.app",
-        bundle_identifier="com.onenodeai.openfotos",
+        name="OneNodeAI Studio.app",
+        icon=str(icon),
+        bundle_identifier="com.onenodeai.studio",
         info_plist={
-            "CFBundleDisplayName": "OpenFotos",
+            "CFBundleDisplayName": "OneNodeAI Studio",
             "CFBundleShortVersionString": "0.1.0",
             "NSHighResolutionCapable": True,
         },

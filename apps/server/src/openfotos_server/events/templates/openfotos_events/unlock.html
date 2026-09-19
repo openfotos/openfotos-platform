@@ -1,23 +1,27 @@
 {% extends "openfotos_events/base.html" %}
 
-{% block title %}Unlock private gallery · OpenFotos{% endblock %}
+{% block title %}Unlock {{ event.name }} · {{ event.photographer.display_name }}{% endblock %}
+
+{% block body_class %}unlock-body{% endblock %}
 
 {% block content %}
-<section class="card narrow">
-  <p class="eyebrow">Private gallery</p>
-  <h1>Enter the four-digit PIN</h1>
-  <p>Use the four-digit PIN shared with you to continue.</p>
-  <form method="post" action="{{ unlock_url }}" novalidate>
-    {% csrf_token %}
-    {% if form.non_field_errors %}
-      <div class="form-error" role="alert">{{ form.non_field_errors }}</div>
-    {% endif %}
-    <label for="{{ form.pin.id_for_label }}">PIN</label>
-    {{ form.pin }}
-    {% if form.pin.errors %}
-      <div class="field-error" role="alert">Enter the four-digit PIN.</div>
-    {% endif %}
-    <button type="submit">Unlock gallery</button>
-  </form>
+<section class="unlock-stage">
+  <div class="unlock-card">
+    <p class="eyebrow">{{ event.photographer.display_name }}</p>
+    <h1>{{ event.name }}</h1>
+    <p>Enter the four-digit PIN to open this private gallery.</p>
+    <form method="post" action="{{ unlock_url }}" novalidate>
+      {% csrf_token %}
+      {% if form.non_field_errors %}
+        <div class="form-error" role="alert">{{ form.non_field_errors }}</div>
+      {% endif %}
+      <label for="{{ form.pin.id_for_label }}">Gallery PIN</label>
+      {{ form.pin }}
+      {% if form.pin.errors %}
+        <div class="field-error" role="alert">Enter the four-digit PIN.</div>
+      {% endif %}
+      <button type="submit">Unlock gallery</button>
+    </form>
+  </div>
 </section>
 {% endblock %}

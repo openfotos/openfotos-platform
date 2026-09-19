@@ -25,6 +25,8 @@ def _window_start(at: datetime, window_seconds: int) -> datetime:
 
 
 def _limit_settings(purpose: RateLimitPurpose) -> tuple[int, int]:
+    if purpose is RateLimitPurpose.PORTAL_PIN:
+        return settings.PORTAL_PIN_FAILURE_LIMIT, settings.AUTH_FAILURE_WINDOW_SECONDS
     if purpose is RateLimitPurpose.FACE_SEARCH_CLIENT:
         return settings.FACE_SEARCH_CLIENT_LIMIT, settings.FACE_SEARCH_LIMIT_WINDOW_SECONDS
     if purpose is RateLimitPurpose.FACE_SEARCH_CAPABILITY:

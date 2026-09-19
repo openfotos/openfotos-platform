@@ -22,11 +22,11 @@ from openfotos_server.events.models import (
     IngestionManifest,
     Photographer,
     PhotographerMembership,
+    PortalCapability,
     PreviewPolicy,
     SubEvent,
 )
 from openfotos_server.events.services import transition_event
-from openfotos_server.events.sharing_services import issue_owner_capability
 
 pytestmark = pytest.mark.django_db
 
@@ -59,28 +59,26 @@ def attach_committed_manifest(event: Event) -> IngestionManifest:
     return manifest
 
 
-def test_owner_pin_is_four_ascii_digits_peppered_and_uses_argon2() -> None:
+def test_portal_pin_is_four_ascii_digits_peppered_and_uses_argon2() -> None:
     photographer = Photographer.objects.create(slug="alpha", display_name="Alpha Photos")
     event = make_event(photographer)
     event.state = EventState.PUBLISHED.value
     event.save(update_fields=("state",))
-    actor = get_user_model().objects.create_user(username="issuer", password="safe-pass")
-    issued = issue_owner_capability(event=event, actor=actor)
-    owner = issued.capability
+    portal = PortalCapability(event=event, expires_at=event.expires_at)
+    portal.set_pin("0427")
+    portal.save()
 
-    assert owner.pin_hash != issued.pin
-    assert issued.pin not in owner.pin_hash
-    assert identify_hasher(owner.pin_hash).algorithm == "argon2"
-    assert owner.check_pin(issued.pin)
-    assert len(issued.secret) >= 43
-    assert issued.secret not in owner.secret_digest
+    assert portal.pin_hash != "0427"
+    assert "0427" not in portal.pin_hash
+    assert identify_hasher(portal.pin_hash).algorithm == "argon2"
+    assert portal.check_pin("0427")
 
     with override_settings(SHARE_PIN_PEPPER="another-independent-pepper-value-1234"):
-        assert not owner.check_pin(issued.pin)
+        assert not portal.check_pin("0427")
 
     for invalid_pin in ("123", "12345", "１２３４", "ab12"):
         with pytest.raises(ValidationError, match="four ASCII digits"):
-            owner.set_pin(invalid_pin)
+            portal.set_pin(invalid_pin)
 
 
 def test_reserved_and_non_dns_photographer_slugs_are_rejected() -> None:

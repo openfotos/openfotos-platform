@@ -11,8 +11,10 @@ from openfotos_server.events.desktop_auth import (
     authenticate_photographer,
     refresh_session,
     register_event_installation,
+    revoke_session,
 )
 from openfotos_server.events.models import (
+    AuditAction,
     DesktopSession,
     Event,
     EventInstallation,
@@ -117,6 +119,49 @@ def test_refresh_reuse_outside_the_grace_window_revokes_the_session(settings) ->
     assert DesktopSession.objects.get(pk=original.session.id).revoked_at is not None
     with pytest.raises(DesktopAuthError):
         authenticate_access_token(rotated.access_token)
+
+
+def test_revoke_session_blocks_refresh_and_access_and_is_idempotent() -> None:
+    photographer, _, _ = photographer_and_event()
+    tokens = session_for(photographer)
+
+    revoke_session(tokens.refresh_token, photographer=photographer)
+
+    with pytest.raises(DesktopAuthError) as refresh_error:
+        refresh_session(tokens.refresh_token)
+    assert refresh_error.value.code == "invalid_refresh_token"
+    with pytest.raises(DesktopAuthError):
+        authenticate_access_token(tokens.access_token)
+    assert photographer.audit_events.filter(action=AuditAction.DESKTOP_LOGOUT).count() == 1
+
+    # A repeated sign-out with the same dead token is a no-op, not an error.
+    revoke_session(tokens.refresh_token, photographer=photographer)
+    assert photographer.audit_events.filter(action=AuditAction.DESKTOP_LOGOUT).count() == 1
+
+
+def test_revoke_session_accepts_the_recent_previous_refresh_token() -> None:
+    photographer, _, _ = photographer_and_event()
+    original = session_for(photographer)
+    rotated = refresh_session(original.refresh_token)
+
+    revoke_session(original.refresh_token, photographer=photographer)
+
+    with pytest.raises(DesktopAuthError):
+        refresh_session(rotated.refresh_token)
+    with pytest.raises(DesktopAuthError):
+        authenticate_access_token(rotated.access_token)
+
+
+def test_revoke_session_rejects_another_tenant_token() -> None:
+    photographer, _, _ = photographer_and_event()
+    other = Photographer.objects.create(slug="beta", display_name="Beta Photos")
+    tokens = session_for(photographer)
+
+    with pytest.raises(DesktopAuthError) as wrong_tenant:
+        revoke_session(tokens.refresh_token, photographer=other)
+
+    assert wrong_tenant.value.code == "invalid_refresh_token"
+    assert refresh_session(tokens.refresh_token).access_token
 
 
 def test_inactive_membership_cannot_authenticate_or_keep_using_a_session() -> None:

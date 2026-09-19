@@ -1,0 +1,313 @@
+OpenFotos / OneNodeAI Studio — Photographer-Mandated UX Revision Plan
+=====================================================================
+
+Date: 2026-09-19
+Status: Agreed via grill-me interview; ready for implementation.
+Scope: Desktop app (PySide6), Django server, docs/ADRs, tests.
+
+
+1. CONTEXT
+----------
+
+Session 9 production hardening is code-complete and the first cloud rehearsal
+finished successfully: all functionality verified working (event create,
+multi-batch upload, pause/resume, retry, publish, PIN unlock, gallery, face
+search, download, revocation). The rehearsal stack (Railway project, Supabase
+project, R2 bucket) will be torn down and redeployed fresh with this new
+build. No backward compatibility is owed to currently deployed data.
+
+This revision is driven by photographer (Ballads of Love) feedback after
+reviewing the rehearsal build against their current website. Every item below
+is photographer-mandated; security-risk acceptances are explicit and recorded
+in section 6.
+
+
+2. DECISION LOG (every answer from the interview)
+-------------------------------------------------
+
+2.1 Sequencing
+- Rehearsal is finished; no customer has access.
+- Implement everything locally, then destroy the old rehearsal resources and
+  redeploy a fresh rehearsal with the new build.
+
+2.2 URL generation — name-based everywhere (photographer-accepted risk)
+- Remove dynamic UUID capability URLs from all public/share surfaces.
+- Public gallery URL becomes:
+    https://balladsoflove.onenodeai.com/portfolio/events/<event-slug>/
+- Slug derived from the main event name: lowercase, hyphens, no spaces or
+  symbols (e.g. "Mallur House Warming" -> "mallur-house-warming").
+- Slug is assigned at first publish and frozen afterward; renaming the event
+  later must not change or break the URL.
+- Collision handling: if two events slugify to the same value, the second
+  gets "-2" (then "-3", etc.).
+
+2.3 Sharing model — one link, one PIN, everything unlocked
+- Owner capability links are REMOVED completely (mandated).
+- Guest capability links are REMOVED completely ("No per event link sharing").
+- No per-event share-link creation flow at all. One event link exposes the
+  full event: all sub-events, face search, and exact-original downloads.
+- The ONLY protection is the event PIN (4 digits, see 2.4).
+- Leak/incident response becomes: rotate the event PIN (exists today as
+  rotate_event_portal_pin) or unpublish the event.
+- The entire owner/guest capability machinery (issue/revoke/labels/
+  per-capability expiry, share_landing, credential_reveal for owner/guest)
+  is removed. PortalCapability survives only as the internal per-event record
+  holding PIN hash + expiry; galleries are addressed by event slug, looked up
+  via the event.
+
+2.4 PIN policy
+- Keep 4-digit PIN. Photographer explicitly accepted the risk after being
+  shown the math (guessable URL + 4-digit PIN + per-IP throttle of
+  10 attempts/15 min: a distributed attacker with ~100 addresses could
+  exhaust the 10,000-PIN space in about a day).
+- Existing per-client-IP fixed-window throttling on PIN unlock stays.
+- Residual risk is recorded in the new ADR as photographer-accepted.
+
+2.5 Event lifecycle — upload anytime until publish
+- Close intake / Reopen intake buttons are REMOVED from the desktop UI and
+  the concept disappears from all user-facing surfaces.
+- Anyone (any tracked workstation) can upload at any time while the event is
+  not published.
+- Desktop "Submit" completes that batch quietly: originals + thumbnails +
+  face embeddings. No finalize button, no intake buttons.
+- Publish stays on the web dashboard only (it owns expiry + PIN).
+- Publish is atomic:
+    1. In one database transaction the event stops accepting new work:
+       new batch reservations and new upload leases are rejected immediately.
+    2. Server snapshots all COMPLETED photos into the manifest and validates
+       every committed photo has derivatives + face index. If anything
+       committed is unprocessed, publish refuses with a clear message.
+    3. In-flight batches at that moment finish only their current file;
+       everything not in the snapshot is EXCLUDED from the gallery; desktop
+       shows that batch as "event published — not included" on next sync;
+       orphaned R2 objects from excluded batches are cleaned by the existing
+       reconciliation.
+- Publish warning dialog (mandated): if any workstation has photos in flight,
+  the dashboard shows a confirmation like "Do you really want to publish?
+  Someone is uploading; publishing will exclude their unfinished photos and
+  partial data will be discarded." Also warn with counts
+  (e.g. "Studio workstation 2 has 34 photos mid-upload").
+- Unpublish is allowed: returns the event to the uploading state; photographer
+  can upload more and re-publish; every publish re-runs the complete
+  processed-check.
+- Internally we KEEP the generation/manifest/rollback invariants (they
+  prevent publishing half-processed events); they are just no longer visible
+  in any UI.
+
+2.6 Desktop workflow simplification
+New flow: Main event click -> Sub event click -> Upload & verification ->
+Final submit button.
+- NO gallery preview, thumbnail grids, or face-index loading bars in the
+  desktop app.
+- ONE progress bar with smooth stage text: "Uploading...", "Generating
+  thumbnails...", "Embedding faces...", etc.
+- Validation results (unsupported/oversize/duplicate files) shown as a
+  compact inline summary on the upload page: "612 accepted · 3 skipped"
+  with an expandable list. Skipped files never block upload. No separate
+  validation page.
+- Pause/resume stay, as small buttons on the progress area (rehearsed and
+  working), restyled to look good.
+- Diagnostics export and local cleanup move into a small overflow menu.
+
+2.7 Watermark (preview policy)
+- Watermark defaults OFF for every event (already the code default; keep).
+- The preview-policy page is no longer a mandatory workflow step.
+- A small "Watermark settings" button on the event screen opens the existing
+  dialog (template, logo, text, live preview); photographer opts in if wanted.
+- Policy locks once the first batch is submitted; if never opened, the event
+  silently records "clean previews" so the publish gate stays satisfied.
+- BUG FIX: the watermark checkbox is not visible correctly in the light
+  theme — fix the QCheckBox indicator styling in the desktop QSS.
+
+2.8 Face models
+- On app launch, if accepted face models are missing, download them
+  automatically in the background (existing verified path: pinned SHA-256,
+  HTTPS-only, size-limited, from the OpenCV upstream URLs).
+- REMOVE the "Face model settings" dialog and the header button entirely.
+- Download status shown as a small inline indicator; on failure show inline
+  error with a retry action.
+- Only the face-embedding stage waits for models; browsing/selection/upload
+  prep never block on it.
+
+2.9 Desktop login persistence
+- On launch, if exactly one saved session exists (OS keyring refresh token),
+  auto-resume it and skip the login page.
+- Add "Sign out" in the header: revokes the refresh token server-side,
+  deletes the keyring entry, returns to the login page.
+- If auto-resume fails (expired/revoked), fall back to the login page with a
+  neutral notice.
+- Keep the existing behavior of never writing credentials to the local photo
+  checkpoint.
+
+2.10 Branding — OneNodeAI Studio
+- Desktop app name becomes "OneNodeAI Studio"; studio/product references
+  become "OneNodeAI". Remove user-visible "OpenFotos"/"OFTS" everywhere:
+  login page text, headings, watermark wordmark asset (ofts.svg) and its
+  "Built-in OFTS wordmark" option, dialogs, notices.
+- App icon: use the provided logo.png (dark circular OneNodeAI mark) for the
+  window icon and installer icons (.ico for Windows, .icns for macOS).
+- Installer/bundle identity: PyInstaller names become OneNodeAIStudio /
+  OneNodeAI Studio.app; macOS bundle identifier com.onenodeai.openfotos ->
+  com.onenodeai.studio (or equivalent).
+- Keyring service name "OpenFotos Desktop" is renamed; accepted consequence:
+  one re-login per workstation.
+- Server pages: titles drop "OpenFotos" in favor of studio/event names.
+  The AGPL "Source code" footer link STAYS.
+- Python package names, Django app names, and the repository name stay
+  unchanged (invisible to users; renaming is pure churn).
+
+2.11 Portfolio + gallery redesign (server-rendered pages)
+Reference: the photographer's current site (minimal, centered serif logo,
+Instagram icon top-left, search icon top-right, phone with icon, large event
+cards) and their gallery examples (full-bleed cover with event name overlay +
+VIEW GALLERY button; gallery top bar with event name, centered sub-event nav,
+icon actions right; justified photo grid).
+- Portfolio page: restyle to match — brand logo/name centered (photographer
+  uploads their own logo via the existing dashboard portfolio settings),
+  Instagram and phone as proper SVG icons, search as a magnifier icon that
+  expands, large aesthetic event cards, legal footer retained.
+- Event cover page: full-bleed cover photo, event name overlay, VIEW GALLERY
+  button, studio logo mark.
+- Gallery page: top bar with studio/event brand left, sub-event navigation
+  centered, icon actions right; justified/masonry photo grid.
+- Typography: bundle a self-hosted open-license serif (Cormorant Garamond,
+  OFL) — no third-party font CDN (privacy). Self-host the font files.
+- Face search: NOT shown by default. Default gallery shows photos only. A
+  "Search with your face" button in the gallery top bar opens the search
+  panel (reference photo + consent checkbox + submit). After results,
+  "Clear search" returns to the full gallery.
+- BUG FIX: face-search results grid alignment breaks (thumbnails render at
+  wrong sizes/misaligned) — fix grid CSS/markup for the results view.
+- Photo page: next/previous/back-to-gallery are currently bare blue links —
+  restyle as proper gallery chrome (styled buttons/overlay arrows).
+- Unlock (PIN) page: restyle to match the new aesthetic.
+
+2.12 Photographer dashboard declutter
+The event dashboard page keeps ONLY these sections, in this order:
+  1. Sub-event creation
+  2. Sub-events list
+  3. Contribution assignments (move batch between sub-events)
+  4. Publication (publish/unpublish, PIN reveal, rotate PIN, the new
+     mid-upload publish warning)
+  5. Gallery preview
+Removed cards: Preview policy, Face index, Portfolio access, Customer
+access, and all owner/guest capability management UI.
+Apply the same cleanup/aesthetic pass to the events list dashboard.
+
+2.13 Docs bookkeeping
+- New ADR recording this revision: supersedes ADR 0012 (owner/guest
+  capabilities, ephemeral search and downloads), amends ADR 0013 where the
+  sharing model changed; records the photographer-accepted risks explicitly.
+- SESSION_PLAN.md gains a new session entry for this revision.
+- production-runbook.md updated: leak response = rotate event PIN/unpublish;
+  rehearsal exercise list updated (no owner/guest flows; portal URL by slug).
+- README user-visible naming updated where it describes the desktop app.
+
+
+3. CURRENT-STATE FACTS (grounded in code, shape the work)
+---------------------------------------------------------
+- Watermark checkbox already defaults unchecked; the real issues are theme
+  visibility + the page being a mandatory step.
+- FaceModelStore.download() already exists with pinned hashes/HTTPS/size
+  limits; it is only gated behind the settings dialog.
+- Refresh tokens already persist in the OS keyring; a "Resume saved session"
+  button exists; auto-resume is a small change on top.
+- Public URLs today: /portfolio/events/<uuid>/, /share/owner/<uuid>/,
+  /share/guest/<uuid>/ with fragment secrets + PIN (ADR 0012).
+- Lifecycle today: DRAFT -> UPLOADING -> (intake closed + manifest committed)
+  -> PROCESSING -> REVIEW -> PUBLISHED; intake generations gate manifests.
+- Window title already "OneNodeAI Studio"; everything else still
+  OpenFotos/OFTS (assets/ofts.svg, keyring service, PyInstaller spec names,
+  login copy, watermark wordmark).
+- Dashboard event page currently renders: Preview policy, Face index, Create
+  a sub-event, Sub-events, Contribution assignments, Publication, Portfolio
+  access, Customer access, Gallery preview (+ owner/guest management).
+- Search results reuse event.html with search_mode + gallery_grid.html;
+  alignment bug lives in that markup/CSS path.
+
+
+4. IMPLEMENTATION SLICES (small vertical slices, one outcome each)
+------------------------------------------------------------------
+Server:
+- S1: Event slug field + publish-time slug assignment (frozen, -2 collision
+  suffix) + slug-routed portal URLs; UUID portal routes removed (fresh
+  rehearsal, no redirect debt).
+- S2: Remove owner/guest capability system end to end: models, views, urls,
+  templates, dashboard UI, audit actions; migration drops the tables;
+  PortalCapability retained as internal PIN/expiry record keyed by event.
+- S3: Lifecycle rework: atomic publish (block new reservations/leases ->
+  snapshot completed -> validate processed -> publish), mid-upload exclusion
+  + dashboard warning counts, unpublish returns to uploading, finalize folded
+  into publish, intake endpoints removed from API surface.
+- S4: Dashboard declutter + publish confirmation dialog + PIN rotate in the
+  Publication section.
+- S5: Portfolio/cover/gallery/photo/unlock redesign: templates, app.css,
+  SVG icons, self-hosted Cormorant Garamond, search-behind-button,
+  search-results grid fix, photo-nav chrome.
+- S6: Server branding (titles/footers/wordmarks).
+
+Desktop:
+- D1: Rebrand: strings, assets (replace ofts.svg usage), window/installer
+  icons from logo.png, PyInstaller spec names + bundle id, keyring service
+  rename.
+- D2: Face-model auto-download on launch + inline status/retry; remove
+  settings dialog + header button.
+- D3: Auto-resume login + header Sign out (server-side refresh revocation +
+  keyring delete).
+- D4: Workflow consolidation: event -> sub-event -> single upload page
+  (file selection, scan/verify inline, compact validation summary, one
+  progress bar + stage text, pause/resume, overflow menu for
+  diagnostics/cleanup); remove intake/finalize UI; watermark settings dialog
+  (default off, locked after first submit); QCheckBox theme fix.
+
+Tests:
+- Rewrite Session 8 sharing tests for the removed owner/guest flows.
+- New tests: slug assignment/freeze/collision; slug-routed portal + PIN-only
+  authorization boundary (tenant isolation preserved); publish race
+  (in-flight exclusion, atomicity); unpublish/re-publish re-validation;
+  publish gate messages; desktop workflow structure; watermark default/lock;
+  auto-resume/sign-out; face-model auto-download states.
+- Keep the invariants from AGENTS.md green: tenant filters, private object
+  access, idempotency, selfie disposal, model-version checks.
+
+Docs: ADR + session plan + runbook + README per 2.13.
+
+
+5. ACCEPTANCE CRITERIA
+----------------------
+- Gallery reachable at /portfolio/events/<slug>/, PIN-gated; no capability
+  UUID in any public/share URL; owner/guest share UI gone.
+- One PIN unlocks full gallery (all sub-events, search, downloads).
+- No intake/finalize controls anywhere; uploads accepted until publish.
+- Publish during an active upload: confirmation warning shown; on confirm,
+  in-flight photos excluded deterministically; event never publishes with
+  unprocessed photos; unpublish->upload->re-publish works.
+- Desktop: event -> sub-event -> upload page -> submit; single progress bar
+  with stage text; validation summary inline; watermark optional + default
+  off + checkbox visible; models auto-download; auto-login + sign out works.
+- Portfolio/gallery matches the agreed aesthetic; search hidden behind
+  "Search with your face"; search results grid aligned; photo nav styled.
+- Dashboard event page shows exactly the five sections in 2.12.
+- scripts/check.sh fully green (ruff, makemigrations --check, full pytest,
+  Django system check).
+
+
+6. ACCEPTED RISKS (photographer-mandated, recorded in ADR)
+----------------------------------------------------------
+- Guessable event URLs + 4-digit PIN as the SOLE protection on private
+  galleries (distributed brute-force feasible in principle; mitigated only by
+  per-IP throttling; leak response is PIN rotation/unpublish).
+- Loss of per-guest revocation and sub-event-scoped guest links.
+- One forced re-login per workstation from the keyring service rename.
+
+
+7. NEXT ACTIONS AFTER IMPLEMENTATION
+------------------------------------
+1. Run scripts/check.sh; verify all green.
+2. Commit (user pushes).
+3. Destroy old rehearsal resources (Railway project, Supabase project, R2
+   bucket + token) per runbook Phase 3.
+4. Fresh rehearsal deploy per runbook Phase 1 with the new build.
+5. Re-run the Phase 2 rehearsal exercises on the new build (upload, publish,
+   PIN unlock, search, download, PIN rotation as the leak drill, retention),
+   then load tests, then Phase 3 cutover to production.

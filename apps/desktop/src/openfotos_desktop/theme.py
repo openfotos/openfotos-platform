@@ -198,6 +198,33 @@ QCheckBox {
     font-weight: 600;
 }
 
+QCheckBox::indicator {
+    width: 18px;
+    height: 18px;
+    border: 1px solid #9aa6b5;
+    border-radius: 4px;
+    background: #ffffff;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #24578f;
+}
+
+QCheckBox::indicator:checked {
+    background: #24578f;
+    border-color: #24578f;
+    image: url("__CHECK_ICON__");
+}
+
+QLabel#ModelStatus {
+    color: #667085;
+    font-size: 12px;
+}
+
+QLabel#ModelStatus[state="ready"] { color: #147a4b; }
+QLabel#ModelStatus[state="downloading"] { color: #24578f; }
+QLabel#ModelStatus[state="error"] { color: #b42318; }
+
 QPushButton, QToolButton {
     min-height: 38px;
     padding: 0 16px;
@@ -229,6 +256,12 @@ QPushButton[kind="primary"] {
 QPushButton[kind="primary"]:hover {
     background: #1d4776;
     border-color: #1d4776;
+}
+
+QPushButton[kind="primary"]:disabled {
+    color: #f2f5f8;
+    background: #b6c3d3;
+    border-color: #b6c3d3;
 }
 
 QPushButton[kind="danger"] {
@@ -371,4 +404,4 @@ QToolTip {
     border: 1px solid #27364a;
     padding: 6px;
 }
-"""
+""".replace("__CHECK_ICON__", (_ASSET_DIRECTORY / "check.svg").as_posix())

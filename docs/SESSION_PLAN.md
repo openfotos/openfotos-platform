@@ -360,6 +360,75 @@ text and third-party notices, and a clean end-to-end rehearsal.
 link leak/revocation, pepper rotation, and retention deletion are rehearsed; Windows/macOS packages
 pass; the client walkthrough is accepted; the release commit is tagged.
 
+## Post-Session-9 photographer UX revision
+
+**Status (2026-09-19): implementation complete in the current worktree; fresh rehearsal deployment
+and Phase 2 exercises remain manual.**
+
+**Goal:** Replace capability-oriented sharing and the multi-step ingestion UI with the
+photographer-mandated one-event-link, one-PIN, upload-until-publish workflow and the OneNodeAI Studio
+presentation recorded in ADR 0014 and `plan.txt`.
+
+**Delivered in S1:** Events now receive a normalized, tenant-unique slug on first publication.
+Collision suffixes are deterministic, the slug remains frozen after rename, every portfolio
+gallery operation is routed below `/portfolio/events/<event-slug>/`, and UUID portal routes return
+not found. The `PortalCapability` UUID remains internal for PIN/session state. The migration
+backfills any already-published local data before adding the per-photographer uniqueness constraint.
+
+**Delivered in S2-S4:** Owner and guest capability tables, issuance/revocation services, routes,
+templates, controls, audit choices, and rate-limit purposes are removed. The PIN-only portal now
+grants event-wide browse, face-search, and exact-original access, with ten failed PIN attempts per
+client address in fifteen minutes. Publication locks the event in one transaction, validates and
+snapshots completed work, marks unfinished batches as not included, and blocks later reservations
+and leases. A failed readiness check leaves in-flight work untouched. Unpublish opens a new upload
+generation. The event dashboard now has exactly the five mandated sections, reports outstanding
+photos per workstation in its publish confirmation, and keeps PIN rotation in Publication.
+
+**Delivered in S5:** The portfolio, event cover, gallery, photo, and unlock pages share the agreed
+studio aesthetic with self-hosted Cormorant Garamond typography (no third-party font CDN), SVG
+Instagram/phone/search/lock/navigation icons, large event cards, and a full-bleed cover with a VIEW
+GALLERY action. The gallery top bar keeps the studio brand left, sub-event navigation centered, and
+icon actions right; face search stays closed behind a "Search with your face" disclosure and
+"Clear search" returns to the full gallery. The gallery and search-results views render through one
+shared justified grid partial, removing the old double-wrapped results layout. Photo pages use
+overlay arrows, a counter, and a styled exact-original download control.
+
+**Delivered in S6:** User-visible server branding is OneNodeAI Studio. Gallery, photo, unlock, and
+legal page titles use the studio/event name; login and dashboard copy drop "OpenFotos" and "OFTS";
+the built-in watermark wordmark is the OneNodeAI wordmark (`onenodeai.svg`); the AGPL "Source code"
+footer link is retained. Python package, Django application, database schema, and repository names
+are intentionally unchanged.
+
+**Delivered in D1-D4:** The desktop app is named, icon-branded, and packaged as OneNodeAI Studio
+(window icon from `logo.png`; generated `.ico`/`.icns` installer icons; PyInstaller
+`OneNodeAIStudio` / `OneNodeAI Studio.app`; bundle identifier `com.onenodeai.studio`; release
+artifacts and workflow names updated). The keyring service is `OneNodeAI Studio`. Accepted face
+models download automatically in the background on launch through the existing pinned-hash,
+HTTPS-only, size-limited path, with an inline status/retry indicator; only the face-embedding stage
+waits for them, and the settings dialog and header button are gone. Exactly one saved refresh-token
+session auto-resumes; sign out revokes the refresh token server-side, deletes the keyring entry, and
+returns to login. The desktop workflow is now event, sub-event, one upload page (inline
+verification summary with expandable skipped-file details, one smooth progress bar with stage text,
+pause/resume, overflow menu for diagnostics/rescan/local cleanup), then Submit. Intake/finalize UI
+is absent. Watermark settings are an optional event-level dialog, default off, locked after the
+first submission, with the checkbox indicator fixed in the light theme; an untouched event silently
+records clean previews so the publish gate stays satisfied.
+
+**Verification evidence:** `./scripts/check.sh` passes formatting, Ruff, migration drift, 270 tests,
+and Django system checks; the only skips are the two PostgreSQL pgvector query-boundary cases and
+the opt-in live-S3 contract. New coverage includes slug/portal boundaries (S1), the five-section
+dashboard and publication race (S2-S4), cover/unlock/search-disclosure/photo-chrome/branding and
+thumbnail-alignment CSS tests (S5-S6), desktop workflow structure, watermark default/lock,
+face-model auto-download states, auto-resume/sign-out, refresh revocation, and clean-preview
+confirmation. `logo.png`-derived ICO and ICNS files are validated by
+`tests/unit/test_release_artifacts.py`. Migrations `0001` through `0014` apply successfully to a
+fresh SQLite database.
+
+**Next action:** The user destroys the old rehearsal resources and deploys this build per runbook
+Phases 3 and 1, then re-runs the Phase 2 exercises (multi-batch upload, publish with an unfinished
+batch, PIN unlock, hidden-then-opened face search, exact-original download, PIN rotation as the leak
+drill, and retention) before the production cutover.
+
 ## Handoff template
 
 At the end of every session record:

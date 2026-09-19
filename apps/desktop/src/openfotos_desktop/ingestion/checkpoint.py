@@ -214,7 +214,7 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 schema_version = self._connection.execute("PRAGMA user_version").fetchone()[0]
                 if schema_version > _SCHEMA_VERSION:
                     raise ValueError(
-                        "This checkpoint was created by a newer OpenFotos desktop version."
+                        "This checkpoint was created by a newer OneNodeAI Studio desktop version."
                     )
                 if schema_version == 0:
                     self._connection.executescript(_SCHEMA)
@@ -677,7 +677,12 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
 
     def start_scan(self, batch_id: UUID) -> tuple[int, bool]:
         batch = self.get_batch(batch_id)
-        if batch.state in {BatchState.RESERVED, BatchState.UPLOADING, BatchState.COMPLETE}:
+        if batch.state in {
+            BatchState.RESERVED,
+            BatchState.UPLOADING,
+            BatchState.COMPLETE,
+            BatchState.NOT_INCLUDED,
+        }:
             raise ValueError("A server-reserved contribution cannot be changed or rescanned.")
         generation = batch.scan_generation + 1
         with self._lock, self._connection:
@@ -920,6 +925,9 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 ),
             )
 
+    def mark_batch_not_included(self, batch_id: UUID) -> None:
+        self._set_batch_state(batch_id, BatchState.NOT_INCLUDED)
+
     def list_upload_checkpoints(self, batch_id: UUID) -> list[UploadCheckpoint]:
         with self._lock:
             rows = self._connection.execute(
@@ -1018,11 +1026,15 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
                 ),
             ).fetchone()["count"]
             self._connection.execute(
-                "UPDATE batches SET state = ?, updated_at = ? WHERE id = ?",
+                """
+                UPDATE batches SET state = ?, updated_at = ?
+                WHERE id = ? AND state != ?
+                """,
                 (
                     BatchState.COMPLETE.value if remaining == 0 else BatchState.UPLOADING.value,
                     _now(),
                     batch_row["batch_id"],
+                    BatchState.NOT_INCLUDED.value,
                 ),
             )
 

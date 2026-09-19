@@ -12,13 +12,7 @@ from django.utils import timezone
 from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT, FaceEngineError
 
 from .face_services import search_face_index
-from .models import (
-    FaceSearchResultSet,
-    GuestCapability,
-    OwnerCapability,
-    PortalCapability,
-    SubEvent,
-)
+from .models import FaceSearchResultSet, PortalCapability, SubEvent
 
 _ACCEPTED_IMAGE_FORMATS = frozenset({"JPEG", "PNG", "WEBP", "HEIF", "HEIC"})
 
@@ -31,7 +25,7 @@ class FaceSearchError(ValueError):
 
 def create_face_search(
     *,
-    capability: OwnerCapability | GuestCapability | PortalCapability,
+    capability: PortalCapability,
     sub_event: SubEvent | None,
     uploaded_photo,
     engine,
@@ -64,28 +58,19 @@ def create_face_search(
                 "multiple_usable_faces",
                 "More than one usable face was found. Choose a photo containing one person.",
             )
-        event = (
-            capability.owner.event if isinstance(capability, GuestCapability) else capability.event
-        )
+        event = capability.event
         results = search_face_index(
             event_id=event.id,
             sub_event_id=sub_event.id if sub_event else None,
             embedding=usable_faces[0].embedding,
         )
-        values = {
-            "event": event,
-            "sub_event": sub_event,
-            "ordered_asset_ids": [str(result.asset_id) for result in results],
-            "expires_at": timezone.now()
-            + timedelta(seconds=settings.FACE_SEARCH_RESULT_TTL_SECONDS),
-        }
-        if isinstance(capability, OwnerCapability):
-            values["owner_capability"] = capability
-        elif isinstance(capability, GuestCapability):
-            values["guest_capability"] = capability
-        else:
-            values["portal_capability"] = capability
-        return FaceSearchResultSet.objects.create(**values)
+        return FaceSearchResultSet.objects.create(
+            portal_capability=capability,
+            event=event,
+            sub_event=sub_event,
+            ordered_asset_ids=[str(result.asset_id) for result in results],
+            expires_at=timezone.now() + timedelta(seconds=settings.FACE_SEARCH_RESULT_TTL_SECONDS),
+        )
     finally:
         image_bytes = b""
 
@@ -93,16 +78,9 @@ def create_face_search(
 def delete_face_search(
     *,
     result_id,
-    capability: OwnerCapability | GuestCapability | PortalCapability,
+    capability: PortalCapability,
 ) -> None:
-    query = FaceSearchResultSet.objects.filter(pk=result_id)
-    if isinstance(capability, OwnerCapability):
-        query = query.filter(owner_capability=capability)
-    elif isinstance(capability, GuestCapability):
-        query = query.filter(guest_capability=capability)
-    else:
-        query = query.filter(portal_capability=capability)
-    query.delete()
+    FaceSearchResultSet.objects.filter(pk=result_id, portal_capability=capability).delete()
 
 
 def _read_reference_photo(uploaded_photo) -> bytes:

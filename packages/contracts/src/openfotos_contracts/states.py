@@ -27,6 +27,7 @@ class InstallationStatus(StrEnum):
 class ContributionState(StrEnum):
     RESERVED = "reserved"
     COMPLETE = "complete"
+    NOT_INCLUDED = "not_included"
     CANCELLED = "cancelled"
 
 

@@ -397,6 +397,7 @@ def report_derivative_failure(
     return asset
 
 
+@transaction.atomic
 def issue_derivative_leases(
     *,
     session: DesktopSession,
@@ -406,7 +407,14 @@ def issue_derivative_leases(
     object_store: S3ObjectStore,
 ) -> list[dict]:
     event = event_for_session(session, event_id)
-    asset = _owned_asset(session=session, event=event, asset_id=asset_id)
+    locked_event = Event.objects.select_for_update().get(pk=event.pk)
+    if locked_event.state in {
+        EventState.PUBLISHED.value,
+        EventState.ARCHIVED.value,
+        EventState.CANCELLED.value,
+    }:
+        raise IngestionError("event_not_processing", "This event no longer accepts derivatives.")
+    asset = _owned_asset(session=session, event=locked_event, asset_id=asset_id)
     if not variants or len(set(variants)) != len(variants):
         raise IngestionError("invalid_request", "Choose one or two unique derivative variants.")
     uploads = AssetObject.objects.filter(

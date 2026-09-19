@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import tempfile
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,6 +65,19 @@ class FaceModelStore:
             if directory
             else (user_data_directory() / "models" / ACCEPTED_FACE_MODEL_CONTRACT.model.id)
         )
+        self._state = threading.Condition()
+        self._download_active = False
+
+    @property
+    def download_in_progress(self) -> bool:
+        with self._state:
+            return self._download_active
+
+    def wait_for_download(self, timeout: float | None = None) -> bool:
+        """Block while an automatic download runs, then report whether models are ready."""
+        with self._state:
+            finished = self._state.wait_for(lambda: not self._download_active, timeout)
+        return finished and self.verified_paths() is not None
 
     def verified_paths(self) -> FaceModelPaths | None:
         paths = tuple(self.directory / artifact.filename for artifact in _ARTIFACT_SOURCES)
@@ -79,38 +93,42 @@ class FaceModelStore:
         if paths is None:
             raise FaceModelSetupError(
                 "face_model_setup_required",
-                "Download or locate the accepted face models in Desktop settings.",
+                "The accepted face models have not finished downloading. Retry the download.",
             )
         return paths
-
-    def install_from_directory(self, source_directory: Path) -> FaceModelPaths:
-        source_directory = Path(source_directory)
-        temporary: list[tuple[Path, Path]] = []
-        self._prepare_directory()
-        try:
-            for artifact in _ARTIFACT_SOURCES:
-                source = source_directory / artifact.filename
-                temporary.append(
-                    (
-                        self._verified_temporary_copy(source, artifact),
-                        self.directory / artifact.filename,
-                    )
-                )
-            _install_temporaries(temporary)
-        finally:
-            for temporary_path, _ in temporary:
-                temporary_path.unlink(missing_ok=True)
-        return self.require_paths()
 
     def download(
         self,
         *,
         client: httpx.Client | None = None,
         progress: Callable[[int, int], None] | None = None,
+        is_cancelled: Callable[[], bool] | None = None,
     ) -> FaceModelPaths:
-        existing = self.verified_paths()
-        if existing is not None:
-            return existing
+        with self._state:
+            while self._download_active:
+                self._state.wait()
+            existing = self.verified_paths()
+            if existing is not None:
+                return existing
+            self._download_active = True
+        try:
+            return self._run_download(
+                client=client,
+                progress=progress,
+                is_cancelled=is_cancelled,
+            )
+        finally:
+            with self._state:
+                self._download_active = False
+                self._state.notify_all()
+
+    def _run_download(
+        self,
+        *,
+        client: httpx.Client | None,
+        progress: Callable[[int, int], None] | None,
+        is_cancelled: Callable[[], bool] | None,
+    ) -> FaceModelPaths:
         self._prepare_directory()
         owns_client = client is None
         active_client = client or httpx.Client(
@@ -122,7 +140,7 @@ class FaceModelStore:
             for index, artifact in enumerate(_ARTIFACT_SOURCES, start=1):
                 temporary.append(
                     (
-                        self._download_verified(active_client, artifact),
+                        self._download_verified(active_client, artifact, is_cancelled),
                         self.directory / artifact.filename,
                     )
                 )
@@ -141,21 +159,12 @@ class FaceModelStore:
         if os.name != "nt":
             self.directory.chmod(0o700)
 
-    def _verified_temporary_copy(self, source: Path, artifact: _ArtifactSource) -> Path:
-        if not source.is_file():
-            raise FaceModelSetupError(
-                "face_model_missing",
-                f"The selected folder does not contain {artifact.filename}.",
-            )
-        try:
-            with source.open("rb") as input_file:
-                return self._write_verified_stream(input_file, artifact)
-        except OSError as exc:
-            raise FaceModelSetupError(
-                "face_model_unreadable", "A selected face-model file could not be read."
-            ) from exc
-
-    def _download_verified(self, client: httpx.Client, artifact: _ArtifactSource) -> Path:
+    def _download_verified(
+        self,
+        client: httpx.Client,
+        artifact: _ArtifactSource,
+        is_cancelled: Callable[[], bool] | None,
+    ) -> Path:
         try:
             with client.stream("GET", artifact.url) as response:
                 response.raise_for_status()
@@ -164,7 +173,11 @@ class FaceModelStore:
                         "face_model_download_insecure",
                         "The face-model download left the required HTTPS transport.",
                     )
-                return self._write_verified_stream(response.iter_bytes(), artifact)
+                return self._write_verified_stream(
+                    response.iter_bytes(),
+                    artifact,
+                    is_cancelled=is_cancelled,
+                )
         except FaceModelSetupError:
             raise
         except httpx.HTTPError as exc:
@@ -173,7 +186,13 @@ class FaceModelStore:
                 "The accepted face models could not be downloaded. Try again or locate them.",
             ) from exc
 
-    def _write_verified_stream(self, source, artifact: _ArtifactSource) -> Path:
+    def _write_verified_stream(
+        self,
+        source,
+        artifact: _ArtifactSource,
+        *,
+        is_cancelled: Callable[[], bool] | None = None,
+    ) -> Path:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{artifact.filename}-", suffix=".part", dir=self.directory
         )
@@ -190,6 +209,11 @@ class FaceModelStore:
                     else iter(source)
                 )
                 for chunk in iterator:
+                    if is_cancelled is not None and is_cancelled():
+                        raise FaceModelSetupError(
+                            "face_model_download_cancelled",
+                            "The face-model download was cancelled.",
+                        )
                     if not chunk:
                         continue
                     written += len(chunk)
@@ -214,7 +238,11 @@ class FaceModelStore:
 
 
 def create_accepted_face_engine(store: FaceModelStore | None = None) -> OpenCvSFaceEngine:
-    paths = (store or FaceModelStore()).require_paths()
+    active_store = store or FaceModelStore()
+    # Only the face-embedding stage reaches this factory, so this is the one place that waits
+    # for the automatic launch download instead of failing mid-batch.
+    active_store.wait_for_download()
+    paths = active_store.require_paths()
     return OpenCvSFaceEngine(
         detector_path=paths.detector,
         recognizer_path=paths.recognizer,

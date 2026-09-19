@@ -18,6 +18,7 @@ class BatchState(StrEnum):
     RESERVED = "reserved"
     UPLOADING = "uploading"
     COMPLETE = "complete"
+    NOT_INCLUDED = "not_included"
 
 
 class SelectionKind(StrEnum):

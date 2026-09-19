@@ -1,24 +1,9 @@
 "use strict";
 
-function openPrivateLink() {
-  const landing = document.querySelector("[data-share-landing]");
-  if (!landing) return;
-  const values = new URLSearchParams(window.location.hash.slice(1));
-  const secret = values.get("secret");
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
-  if (!secret) {
-    landing.querySelector("[data-share-status]").textContent =
-      "This link is incomplete. Ask the sender for the complete private link.";
-    return;
-  }
-  landing.querySelector("[data-share-secret]").value = secret;
-  landing.querySelector("[data-share-present-form]").submit();
-}
-
 function shareCardText(card) {
   const url = card.querySelector("[data-share-url]").textContent.trim();
   const pin = card.querySelector("[data-share-pin]").textContent.trim();
-  return `OpenFotos private gallery\n${url}\nPIN: ${pin}\n`;
+  return `OneNodeAI Studio private gallery\n${url}\nPIN: ${pin}\n`;
 }
 
 function enableCredentialCard() {
@@ -37,11 +22,10 @@ function enableCredentialCard() {
     const objectUrl = URL.createObjectURL(new Blob([shareCardText(card)], { type: "text/plain" }));
     const download = document.createElement("a");
     download.href = objectUrl;
-    download.download = "openfotos-private-gallery.txt";
+    download.download = "onenodeai-studio-private-gallery.txt";
     download.click();
     URL.revokeObjectURL(objectUrl);
   });
 }
 
-openPrivateLink();
 enableCredentialCard();

@@ -1,0 +1,41 @@
+{% load static %}
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive">
+  <title>{{ event.name }} · {{ event.photographer.display_name }}</title>
+  <link rel="stylesheet" href="{% static 'openfotos_events/app.css' %}">
+</head>
+<body class="cover-body">
+  <div class="cover-shell">
+    <header class="cover-topbar">
+      <a class="cover-brand" href="{% url 'events:portfolio' %}">
+        {% if logo_url %}
+          <img src="{{ logo_url }}" alt="{{ event.photographer.display_name }}">
+        {% else %}
+          OneNodeAI Studio
+        {% endif %}
+      </a>
+      <span class="cover-lock">
+        <img src="{% static 'openfotos_events/icons/lock.svg' %}" alt="">
+        Private gallery
+      </span>
+    </header>
+    <main class="cover-stage">
+      {% if cover_url %}<img class="cover-image" src="{{ cover_url }}" alt="{{ event.name }}">{% endif %}
+      <div class="cover-copy">
+        <p class="cover-studio">{{ event.photographer.display_name }}</p>
+        <h1>{{ event.name }}</h1>
+        <a class="cover-action" href="{{ unlock_url }}">View gallery</a>
+      </div>
+    </main>
+    <footer class="legal-footer">
+      <a href="{% url 'events:privacy-notice' %}">Privacy</a>
+      <a href="{% url 'events:terms' %}">Terms</a>
+      <a href="https://github.com/openfotos/openfotos-platform" rel="noopener noreferrer">Source code</a>
+    </footer>
+  </div>
+</body>
+</html>

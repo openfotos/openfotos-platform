@@ -33,19 +33,19 @@ def _replace_output(path: Path) -> None:
 
 
 def archive_windows(source: Path, destination: Path) -> None:
-    output = destination / f"OpenFotos-{_project_version()}-windows-x64.zip"
+    output = destination / f"OneNodeAIStudio-{_project_version()}-windows-x64.zip"
     _replace_output(output)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for path in sorted(source.rglob("*")):
             if path.is_file():
-                archive.write(path, Path("OpenFotos") / path.relative_to(source))
+                archive.write(path, Path("OneNodeAIStudio") / path.relative_to(source))
 
 
 def archive_macos(source: Path, destination: Path) -> None:
-    output = destination / f"OpenFotos-{_project_version()}-macos-arm64.tar.gz"
+    output = destination / f"OneNodeAIStudio-{_project_version()}-macos-arm64.tar.gz"
     _replace_output(output)
     with tarfile.open(output, "w:gz", format=tarfile.PAX_FORMAT) as archive:
-        archive.add(source, arcname="OpenFotos.app", recursive=True)
+        archive.add(source, arcname="OneNodeAI Studio.app", recursive=True)
 
 
 def write_checksums(directory: Path) -> None:

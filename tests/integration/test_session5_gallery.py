@@ -29,10 +29,10 @@ from openfotos_server.events.models import (
     IngestionManifest,
     Photographer,
     PhotographerMembership,
+    PortalCapability,
     PreviewPolicy,
     SubEvent,
 )
-from openfotos_server.events.sharing_services import issue_owner_capability
 from openfotos_storage import PresignedGet
 
 pytestmark = pytest.mark.django_db
@@ -177,7 +177,7 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
     haldi_asset = _gallery_asset(event, haldi_batch, position=2)
     event.derivatives_ready_generation = 1
     event.face_index_ready_generation = 1
-    event.state = EventState.REVIEW.value
+    event.state = EventState.PUBLISHED.value
     event.save(
         update_fields=(
             "derivatives_ready_generation",
@@ -203,7 +203,7 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
         reverse("events:photographer-photo", args=(event.id, asset.id)),
         headers={"host": "alpha.localhost"},
     )
-    assert b"Download exact original" in photographer_photo.content
+    assert b"Download original" in photographer_photo.content
     photographer_download = photographer_client.get(
         reverse("events:photographer-download", args=(event.id, asset.id)),
         headers={"host": "alpha.localhost"},
@@ -224,19 +224,16 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
     event.refresh_from_db()
     assert event.state == EventState.PUBLISHED.value
 
-    issued = issue_owner_capability(event=event, actor=user)
+    portal = PortalCapability.objects.get(event=event)
+    portal.set_pin("0427")
+    portal.save(update_fields=("pin_hash", "updated_at"))
     visitor = Client()
-    photo_url = reverse("events:owner-photo", args=(issued.capability.id, asset.id))
+    photo_url = reverse("events:portal-photo", args=(event.slug, asset.id))
     assert visitor.get(photo_url, headers={"host": "alpha.localhost"}).status_code == 404
-    event_url = reverse("events:owner-gallery", args=(issued.capability.id,))
+    event_url = reverse("events:portal-gallery", args=(event.slug,))
     visitor.post(
-        reverse("events:owner-present", args=(issued.capability.id,)),
-        {"secret": issued.secret},
-        headers={"host": "alpha.localhost"},
-    )
-    visitor.post(
-        reverse("events:owner-unlock", args=(issued.capability.id,)),
-        {"pin": issued.pin},
+        reverse("events:portal-unlock", args=(event.slug,)),
+        {"pin": "0427"},
         headers={"host": "alpha.localhost"},
     )
     gallery = visitor.get(event_url, headers={"host": "alpha.localhost"})
@@ -251,41 +248,20 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
     assert b"previews" in photo.content
     assert b"originals" not in photo.content
     wrong_filtered_photo = reverse(
-        "events:owner-sub-event-photo",
-        args=(issued.capability.id, batch.sub_event_id, haldi_asset.id),
+        "events:portal-sub-event-photo",
+        args=(event.slug, batch.sub_event_id, haldi_asset.id),
     )
     assert visitor.get(wrong_filtered_photo, headers={"host": "alpha.localhost"}).status_code == 404
 
-    old_cookie = visitor.cookies[access_cookie_name(issued.capability)].value
+    old_cookie = visitor.cookies[access_cookie_name(portal)].value
     photographer_client.post(
         reverse("events:unpublish-event", args=(event.id,)),
         headers={"host": "alpha.localhost"},
     )
     event.refresh_from_db()
-    assert event.state == EventState.REVIEW.value
-    assert visitor.cookies[access_cookie_name(issued.capability)].value == old_cookie
+    assert event.state == EventState.UPLOADING.value
+    assert visitor.cookies[access_cookie_name(portal)].value == old_cookie
     assert visitor.get(photo_url, headers={"host": "alpha.localhost"}).status_code == 404
-
-    photographer_client.post(
-        reverse("events:publish-event", args=(event.id,)),
-        headers={"host": "alpha.localhost"},
-    )
-    locked_again = visitor.get(event_url, headers={"host": "alpha.localhost"})
-    assert locked_again.status_code == 200
-    assert b"Private Reception" not in locked_again.content
-    assert visitor.get(photo_url, headers={"host": "alpha.localhost"}).status_code == 404
-    visitor.post(
-        reverse("events:owner-present", args=(issued.capability.id,)),
-        {"secret": issued.secret},
-        headers={"host": "alpha.localhost"},
-    )
-    unlocked_again = visitor.post(
-        reverse("events:owner-unlock", args=(issued.capability.id,)),
-        {"pin": issued.pin},
-        headers={"host": "alpha.localhost"},
-    )
-    assert unlocked_again.status_code == 302
-    assert visitor.get(photo_url, headers={"host": "alpha.localhost"}).status_code == 200
 
 
 def test_dashboard_is_tenant_scoped_and_sub_event_filter_cannot_widen(monkeypatch) -> None:

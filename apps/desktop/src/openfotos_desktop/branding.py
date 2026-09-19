@@ -99,11 +99,11 @@ def _validate_text(value: str) -> str:
 def _load_logo(kind: WatermarkLogoKind, custom_path: Path | None) -> QImage | None:
     if kind is WatermarkLogoKind.NONE:
         return None
-    if kind is WatermarkLogoKind.OFTS:
-        renderer = QSvgRenderer(str(asset_path("ofts.svg")))
+    if kind is WatermarkLogoKind.ONENODEAI:
+        renderer = QSvgRenderer(str(asset_path("onenodeai.svg")))
         if not renderer.isValid():
-            raise WatermarkCompositionError("The built-in OFTS wordmark is unavailable.")
-        image = QImage(900, 274, QImage.Format.Format_ARGB32_Premultiplied)
+            raise WatermarkCompositionError("The built-in OneNodeAI wordmark is unavailable.")
+        image = QImage(900, 240, QImage.Format.Format_ARGB32_Premultiplied)
         image.fill(Qt.GlobalColor.transparent)
         painter = QPainter(image)
         renderer.render(painter)

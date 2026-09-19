@@ -97,7 +97,7 @@ async def _prepare_user(
         follow_redirects=True,
         timeout=httpx.Timeout(30, connect=10),
         trust_env=False,
-        headers={"User-Agent": "OpenFotos-Rehearsal-Load-Test/0.1"},
+        headers={"User-Agent": "OneNodeAI-Studio-Rehearsal-Load-Test/0.1"},
     )
     try:
         if operation == "unlock":

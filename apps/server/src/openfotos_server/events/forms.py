@@ -53,6 +53,7 @@ class SharePinForm(forms.Form):
                 "autocomplete": "one-time-code",
                 "inputmode": "numeric",
                 "pattern": "[0-9]{4}",
+                "class": "pin-input",
             }
         ),
     )
@@ -69,18 +70,6 @@ class BatchReassignmentForm(forms.Form):
 
 class GalleryExclusionForm(forms.Form):
     reason = forms.CharField(max_length=240, strip=True)
-
-
-class GuestCapabilityForm(forms.Form):
-    label = forms.CharField(max_length=80, strip=True, required=False)
-    sub_event_id = forms.ChoiceField(label="Gallery scope")
-
-    def __init__(self, *args, event, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.fields["sub_event_id"].choices = [
-            ("", "All Photos"),
-            *[(str(value.id), value.name) for value in event.sub_events.filter(is_archived=False)],
-        ]
 
 
 class FaceSearchForm(forms.Form):

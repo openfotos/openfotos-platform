@@ -4,29 +4,55 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ photographer.display_name }}</title>
+  <title>{{ photographer.display_name }} · OneNodeAI Studio</title>
   <link rel="stylesheet" href="{% static 'openfotos_events/app.css' %}">
 </head>
 <body class="portfolio-body">
   <header class="portfolio-topbar">
-    {% if photographer.instagram_url %}<a href="{{ photographer.instagram_url }}" rel="noopener noreferrer" aria-label="Instagram">Instagram</a>{% else %}<span></span>{% endif %}
-    <form class="portfolio-search" method="get" role="search">
-      <label class="visually-hidden" for="portfolio-query">Search events</label>
-      <input id="portfolio-query" name="q" value="{{ search }}" maxlength="100" placeholder="Search events">
-      <button type="submit">Search</button>
-    </form>
+    <div class="portfolio-topbar-side">
+      {% if photographer.instagram_url %}
+        <a class="icon-button" href="{{ photographer.instagram_url }}" rel="noopener noreferrer" aria-label="Instagram profile">
+          <img src="{% static 'openfotos_events/icons/instagram.svg' %}" alt="">
+        </a>
+      {% endif %}
+    </div>
+    <div class="portfolio-topbar-side">
+      {% if photographer.contact_phone %}
+        <a class="phone-link" href="tel:{{ photographer.contact_phone }}">
+          <img src="{% static 'openfotos_events/icons/phone.svg' %}" alt="">
+          <span>{{ photographer.contact_phone }}</span>
+        </a>
+      {% endif %}
+      <details class="portfolio-search"{% if search %} open{% endif %}>
+        <summary class="icon-button" aria-label="Search events" title="Search events">
+          <img src="{% static 'openfotos_events/icons/search.svg' %}" alt="">
+        </summary>
+        <form class="portfolio-search-panel" method="get" role="search">
+          <label class="visually-hidden" for="portfolio-query">Search events</label>
+          <input id="portfolio-query" name="q" value="{{ search }}" maxlength="100" placeholder="Search events">
+          <button type="submit">Search</button>
+        </form>
+      </details>
+    </div>
   </header>
-  <main class="portfolio-shell">
+  <main class="page-shell">
     <section class="portfolio-brand">
-      {% if logo_url %}<img src="{{ logo_url }}" alt="{{ photographer.display_name }} logo">{% else %}<h1>{{ photographer.display_name }}</h1>{% endif %}
-      {% if photographer.contact_phone %}<a href="tel:{{ photographer.contact_phone }}">{{ photographer.contact_phone }}</a>{% endif %}
+      {% if logo_url %}
+        <img class="portfolio-logo" src="{{ logo_url }}" alt="{{ photographer.display_name }}">
+      {% else %}
+        <h1>{{ photographer.display_name }}</h1>
+      {% endif %}
+      <p class="portfolio-tagline">Private event galleries</p>
     </section>
     <section class="portfolio-grid" aria-label="Published events">
       {% for card in cards %}
         <article class="portfolio-card">
-          {% if card.portal %}<a href="{% url 'events:portal-gallery' capability_id=card.portal.id %}">{% endif %}
-            <img src="{{ card.cover_url }}" width="{{ card.event.cover_width }}" height="{{ card.event.cover_height }}" loading="lazy" alt="{{ card.event.name }}">
+          {% if card.portal %}<a href="{% url 'events:portal-gallery' card.event.slug %}">{% endif %}
+            <div class="portfolio-card-media">
+              <img src="{{ card.cover_url }}" width="{{ card.event.cover_width }}" height="{{ card.event.cover_height }}" loading="lazy" alt="{{ card.event.name }}">
+            </div>
             <h2>{{ card.event.name }}</h2>
+            {% if card.portal %}<p class="portfolio-card-action">View gallery</p>{% endif %}
           {% if card.portal %}</a>{% else %}<p class="muted">Gallery no longer available</p>{% endif %}
         </article>
       {% empty %}

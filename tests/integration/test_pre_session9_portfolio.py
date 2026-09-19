@@ -23,9 +23,7 @@ from openfotos_server.events.models import (
     EventInstallation,
     FaceAnalysis,
     FaceSearchResultSet,
-    GuestCapability,
     IngestionManifest,
-    OwnerCapability,
     Photographer,
     PhotographerMembership,
     PortalCapability,
@@ -161,6 +159,7 @@ def test_portfolio_lists_only_published_events_and_portal_pin_unlocks_without_ow
         expires_at=now + timedelta(days=20),
         first_published_at=now,
         purge_after=now + timedelta(days=50),
+        slug="published-wedding",
     )
     draft = Event.objects.create(
         photographer=photographer,
@@ -182,17 +181,27 @@ def test_portfolio_lists_only_published_events_and_portal_pin_unlocks_without_ow
     assert listing.status_code == 200
     assert published.name.encode() in listing.content
     assert draft.name.encode() not in listing.content
-    assert reverse("events:portal-gallery", args=(portal.id,)).encode() in listing.content
+    portal_url = reverse("events:portal-gallery", args=(published.slug,))
+    assert portal_url == "/portfolio/events/published-wedding/"
+    assert portal_url.encode() in listing.content
+    assert str(portal.id).encode() not in listing.content
+    legacy_uuid_url = f"/portfolio/events/{portal.id}/"
+    assert client.get(legacy_uuid_url, headers={"host": "alpha.localhost"}).status_code == 404
 
     locked = client.get(
-        reverse("events:portal-gallery", args=(portal.id,)),
+        portal_url,
         headers={"host": "alpha.localhost"},
     )
     assert locked.status_code == 200
-    assert b"Enter the four-digit PIN" in locked.content
+    assert b"View gallery" in locked.content
+    unlock_page = client.get(
+        reverse("events:portal-unlock", args=(published.slug,)),
+        headers={"host": "alpha.localhost"},
+    )
+    assert b"Enter the four-digit PIN" in unlock_page.content
 
     unlocked = client.post(
-        reverse("events:portal-unlock", args=(portal.id,)),
+        reverse("events:portal-unlock", args=(published.slug,)),
         {"pin": "0427"},
         headers={"host": "alpha.localhost"},
     )
@@ -200,7 +209,71 @@ def test_portfolio_lists_only_published_events_and_portal_pin_unlocks_without_ow
     gallery = client.get(unlocked.url, headers={"host": "alpha.localhost"})
     assert gallery.status_code == 200
     assert b"Owner controls" not in gallery.content
-    assert b"Search with one clear face" in gallery.content
+    assert b"Search with your face" in gallery.content
+
+
+def test_first_publication_assigns_frozen_collision_safe_event_slug(tenant) -> None:
+    photographer, user = tenant
+    expires_at = timezone.now() + timedelta(days=1)
+    events = [
+        Event.objects.create(
+            photographer=photographer,
+            name=name,
+            state=EventState.PUBLISHED.value,
+            cover_object_key=f"events/{index}/portfolio/cover.jpg",
+            cover_sha256=f"{index}" * 64,
+            cover_width=1200,
+            cover_height=800,
+            expires_at=expires_at,
+        )
+        for index, name in enumerate(
+            ("Mallur House Warming", "Mallur_House Warming!"),
+            start=1,
+        )
+    ]
+    for event in events:
+        ConsentAttestation.objects.create(
+            event=event,
+            actor=user,
+            notice_version=CONSENT_NOTICE_VERSION,
+        )
+
+    first = publish_event_with_portal(event=events[0], actor=user)
+    second = publish_event_with_portal(event=events[1], actor=user)
+
+    assert first.event.slug == "mallur-house-warming"
+    assert second.event.slug == "mallur-house-warming-2"
+
+    first.event.name = "Renamed Celebration"
+    first.event.save(update_fields=("name", "updated_at"))
+    republished = publish_event_with_portal(event=first.event, actor=user)
+
+    assert republished.event.slug == "mallur-house-warming"
+    assert reverse("events:portal-gallery", args=(republished.event.slug,)) == (
+        "/portfolio/events/mallur-house-warming/"
+    )
+
+
+def test_slug_portal_lookup_keeps_the_photographer_tenant_boundary(tenant) -> None:
+    _photographer, _user = tenant
+    other = Photographer.objects.create(slug="beta", display_name="Beta Photos")
+    event = Event.objects.create(
+        photographer=other,
+        name="Other Wedding",
+        slug="other-wedding",
+        state=EventState.PUBLISHED.value,
+        expires_at=timezone.now() + timedelta(days=1),
+    )
+    portal = PortalCapability(event=event, expires_at=event.expires_at)
+    portal.set_pin("0427")
+    portal.save()
+
+    response = Client().get(
+        reverse("events:portal-gallery", args=(event.slug,)),
+        headers={"host": "alpha.localhost"},
+    )
+
+    assert response.status_code == 404
 
 
 def test_first_publication_creates_one_time_four_digit_portal_pin(tenant) -> None:
@@ -301,21 +374,6 @@ def test_due_retention_purge_removes_private_media_and_keeps_cover_card(tenant) 
     )
     event.current_ingestion_manifest = manifest
     event.save(update_fields=("current_ingestion_manifest",))
-    owner = OwnerCapability(
-        event=event,
-        created_by=user,
-        secret_digest="1" * 64,
-        expires_at=now + timedelta(days=1),
-    )
-    owner.set_pin("1234")
-    owner.save()
-    guest = GuestCapability(
-        owner=owner,
-        secret_digest="2" * 64,
-        expires_at=now + timedelta(days=1),
-    )
-    guest.set_pin("5678")
-    guest.save()
     portal = PortalCapability(event=event, expires_at=now + timedelta(days=1))
     portal.set_pin("0427")
     portal.save()
@@ -340,8 +398,6 @@ def test_due_retention_purge_removes_private_media_and_keeps_cover_card(tenant) 
     assert batch.declared_original_bytes == 0
     assert not AssetObject.objects.filter(asset=asset).exists()
     assert not IngestionManifest.objects.filter(event=event).exists()
-    assert not OwnerCapability.objects.filter(event=event).exists()
-    assert not GuestCapability.objects.filter(owner=owner).exists()
     assert not PortalCapability.objects.filter(event=event).exists()
 
 
@@ -468,16 +524,11 @@ def test_privacy_erasure_quarantines_then_removes_the_entire_event(tenant) -> No
         lease_expires_at=now + timedelta(minutes=5),
     )
     FaceAnalysis.objects.create(asset=asset, model_id=event.face_model_id)
-    owner = OwnerCapability(
-        event=event,
-        created_by=user,
-        secret_digest="1" * 64,
-        expires_at=now + timedelta(days=1),
-    )
-    owner.set_pin("1234")
-    owner.save()
+    portal = PortalCapability(event=event, expires_at=now + timedelta(days=1))
+    portal.set_pin("1234")
+    portal.save()
     FaceSearchResultSet.objects.create(
-        owner_capability=owner,
+        portal_capability=portal,
         event=event,
         ordered_asset_ids=[str(asset.id)],
         expires_at=now + timedelta(minutes=10),
@@ -499,7 +550,7 @@ def test_privacy_erasure_quarantines_then_removes_the_entire_event(tenant) -> No
     assert event.state == EventState.CANCELLED.value
     assert event.intake_state == IntakeState.CLOSED.value
     assert event.erasure_requested_at == now
-    assert not OwnerCapability.objects.filter(event=event).exists()
+    assert not PortalCapability.objects.filter(event=event).exists()
     assert not FaceSearchResultSet.objects.filter(event=event).exists()
     assert set(store.objects) == {cover_key, original_key}
 

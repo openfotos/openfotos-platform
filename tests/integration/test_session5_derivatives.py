@@ -228,7 +228,6 @@ def _derivative_input(asset, policy):
 def test_derivatives_are_owned_verified_and_make_current_generation_ready() -> None:
     event, primary, installation = _setup()
     storage = MemoryObjectStore()
-    asset, original_content = _verified_original(event, installation, storage)
     policy = confirm_preview_policy(
         session=primary,
         event_id=event.id,
@@ -237,12 +236,13 @@ def test_derivatives_are_owned_verified_and_make_current_generation_ready() -> N
                 "enabled": True,
                 "template": "compact-bottom-right",
                 "text": "",
-                "logo_kind": "ofts",
+                "logo_kind": "onenodeai",
                 "mark_png_base64": _mark(),
             }
         ),
         object_store=storage,
     )
+    asset, original_content = _verified_original(event, installation, storage)
     value, contents = _derivative_input(asset, policy)
     registered = register_asset_derivatives(session=installation, event_id=event.id, value=value)
     assert {item.variant for item in registered} == {"previews", "thumbnails"}

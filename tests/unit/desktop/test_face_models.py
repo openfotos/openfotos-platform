@@ -1,4 +1,5 @@
 import hashlib
+import threading
 from pathlib import Path
 
 import httpx
@@ -6,47 +7,6 @@ import pytest
 
 import openfotos_desktop.face_models as face_models
 from openfotos_desktop.face_models import FaceModelSetupError, FaceModelStore
-from openfotos_vision import ACCEPTED_FACE_MODEL_CONTRACT
-
-
-def _write_accepted_source(directory: Path) -> None:
-    directory.mkdir()
-    for index, artifact in enumerate(ACCEPTED_FACE_MODEL_CONTRACT.model.artifacts):
-        content = f"synthetic-{index}".encode()
-        (directory / artifact.filename).write_bytes(content)
-
-
-def test_located_models_are_verified_before_atomic_install(tmp_path: Path, monkeypatch) -> None:
-    source = tmp_path / "source"
-    destination = tmp_path / "private"
-    _write_accepted_source(source)
-    artifacts = ACCEPTED_FACE_MODEL_CONTRACT.model.artifacts
-    expected = tuple(
-        hashlib.sha256((source / artifact.filename).read_bytes()).hexdigest()
-        for artifact in artifacts
-    )
-    monkeypatch.setattr(
-        face_models,
-        "_ARTIFACT_SOURCES",
-        tuple(
-            face_models._ArtifactSource(
-                filename=value.filename,
-                sha256=digest,
-                url=value.url,
-            )
-            for value, digest in zip(
-                face_models._ARTIFACT_SOURCES,
-                expected,
-                strict=True,
-            )
-        ),
-    )
-
-    paths = FaceModelStore(destination).install_from_directory(source)
-
-    assert paths.detector.parent == destination
-    assert paths.recognizer.parent == destination
-    assert not list(destination.glob("*.part"))
 
 
 def test_hash_mismatch_leaves_no_installed_or_partial_artifact(tmp_path: Path) -> None:
@@ -65,6 +25,72 @@ def test_hash_mismatch_leaves_no_installed_or_partial_artifact(tmp_path: Path) -
         store.download(client=client)
 
     assert raised.value.code == "face_model_hash_mismatch"
+    assert store.verified_paths() is None
+    assert not list(store.directory.glob("*.part"))
+
+
+def test_wait_for_download_reports_readiness_and_blocks_active_downloads(
+    tmp_path: Path, monkeypatch
+) -> None:
+    contents = {
+        artifact.filename: f"downloaded-{index}".encode()
+        for index, artifact in enumerate(face_models._ARTIFACT_SOURCES)
+    }
+    monkeypatch.setattr(
+        face_models,
+        "_ARTIFACT_SOURCES",
+        tuple(
+            face_models._ArtifactSource(
+                filename=artifact.filename,
+                sha256=hashlib.sha256(contents[artifact.filename]).hexdigest(),
+                url=artifact.url,
+            )
+            for artifact in face_models._ARTIFACT_SOURCES
+        ),
+    )
+    release = threading.Event()
+    started = threading.Event()
+
+    def response(request: httpx.Request) -> httpx.Response:
+        started.set()
+        assert release.wait(5)
+        filename = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, content=contents[filename], request=request)
+
+    store = FaceModelStore(tmp_path / "private")
+    assert store.wait_for_download(0.01) is False
+    download = threading.Thread(
+        target=lambda: store.download(client=httpx.Client(transport=httpx.MockTransport(response)))
+    )
+    download.start()
+    assert started.wait(5)
+    waiter_result: list[bool] = []
+    waiter = threading.Thread(
+        target=lambda: waiter_result.append(store.wait_for_download(5)),
+    )
+    waiter.start()
+    assert waiter.is_alive()
+    release.set()
+    download.join(5)
+    waiter.join(5)
+
+    assert waiter_result == [True]
+    assert store.wait_for_download(0.01) is True
+    assert store.verified_paths() is not None
+
+
+def test_cancelled_download_leaves_no_partial_artifact(tmp_path: Path) -> None:
+    store = FaceModelStore(tmp_path / "private")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, content=b"partial", request=request)
+        )
+    )
+
+    with pytest.raises(FaceModelSetupError) as raised:
+        store.download(client=client, is_cancelled=lambda: True)
+
+    assert raised.value.code == "face_model_download_cancelled"
     assert store.verified_paths() is None
     assert not list(store.directory.glob("*.part"))
 

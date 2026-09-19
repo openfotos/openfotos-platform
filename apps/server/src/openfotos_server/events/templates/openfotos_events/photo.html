@@ -1,40 +1,72 @@
 {% extends "openfotos_events/base.html" %}
+{% load static %}
 
 {% block title %}Photo {{ image.asset.gallery_position }} · {{ event.name }}{% endblock %}
 
-{% block content %}
-<div class="photo-toolbar">
-  {% if dashboard_mode %}
-    {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>{% else %}<a href="{% url 'events:photographer-event' event_id=event.id %}">← Gallery review</a>{% endif %}
-  {% else %}
-    {% if selected_sub_event %}<a href="{% url sub_event_route capability_id=capability.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>{% else %}<a href="{% url gallery_route capability_id=capability.id %}">← Gallery</a>{% endif %}
-  {% endif %}
-  <span>Photo {{ image.asset.gallery_position }}</span>
-</div>
-<figure class="photo-stage">
-  <img src="{{ image.url }}" width="{{ image.width }}" height="{{ image.height }}" alt="Photo {{ image.asset.gallery_position }} from {{ event.name }}">
-</figure>
-<p class="download-row">
+{% block header %}
+  <header class="photo-topbar">
     {% if dashboard_mode %}
-      {% if selected_sub_event %}<a class="button-link" href="{% url 'events:photographer-sub-event-download' event_id=event.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">Download exact original</a>{% else %}<a class="button-link" href="{% url 'events:photographer-download' event_id=event.id asset_id=image.asset.id %}">Download exact original</a>{% endif %}
+      {% if selected_sub_event %}
+        <a class="photo-back" href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>
+      {% else %}
+        <a class="photo-back" href="{% url 'events:photographer-event' event_id=event.id %}">← Gallery review</a>
+      {% endif %}
     {% else %}
-      {% if selected_sub_event %}<a class="button-link" href="{% url sub_event_download_route capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">Download exact original</a>{% else %}<a class="button-link" href="{% url download_route capability_id=capability.id asset_id=image.asset.id %}">Download exact original</a>{% endif %}
+      {% if selected_sub_event %}
+        <a class="photo-back" href="{% url sub_event_route route_identifier selected_sub_event.id %}">← {{ selected_sub_event.name }}</a>
+      {% else %}
+        <a class="photo-back" href="{% url gallery_route route_identifier %}">← {{ event.name }}</a>
+      {% endif %}
     {% endif %}
-</p>
-<nav class="photo-navigation" aria-label="Photo navigation">
+    <span class="photo-counter">Photo {{ image.asset.gallery_position }}</span>
+    {% if dashboard_mode %}
+      {% if selected_sub_event %}
+        <a class="photo-download" href="{% url 'events:photographer-sub-event-download' event_id=event.id sub_event_id=selected_sub_event.id asset_id=image.asset.id %}">Download original</a>
+      {% else %}
+        <a class="photo-download" href="{% url 'events:photographer-download' event_id=event.id asset_id=image.asset.id %}">Download original</a>
+      {% endif %}
+    {% else %}
+      {% if selected_sub_event %}
+        <a class="photo-download" href="{% url sub_event_download_route route_identifier selected_sub_event.id image.asset.id %}">Download original</a>
+      {% else %}
+        <a class="photo-download" href="{% url download_route route_identifier image.asset.id %}">Download original</a>
+      {% endif %}
+    {% endif %}
+  </header>
+{% endblock %}
+
+{% block content %}
+<figure class="photo-stage">
   {% if previous_asset %}
     {% if dashboard_mode %}
-      {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url 'events:photographer-photo' event_id=event.id asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
+      {% if selected_sub_event %}
+        <a class="photo-arrow photo-arrow-left" href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}" aria-label="Previous photo"><img src="{% static 'openfotos_events/icons/arrow-left.svg' %}" alt=""></a>
+      {% else %}
+        <a class="photo-arrow photo-arrow-left" href="{% url 'events:photographer-photo' event_id=event.id asset_id=previous_asset.id %}" aria-label="Previous photo"><img src="{% static 'openfotos_events/icons/arrow-left.svg' %}" alt=""></a>
+      {% endif %}
     {% else %}
-      {% if selected_sub_event %}<a href="{% url sub_event_photo_route capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=previous_asset.id %}">Previous photo</a>{% else %}<a href="{% url photo_route capability_id=capability.id asset_id=previous_asset.id %}">Previous photo</a>{% endif %}
-    {% endif %}
-  {% else %}<span></span>{% endif %}
-  {% if next_asset %}
-    {% if dashboard_mode %}
-      {% if selected_sub_event %}<a href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url 'events:photographer-photo' event_id=event.id asset_id=next_asset.id %}">Next photo</a>{% endif %}
-    {% else %}
-      {% if selected_sub_event %}<a href="{% url sub_event_photo_route capability_id=capability.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}">Next photo</a>{% else %}<a href="{% url photo_route capability_id=capability.id asset_id=next_asset.id %}">Next photo</a>{% endif %}
+      {% if selected_sub_event %}
+        <a class="photo-arrow photo-arrow-left" href="{% url sub_event_photo_route route_identifier selected_sub_event.id previous_asset.id %}" aria-label="Previous photo"><img src="{% static 'openfotos_events/icons/arrow-left.svg' %}" alt=""></a>
+      {% else %}
+        <a class="photo-arrow photo-arrow-left" href="{% url photo_route route_identifier previous_asset.id %}" aria-label="Previous photo"><img src="{% static 'openfotos_events/icons/arrow-left.svg' %}" alt=""></a>
+      {% endif %}
     {% endif %}
   {% endif %}
-</nav>
+  <img src="{{ image.url }}" width="{{ image.width }}" height="{{ image.height }}" alt="Photo {{ image.asset.gallery_position }} from {{ event.name }}">
+  {% if next_asset %}
+    {% if dashboard_mode %}
+      {% if selected_sub_event %}
+        <a class="photo-arrow photo-arrow-right" href="{% url 'events:photographer-sub-event-photo' event_id=event.id sub_event_id=selected_sub_event.id asset_id=next_asset.id %}" aria-label="Next photo"><img src="{% static 'openfotos_events/icons/arrow-right.svg' %}" alt=""></a>
+      {% else %}
+        <a class="photo-arrow photo-arrow-right" href="{% url 'events:photographer-photo' event_id=event.id asset_id=next_asset.id %}" aria-label="Next photo"><img src="{% static 'openfotos_events/icons/arrow-right.svg' %}" alt=""></a>
+      {% endif %}
+    {% else %}
+      {% if selected_sub_event %}
+        <a class="photo-arrow photo-arrow-right" href="{% url sub_event_photo_route route_identifier selected_sub_event.id next_asset.id %}" aria-label="Next photo"><img src="{% static 'openfotos_events/icons/arrow-right.svg' %}" alt=""></a>
+      {% else %}
+        <a class="photo-arrow photo-arrow-right" href="{% url photo_route route_identifier next_asset.id %}" aria-label="Next photo"><img src="{% static 'openfotos_events/icons/arrow-right.svg' %}" alt=""></a>
+      {% endif %}
+    {% endif %}
+  {% endif %}
+</figure>
 {% endblock %}

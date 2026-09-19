@@ -1,9 +1,11 @@
-# OpenFotos
+# OneNodeAI Studio
 
-OpenFotos is a supervised pilot for private wedding photo delivery and event-scoped face-based
-photo discovery. A photographer organizes one main wedding into sub-events such as Haldi,
+OneNodeAI Studio is a supervised pilot for private wedding photo delivery and event-scoped
+face-based photo discovery. A photographer organizes one main wedding into sub-events such as Haldi,
 Reception, and Marriage, then processes edited JPEG/JPG, PNG, WebP, HEIC, or HEIF images with one
-account across tracked desktop installations. RAW formats are intentionally unsupported.
+account across tracked desktop installations. RAW formats are intentionally unsupported. The
+photographer desktop is branded **OneNodeAI Studio**; the Python package and Django application
+names remain `openfotos_*` internally.
 
 The pilot deliberately targets one photographer, wedding-sized events with up to 50,000,000,000
 bytes of originals and 10,000 photos, up to 50 sub-events, one to ten active desktop installations,
@@ -31,8 +33,10 @@ unblocked Session 7. The
 [direct face-index decision](docs/adr/0011-direct-per-photo-face-index.md) records the strict
 desktop-to-server document, retry/reset behavior, publication gate, and exact SQL search scope. The
 [Session 8 sharing decision](docs/adr/0012-owner-guest-capabilities-ephemeral-search-and-downloads.md)
-records owner/guest authority, fragment-secret/PIN delivery, expiry/revocation, ephemeral search,
-and visibility-derived exact-original downloads.
+is retained as superseded history. The
+[photographer UX revision](docs/adr/0014-name-based-event-access-and-simplified-studio-workflow.md)
+replaces owner/guest capabilities with one name-based event link and event PIN, upload-until-publish
+snapshot semantics, and event-wide browsing, face search, and exact-original downloads.
 The [pre-Session 9 workflow decision](docs/adr/0013-studio-portfolio-portal-formats-and-retention.md)
 records photographer-created events, portfolio/portal authority, accepted image formats, one-bucket
 storage, and 365+30-day retention.
@@ -78,15 +82,14 @@ uv run python -m openfotos_desktop
 ```
 
 For a photographer with slug `demo`, use `http://demo.localhost:8000` as the server. Photographer
-login, durable refresh, private direct upload, pause/resume, intake closure, and manifest
-finalization use the desktop API. Before creating a contribution, the desktop requires one active
-sub-event selected from the server snapshot. The photographer confirms optional preview
-watermarking; the same sync action uploads originals, generates private previews/thumbnails, and
-then uploads strict per-photo face-analysis results. Use **Face model settings** in the desktop
-header to download and SHA-256-verify the accepted YuNet/SFace files, or to locate existing copies.
-Weights remain in the private desktop application-data directory and are never committed. To run
-local inventory without a server, start the
-explicit synthetic demo instead:
+login, durable refresh, private direct upload, pause/resume, and atomic publication use the desktop
+API. Before creating a contribution, the desktop requires one active sub-event selected from the
+server snapshot. Uploads are accepted at any time until the event is published. The desktop
+downloads the accepted face models automatically on launch and shows an inline retry if that fails;
+only the face-embedding stage waits for them. Use **Watermark settings** on the event screen to
+optionally configure preview branding before the first submission. Weights remain in the private
+desktop application-data directory and are never committed. To run local inventory without a
+server, start the explicit synthetic demo instead:
 
 ```bash
 uv run python -m openfotos_desktop --demo
@@ -106,10 +109,11 @@ Django user, Photographer tenant with permanent DNS slug, then an active Photogr
 joining them. A photographer with slug `demo` signs in at `http://demo.localhost:8000/login/` and
 creates the main event—with mandatory name, cover, and consent attestation—from the dashboard.
 Create at least one sub-event before upload/publication. The portfolio is the tenant root at
-`http://demo.localhost:8000/`. First publication lists its card and reveals the dedicated portal's
-generated four-digit PIN once. The photographer separately issues the one private owner link; its
-fragment-secret URL and four-digit PIN are also shown once. Only that owner creates whole-event or
-sub-event guest links.
+`http://demo.localhost:8000/`. First publication assigns the frozen event slug, lists the event
+card, and reveals the dedicated event PIN once. The public gallery lives at
+`/portfolio/events/<event-slug>/`: the cover page is public, and the single four-digit PIN unlocks
+all active sub-events, face search, and exact-original downloads. A suspected leak is handled by
+rotating the event PIN or unpublishing the event.
 
 For development checks:
 
@@ -119,7 +123,7 @@ uv sync --extra server --extra desktop --extra vision
 ```
 
 The default fast suite uses SQLite. The Session 7–8 CI job runs migrations, exact cosine-scope
-tests, and the public capability/search/download boundary against `pgvector/pgvector:pg16`. To
+tests, and the public portal/search/download boundary against `pgvector/pgvector:pg16`. To
 exercise the same boundary locally with the repository service:
 
 ```bash
@@ -147,17 +151,17 @@ cleanup command manually in development and every 15 minutes in deployed environ
 uv run python apps/server/manage.py purge_expired_face_searches
 ```
 
-`reset_share_access --confirm RESET-ALL-SHARE-ACCESS` is an emergency-only operation to revoke all
-owner/guest links before replacing a suspected-compromised `SHARE_PIN_PEPPER`. Capability expiry
-does not itself delete event media. After an event's 365-day lifetime and 30-day grace period, an
-operator verifies the exact event and backup state, then runs the audited purge:
+`reset_share_access --confirm RESET-ALL-SHARE-ACCESS` is an emergency-only operation to revoke every
+event PIN before replacing a suspected-compromised `SHARE_PIN_PEPPER`. Event expiry does not itself
+delete event media. After an event's 365-day lifetime and 30-day grace period, an operator verifies
+the exact event and backup state, then runs the audited purge:
 
 ```bash
 uv run python apps/server/manage.py purge_expired_event_media \
   --event-id 00000000-0000-4000-8000-000000000000 --confirm
 ```
 
-The purge verifies deletion of private media/manifests/marks, removes face/search/capability state,
+The purge verifies deletion of private media/manifests/marks, removes face/search/portal state,
 and keeps the consented event title and sanitized cover as a non-clickable portfolio card.
 
 For verified privacy removal, use `erase_event_for_privacy`; it immediately unpublishes and revokes

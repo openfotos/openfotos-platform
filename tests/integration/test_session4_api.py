@@ -189,6 +189,43 @@ def test_desktop_login_is_tenant_scoped_and_contract_is_strict(tenant) -> None:
     assert chosen_key.json()["error"]["code"] == "invalid_request"
 
 
+def test_desktop_logout_revokes_the_refresh_token_and_stays_tenant_scoped(tenant) -> None:
+    _, _, _event = tenant
+    client = Client()
+    signed_in = login(client)
+
+    wrong_host = post_json(
+        client,
+        reverse("desktop-api:logout"),
+        {"refresh_token": signed_in["refresh_token"]},
+        host="localhost",
+    )
+    assert wrong_host.status_code == 404
+
+    revoked = post_json(
+        client,
+        reverse("desktop-api:logout"),
+        {"refresh_token": signed_in["refresh_token"]},
+    )
+    assert revoked.status_code == 200
+    assert revoked.json() == {"revoked": True}
+
+    refreshed = post_json(
+        client,
+        reverse("desktop-api:refresh"),
+        {"refresh_token": signed_in["refresh_token"]},
+    )
+    assert refreshed.status_code == 401
+    assert refreshed.json()["error"]["code"] == "invalid_refresh_token"
+
+    repeated = post_json(
+        client,
+        reverse("desktop-api:logout"),
+        {"refresh_token": signed_in["refresh_token"]},
+    )
+    assert repeated.status_code == 200
+
+
 def test_photographer_installations_share_event_visibility_and_idempotency_is_strict(
     tenant,
 ) -> None:
@@ -236,21 +273,10 @@ def test_photographer_installations_share_event_visibility_and_idempotency_is_st
     assert private.json()["id"] == payload["batch_id"]
 
 
-def test_pending_idempotency_claim_blocks_a_duplicate_before_mutation(tenant) -> None:
-    _, user, event = tenant
+def test_intake_control_endpoint_is_not_exposed(tenant) -> None:
+    _, _user, event = tenant
     client = Client()
     primary = login(client)
-    session = DesktopSession.objects.get(user=user)
-    idempotency_key = uuid4()
-    IdempotencyRecord.objects.create(
-        actor_key=str(session.id),
-        key=idempotency_key,
-        operation="close_intake",
-        request_sha256=hashlib.sha256(b"{}").hexdigest(),
-        response_status=0,
-        response_body={},
-        expires_at=timezone.now() + timedelta(minutes=5),
-    )
 
     response = client.post(
         f"/api/v1/events/{event.id}/intake/close/",
@@ -259,16 +285,11 @@ def test_pending_idempotency_claim_blocks_a_duplicate_before_mutation(tenant) ->
         headers={
             "host": "alpha.localhost",
             "authorization": f"Bearer {primary['access_token']}",
-            "idempotency-key": str(idempotency_key),
+            "idempotency-key": str(uuid4()),
         },
     )
 
-    assert response.status_code == 409
-    assert response.json()["error"] == {
-        "code": "idempotency_in_progress",
-        "message": "The matching request is still in progress; retry it shortly.",
-        "retryable": True,
-    }
+    assert response.status_code == 404
     event.refresh_from_db()
     assert event.intake_state == "open"
 
@@ -302,7 +323,7 @@ def test_failed_mutation_releases_its_idempotency_claim(tenant) -> None:
     assert reserved.status_code == 201, reserved.json()
 
 
-def test_api_upload_recovery_close_and_finalize(monkeypatch, tenant) -> None:
+def test_api_upload_completes_without_exposing_close_or_finalize(monkeypatch, tenant) -> None:
     _, _, event = tenant
     client = Client()
     storage = MemoryObjectStore()
@@ -344,13 +365,12 @@ def test_api_upload_recovery_close_and_finalize(monkeypatch, tenant) -> None:
         token=installation_token,
         idempotency_key=uuid4(),
     )
-    assert closed.status_code == 200
+    assert closed.status_code == 404
     finalized = post_json(
         client,
-        reverse("desktop-api:finalize", args=(event.id,)),
+        f"/api/v1/events/{event.id}/finalize/",
         {},
         token=photographer["access_token"],
         idempotency_key=uuid4(),
     )
-    assert finalized.status_code == 200, finalized.json()
-    assert finalized.json()["asset_count"] == 1
+    assert finalized.status_code == 404

@@ -5,7 +5,7 @@ from django.db.backends.signals import connection_created
 class EventsConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "openfotos_server.events"
-    verbose_name = "OpenFotos events"
+    verbose_name = "OneNodeAI Studio events"
 
     def ready(self) -> None:
         from openfotos_server.database import configure_deployed_search_path

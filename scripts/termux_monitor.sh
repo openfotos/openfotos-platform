@@ -23,7 +23,7 @@ fi
 if command -v termux-notification >/dev/null 2>&1; then
   termux-notification \
     --id openfotos-monitor \
-    --title "OpenFotos production alert" \
+    --title "OneNodeAI Studio production alert" \
     --content "The live or readiness check failed. Open Railway and Supabase now." \
     --priority high
 fi

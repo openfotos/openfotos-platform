@@ -9,6 +9,7 @@ from uuid import UUID
 from django.conf import settings
 from django.contrib.auth import authenticate
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from openfotos_contracts import InstallationStatus
@@ -203,6 +204,39 @@ def _rotate_session_tokens(session: DesktopSession, *, now) -> tuple[str, str]:
 def _validate_session_actor(session: DesktopSession) -> None:
     if not _active_membership(session.photographer, session.user):
         raise DesktopAuthError("invalid_access_token", "The desktop session is unavailable.")
+
+
+@transaction.atomic
+def revoke_session(
+    refresh_token: str,
+    *,
+    photographer: Photographer,
+    request=None,
+) -> None:
+    """Revoke a desktop session for sign-out; unknown or already-dead tokens succeed."""
+    digest = token_digest(refresh_token)
+    session = (
+        DesktopSession.objects.select_for_update(of=("self",))
+        .select_related("photographer", "user")
+        .filter(
+            Q(refresh_token_hash=digest) | Q(previous_refresh_token_hash=digest),
+        )
+        .first()
+    )
+    if session is not None and session.photographer_id != photographer.id:
+        raise DesktopAuthError("invalid_refresh_token", "The desktop session must sign in again.")
+    if session is None or session.revoked_at is not None:
+        return
+    session.revoked_at = timezone.now()
+    session.save(update_fields=("revoked_at", "updated_at"))
+    record_audit(
+        photographer=session.photographer,
+        actor=session.user,
+        action=AuditAction.DESKTOP_LOGOUT,
+        result=AuditResult.SUCCEEDED,
+        request=request,
+        metadata={"session_id": str(session.id)},
+    )
 
 
 @transaction.atomic

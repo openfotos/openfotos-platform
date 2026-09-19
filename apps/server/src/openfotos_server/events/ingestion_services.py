@@ -7,10 +7,11 @@ from uuid import UUID
 
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count, Q, Sum
+from django.db.models import Count, F, Q, Sum
 from django.utils import timezone
 
 from openfotos_contracts import (
+    DERIVATIVE_VARIANTS,
     EVENT_ORIGINAL_ASSET_LIMIT,
     AssetVariant,
     ContributionInput,
@@ -41,8 +42,11 @@ from .models import (
     DesktopSession,
     Event,
     EventInstallation,
+    FaceAnalysis,
+    FaceAnalysisState,
     IngestionManifest,
     PhotographerMembership,
+    PreviewPolicy,
     SubEvent,
 )
 
@@ -156,6 +160,11 @@ def reserve_contribution(
         ):
             return existing
         raise IngestionError("idempotency_conflict", "The contribution ID is already in use.")
+    if locked_event.state == EventState.PUBLISHED.value:
+        raise IngestionError(
+            "event_published",
+            "The event was published; this contribution was not included.",
+        )
     if locked_event.intake_state != IntakeState.OPEN.value:
         raise IngestionError("intake_closed", "The event is not accepting new contributions.")
     try:
@@ -183,6 +192,22 @@ def reserve_contribution(
         )
     if Asset.objects.filter(pk__in=(asset.id for asset in contribution.assets)).exists():
         raise IngestionError("idempotency_conflict", "One or more asset IDs are already in use.")
+
+    if not PreviewPolicy.objects.filter(event=locked_event).exists():
+        policy = PreviewPolicy.objects.create(
+            event=locked_event,
+            enabled=False,
+            confirmed_by=session.user,
+        )
+        record_audit(
+            photographer=locked_event.photographer,
+            event=locked_event,
+            actor=session.user,
+            action=AuditAction.PREVIEW_POLICY_CONFIRMED,
+            result=AuditResult.SUCCEEDED,
+            request=request,
+            metadata={"policy_id": str(policy.id), "enabled": False, "automatic": True},
+        )
 
     batch = ContributionBatch.objects.create(
         id=contribution.batch_id,
@@ -269,6 +294,14 @@ def issue_upload_leases(
 ) -> list[dict]:
     event = event_for_session(session, event_id)
     locked_event = Event.objects.select_for_update().get(pk=event.pk)
+    if (
+        locked_event.intake_state != IntakeState.OPEN.value
+        or locked_event.state == EventState.PUBLISHED.value
+    ):
+        raise IngestionError(
+            "event_published",
+            "The event was published; this contribution was not included.",
+        )
     batch = _owned_batch(
         session=session,
         event=locked_event,
@@ -345,6 +378,7 @@ def verify_uploaded_object(
     if upload.state == UploadObjectState.VERIFIED.value:
         return upload
     if upload.state == UploadObjectState.EXCLUDED.value:
+        _delete_unverified_object(object_store, upload.object_key)
         raise IngestionError("asset_excluded", "The asset was explicitly excluded.")
     try:
         head = object_store.head(upload.object_key)
@@ -375,6 +409,7 @@ def verify_uploaded_object(
         if locked.state == UploadObjectState.VERIFIED.value:
             return locked
         if locked.state == UploadObjectState.EXCLUDED.value:
+            _delete_unverified_object(object_store, locked.object_key)
             raise IngestionError("asset_excluded", "The asset was explicitly excluded.")
         mismatch = _object_mismatch(locked, head)
         if mismatch:
@@ -420,8 +455,268 @@ def verify_uploaded_object(
     return locked
 
 
+def publication_status(event: Event) -> dict:
+    completed_batch_ids = list(
+        ContributionBatch.objects.filter(
+            installation__event=event,
+            state=ContributionState.COMPLETE.value,
+            sub_event__is_archived=False,
+        ).values_list("id", flat=True)
+    )
+    included_asset_ids = list(
+        AssetObject.objects.filter(
+            asset__batch_id__in=completed_batch_ids,
+            asset__gallery_excluded_at__isnull=True,
+            variant=AssetVariant.ORIGINAL.value,
+            state=UploadObjectState.VERIFIED.value,
+        ).values_list("asset_id", flat=True)
+    )
+    expected_derivatives = len(included_asset_ids) * len(DERIVATIVE_VARIANTS)
+    verified_derivatives = AssetObject.objects.filter(
+        asset_id__in=included_asset_ids,
+        variant__in=tuple(variant.value for variant in DERIVATIVE_VARIANTS),
+        state=UploadObjectState.VERIFIED.value,
+    ).count()
+    terminal_faces = FaceAnalysis.objects.filter(
+        asset_id__in=included_asset_ids,
+        state__in=(FaceAnalysisState.INDEXED, FaceAnalysisState.NO_USABLE_FACE),
+        source_sha256=F("asset__sha256"),
+        model_id=event.face_model_id,
+    ).count()
+    in_flight_by_installation: dict[object, dict] = {}
+    in_flight_batches = ContributionBatch.objects.filter(
+        installation__event=event,
+        state=ContributionState.RESERVED.value,
+    ).select_related("installation")
+    for batch in in_flight_batches:
+        remaining = (
+            AssetObject.objects.filter(
+                asset__batch=batch,
+                variant=AssetVariant.ORIGINAL.value,
+            )
+            .exclude(
+                state__in=(
+                    UploadObjectState.VERIFIED.value,
+                    UploadObjectState.EXCLUDED.value,
+                )
+            )
+            .count()
+        )
+        entry = in_flight_by_installation.setdefault(
+            batch.installation_id,
+            {"installation": batch.installation, "photo_count": 0},
+        )
+        entry["photo_count"] += max(remaining, 1)
+    has_policy = PreviewPolicy.objects.filter(event=event).exists()
+    has_active_sub_event = event.sub_events.filter(is_archived=False).exists()
+    return {
+        "included_photo_count": len(included_asset_ids),
+        "missing_derivative_count": expected_derivatives - verified_derivatives,
+        "missing_face_count": len(included_asset_ids) - terminal_faces,
+        "in_flight": tuple(in_flight_by_installation.values()),
+        "ready": (
+            bool(included_asset_ids)
+            and expected_derivatives == verified_derivatives
+            and len(included_asset_ids) == terminal_faces
+            and has_policy
+            and has_active_sub_event
+        ),
+    }
+
+
+@transaction.atomic
+def commit_publication_snapshot(
+    *,
+    event_id: UUID,
+    actor,
+    object_store: S3ObjectStore,
+    request=None,
+) -> tuple[Event, IngestionManifest]:
+    event = Event.objects.select_for_update().select_related("photographer").get(pk=event_id)
+    if event.state == EventState.PUBLISHED.value:
+        if event.current_ingestion_manifest is None:
+            raise IngestionError(
+                "publication_snapshot_missing",
+                "The published event has no committed publication snapshot.",
+            )
+        return event, event.current_ingestion_manifest
+    if event.state in {
+        EventState.ARCHIVED.value,
+        EventState.CANCELLED.value,
+        EventState.FAILED.value,
+    }:
+        raise IngestionError("event_not_publishable", "The event cannot be published now.")
+
+    event.intake_state = IntakeState.CLOSED.value
+    status = publication_status(event)
+    if not status["included_photo_count"]:
+        raise IngestionError(
+            "empty_manifest",
+            "Complete at least one photo before publishing this event.",
+        )
+    if status["missing_derivative_count"]:
+        raise IngestionError(
+            "derivatives_required",
+            f"{status['missing_derivative_count']} required preview or thumbnail is unfinished.",
+        )
+    if status["missing_face_count"]:
+        raise IngestionError(
+            "face_index_required",
+            f"{status['missing_face_count']} completed photo still needs face analysis.",
+        )
+    if not PreviewPolicy.objects.filter(event=event).exists():
+        raise IngestionError(
+            "preview_policy_required",
+            "Submit a completed batch before publishing so preview settings can be locked.",
+        )
+    if not event.sub_events.filter(is_archived=False).exists():
+        raise IngestionError(
+            "sub_event_required",
+            "Create and retain at least one active sub-event before publication.",
+        )
+    if IngestionManifest.objects.filter(event=event, generation=event.intake_generation).exists():
+        raise IngestionError(
+            "publication_snapshot_exists",
+            "Unpublish the event before creating another publication snapshot.",
+        )
+
+    incomplete_batches = list(
+        ContributionBatch.objects.select_for_update().filter(
+            installation__event=event,
+            state=ContributionState.RESERVED.value,
+        )
+    )
+    if incomplete_batches:
+        incomplete_ids = [batch.id for batch in incomplete_batches]
+        excluded_objects = list(
+            AssetObject.objects.select_for_update()
+            .select_related("asset")
+            .filter(asset__batch_id__in=incomplete_ids)
+        )
+        originals = [
+            upload
+            for upload in excluded_objects
+            if upload.variant == AssetVariant.ORIGINAL.value
+            and upload.state != UploadObjectState.EXCLUDED.value
+        ]
+        event.reserved_original_bytes -= sum(upload.expected_bytes for upload in originals)
+        event.reserved_original_count -= len(originals)
+        verified_originals = [
+            upload for upload in originals if upload.state == UploadObjectState.VERIFIED.value
+        ]
+        event.verified_original_bytes -= sum(upload.expected_bytes for upload in verified_originals)
+        event.verified_original_count -= len(verified_originals)
+        FaceAnalysis.objects.filter(asset__batch_id__in=incomplete_ids).delete()
+        AssetObject.objects.filter(asset__batch_id__in=incomplete_ids).update(
+            state=UploadObjectState.EXCLUDED.value,
+            lease_expires_at=None,
+            failure_code="",
+            excluded_reason="Event published before this contribution completed.",
+            excluded_by=actor,
+            updated_at=timezone.now(),
+        )
+        ContributionBatch.objects.filter(pk__in=incomplete_ids).update(
+            state=ContributionState.NOT_INCLUDED.value,
+            updated_at=timezone.now(),
+        )
+
+    completed_batch_ids = list(
+        ContributionBatch.objects.filter(
+            installation__event=event,
+            state=ContributionState.COMPLETE.value,
+            sub_event__is_archived=False,
+        ).values_list("id", flat=True)
+    )
+    document = _aggregate_manifest_document(event, batch_ids=completed_batch_ids)
+    content = _canonical_json(document)
+    content_md5 = base64.b64encode(hashlib.md5(content, usedforsecurity=False).digest()).decode()
+    object_key = ingestion_manifest_key(event.id, event.intake_generation)
+    content_sha256 = hashlib.sha256(content).hexdigest()
+    try:
+        object_store.put_immutable(
+            key=object_key,
+            body=content,
+            content_length=len(content),
+            content_md5=content_md5,
+            sha256=content_sha256,
+            content_type="application/json",
+        )
+    except ObjectAlreadyExists:
+        try:
+            head = object_store.head(object_key)
+        except ObjectStoreError as exc:
+            raise IngestionError(
+                "object_store_unavailable",
+                "The publication snapshot could not be verified; try publishing again.",
+                retryable=True,
+            ) from exc
+        if (
+            head is None
+            or head.content_length != len(content)
+            or head.metadata.get("openfotos-sha256") != content_sha256
+        ):
+            raise IngestionError(
+                "manifest_object_conflict",
+                "The immutable publication snapshot contains different content.",
+            ) from None
+    except ObjectStoreError as exc:
+        raise IngestionError(
+            "object_store_unavailable",
+            "The publication snapshot could not be stored; try publishing again.",
+            retryable=True,
+        ) from exc
+
+    committed_at = timezone.now()
+    manifest = IngestionManifest.objects.create(
+        event=event,
+        generation=event.intake_generation,
+        object_key=object_key,
+        content_sha256=content_sha256,
+        document=document,
+        asset_count=document["summary"]["verified_asset_count"],
+        original_bytes=document["summary"]["verified_original_bytes"],
+        excluded_asset_count=document["summary"]["excluded_asset_count"],
+        state=IngestionManifestState.COMMITTED.value,
+        committed_at=committed_at,
+    )
+    event.current_ingestion_manifest = manifest
+    event.derivatives_ready_generation = event.intake_generation
+    event.face_index_ready_generation = event.intake_generation
+    event.state = EventState.PUBLISHED.value
+    event.save(
+        update_fields=(
+            "intake_state",
+            "current_ingestion_manifest",
+            "derivatives_ready_generation",
+            "face_index_ready_generation",
+            "reserved_original_bytes",
+            "verified_original_bytes",
+            "reserved_original_count",
+            "verified_original_count",
+            "state",
+            "updated_at",
+        )
+    )
+    record_audit(
+        photographer=event.photographer,
+        event=event,
+        actor=actor,
+        action=AuditAction.EVENT_PUBLICATION_SNAPSHOT,
+        result=AuditResult.SUCCEEDED,
+        request=request,
+        metadata={
+            "manifest_id": str(manifest.id),
+            "generation": manifest.generation,
+            "asset_count": manifest.asset_count,
+            "excluded_batch_count": len(incomplete_batches),
+        },
+    )
+    return event, manifest
+
+
 @transaction.atomic
 def close_intake(*, session: DesktopSession, event_id: UUID, request=None) -> Event:
+    """Internal generation control retained for reconciliation; not exposed by the API."""
     event = _photographer_event(session, event_id)
     locked = Event.objects.select_for_update().get(pk=event.pk)
     if locked.intake_state == IntakeState.CLOSED.value:
@@ -561,6 +856,7 @@ def cancel_batch(
 
 @transaction.atomic
 def reopen_intake(*, session: DesktopSession, event_id: UUID, request=None) -> Event:
+    """Internal generation control retained for reconciliation; not exposed by the API."""
     event = _photographer_event(session, event_id)
     locked = Event.objects.select_for_update().get(pk=event.pk)
     if locked.intake_state == IntakeState.OPEN.value:
@@ -693,6 +989,7 @@ def finalize_ingestion(
     object_store: S3ObjectStore,
     request=None,
 ) -> IngestionManifest:
+    """Commit an internal generation manifest; the desktop API no longer exposes this step."""
     from .derivative_services import refresh_derivative_readiness
     from .face_services import refresh_face_index_readiness
 
@@ -743,7 +1040,6 @@ def finalize_ingestion(
                 original_bytes=document["summary"]["verified_original_bytes"],
                 excluded_asset_count=document["summary"]["excluded_asset_count"],
             )
-
     content = _canonical_json(manifest.document)
     content_md5 = base64.b64encode(hashlib.md5(content, usedforsecurity=False).digest()).decode()
     try:
@@ -779,7 +1075,6 @@ def finalize_ingestion(
             "The manifest could not be stored; retry finalization.",
             retryable=True,
         ) from exc
-
     with transaction.atomic():
         locked_event = Event.objects.select_for_update().get(pk=event.pk)
         locked_manifest = IngestionManifest.objects.select_for_update().get(pk=manifest.pk)
@@ -805,13 +1100,7 @@ def finalize_ingestion(
         action=AuditAction.EVENT_INGESTION_FINALIZED,
         result=AuditResult.SUCCEEDED,
         request=request,
-        metadata={
-            "manifest_id": str(locked_manifest.id),
-            "generation": locked_manifest.generation,
-            "asset_count": locked_manifest.asset_count,
-            "original_bytes": locked_manifest.original_bytes,
-            "excluded_asset_count": locked_manifest.excluded_asset_count,
-        },
+        metadata={"manifest_id": str(locked_manifest.id), "generation": locked_manifest.generation},
     )
     refresh_derivative_readiness(event.id)
     refresh_face_index_readiness(event.id)
@@ -932,12 +1221,14 @@ def _complete_batch_if_terminal(batch: ContributionBatch, *, now) -> None:
         ).update(state=ContributionState.COMPLETE.value, completed_at=now, updated_at=now)
 
 
-def _aggregate_manifest_document(event: Event) -> dict:
+def _aggregate_manifest_document(event: Event, *, batch_ids=None) -> dict:
     batches = (
         ContributionBatch.objects.select_related("sub_event")
         .filter(installation__event=event)
         .order_by("created_at", "id")
     )
+    if batch_ids is not None:
+        batches = batches.filter(pk__in=batch_ids)
     contributions = [
         {
             "batch_id": str(batch.id),
@@ -960,6 +1251,8 @@ def _aggregate_manifest_document(event: Event) -> dict:
         )
         .order_by("asset_id")
     )
+    if batch_ids is not None:
+        objects = objects.filter(asset__batch_id__in=batch_ids)
     assets = [
         {
             "asset_id": str(upload.asset_id),
@@ -990,7 +1283,7 @@ def _aggregate_manifest_document(event: Event) -> dict:
         "format": "openfotos-ingestion-manifest-v2",
         "event_id": str(event.id),
         "generation": event.intake_generation,
-        "created_at": timezone.now().isoformat(),
+        "created_at": event.updated_at.isoformat(),
         "processing_profile_id": event.processing_profile_id,
         "summary": totals,
         "contributions": contributions,

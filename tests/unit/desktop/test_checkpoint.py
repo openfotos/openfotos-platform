@@ -25,7 +25,7 @@ def test_newer_checkpoint_schema_fails_closed(tmp_path: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA user_version = 999")
 
-    with pytest.raises(ValueError, match="newer OpenFotos"):
+    with pytest.raises(ValueError, match="newer OneNodeAI Studio"):
         CheckpointStore(database)
 
 
@@ -96,8 +96,8 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
         id=uuid4(),
         enabled=True,
         template=WatermarkTemplate.BOTTOM_CENTER,
-        text="OFTS Studio",
-        logo_kind=WatermarkLogoKind.OFTS,
+        text="OneNodeAI Studio",
+        logo_kind=WatermarkLogoKind.ONENODEAI,
         renderer_id="watermark-raster-v1",
         derivative_profile_id="gallery-jpeg-v1",
         mark_sha256="a" * 64,

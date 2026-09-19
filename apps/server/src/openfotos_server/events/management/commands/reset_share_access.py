@@ -10,8 +10,7 @@ from ...models import (
     AuditResult,
     Event,
     FaceSearchResultSet,
-    GuestCapability,
-    OwnerCapability,
+    PortalCapability,
 )
 
 CONFIRMATION = "RESET-ALL-SHARE-ACCESS"
@@ -31,14 +30,10 @@ class Command(BaseCommand):
         now = timezone.now()
         events = list(
             Event.objects.select_for_update()
-            .filter(owner_capability__isnull=False)
+            .filter(portal_capability__isnull=False)
             .select_related("photographer")
         )
-        OwnerCapability.objects.filter(event__in=events).update(
-            revoked_at=now,
-            access_version=uuid4(),
-        )
-        GuestCapability.objects.filter(owner__event__in=events).update(
+        PortalCapability.objects.filter(event__in=events).update(
             revoked_at=now,
             access_version=uuid4(),
         )
@@ -53,4 +48,4 @@ class Command(BaseCommand):
                 result=AuditResult.SUCCEEDED,
                 metadata={"reason": "share_pin_pepper_emergency_reset"},
             )
-        self.stdout.write(f"Revoked share access for {len(events)} event(s).")
+        self.stdout.write(f"Revoked event PIN access for {len(events)} event(s).")

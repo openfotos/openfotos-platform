@@ -1,4 +1,4 @@
-"""OpenFotos desktop entry point."""
+"""OneNodeAI Studio desktop entry point."""
 
 import argparse
 import sys
@@ -11,6 +11,7 @@ from openfotos_contracts import (
     WatermarkTemplate,
 )
 
+from .face_models import FaceModelStore
 from .ingestion import (
     CheckpointStore,
     EventCache,
@@ -57,7 +58,7 @@ def main() -> int:
     from .ports import Session3Gateway
     from .ui import MainWindow
 
-    parser = argparse.ArgumentParser(description="OpenFotos desktop ingestion")
+    parser = argparse.ArgumentParser(description="OneNodeAI Studio desktop ingestion")
     parser.add_argument(
         "--demo",
         action="store_true",
@@ -83,13 +84,19 @@ def main() -> int:
     instance_lock = QLockFile(str(database.with_suffix(".lock")))
     instance_lock.setStaleLockTime(0)
     if not instance_lock.tryLock(0):
-        raise SystemExit("Another OpenFotos instance is already using this local checkpoint.")
+        raise SystemExit("Another OneNodeAI Studio instance is already using this checkpoint.")
     store = CheckpointStore(database)
-    gateway = Session3Gateway() if arguments.demo else DesktopNetworkService(store)
+    model_store = FaceModelStore()
+    gateway = (
+        Session3Gateway()
+        if arguments.demo
+        else DesktopNetworkService(store, face_model_store=model_store)
+    )
     window = MainWindow(
         store=store,
         gateway=gateway,
         demo_event=DEMO_EVENT if arguments.demo else None,
+        face_model_store=model_store,
     )
     window.instance_lock = instance_lock
     window.show()

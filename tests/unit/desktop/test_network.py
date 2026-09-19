@@ -56,6 +56,9 @@ class MemoryTokenStore:
     def load(self, server_url, installation_id):
         return self.tokens.get((server_url, installation_id))
 
+    def delete(self, server_url, installation_id):
+        self.tokens.pop((server_url, installation_id), None)
+
 
 def approved_batch(tmp_path: Path):
     photo = tmp_path / "source.jpg"
@@ -133,15 +136,30 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
             if state.get("policy_after_refresh"):
                 state["policy"] = state["policy_after_refresh"]
             return httpx.Response(200, json={"events": [event_data()]})
-        if path == f"/api/v1/events/{event_id}/intake/close/":
-            state.setdefault("intake_keys", []).append(request.headers["idempotency-key"])
-            state["intake_state"] = "closed"
-            return httpx.Response(200, json=event_data())
-        if path == f"/api/v1/events/{event_id}/intake/reopen/":
-            state.setdefault("intake_keys", []).append(request.headers["idempotency-key"])
-            state["intake_state"] = "open"
-            state["intake_generation"] = state.get("intake_generation", 1) + 1
-            return httpx.Response(200, json=event_data())
+        if path == "/api/v1/auth/logout/":
+            state["revoked_refresh_token"] = json.loads(request.content)["refresh_token"]
+            return httpx.Response(200, json={"revoked": True})
+        if path == f"/api/v1/events/{event_id}/preview-policy/confirm/":
+            body = json.loads(request.content)
+            assert body == {
+                "enabled": False,
+                "template": "compact-bottom-right",
+                "text": "",
+                "logo_kind": "none",
+                "mark_png_base64": "",
+            }
+            state["clean_preview_confirmations"] = state.get("clean_preview_confirmations", 0) + 1
+            state["policy"] = {
+                "id": str(uuid4()),
+                "enabled": False,
+                "template": "compact-bottom-right",
+                "text": "",
+                "logo_kind": "none",
+                "renderer_id": "watermark-raster-v1",
+                "derivative_profile_id": "gallery-jpeg-v1",
+                "mark_sha256": "",
+            }
+            return httpx.Response(201, json={"preview_policy": state["policy"]})
         if path == f"/api/v1/events/{event_id}/batches/":
             state["manifest"] = json.loads(request.content)
             return httpx.Response(201, json={"id": str(batch_id), "state": "reserved"})
@@ -150,7 +168,11 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                 {
                     "asset_id": str(asset_id),
                     "variant": "originals",
-                    "state": "verified" if state.get("verified") else "reserved",
+                    "state": (
+                        "excluded"
+                        if state.get("not_included")
+                        else ("verified" if state.get("verified") else "reserved")
+                    ),
                     "failure_code": "",
                     "gallery_excluded": False,
                     "face_analysis": {
@@ -181,7 +203,11 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                 json={
                     "id": str(batch_id),
                     "sub_event_id": str(_SUB_EVENT.id),
-                    "state": "complete" if state.get("verified") else "reserved",
+                    "state": (
+                        "not_included"
+                        if state.get("not_included")
+                        else ("complete" if state.get("verified") else "reserved")
+                    ),
                     "assets": assets,
                 },
             )
@@ -285,36 +311,6 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
     return handle
 
 
-def test_reopened_intake_uses_new_close_idempotency_key(tmp_path: Path) -> None:
-    store, event_id, batch_id, _photo = approved_batch(tmp_path)
-    asset_id = store.list_items(batch_id)[0].id
-    state = {}
-    service = DesktopNetworkService(
-        store,
-        token_store=MemoryTokenStore(),
-        api_client=httpx.Client(
-            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, state))
-        ),
-        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
-    )
-    service.sign_in_photographer(
-        "http://localhost:8000", "photographer", "password", "Studio workstation"
-    )
-
-    first_close = service.close_intake(event_id)
-    reopened = service.reopen_intake(event_id)
-    second_close = service.close_intake(event_id)
-
-    assert first_close.intake_state == "closed"
-    assert reopened.intake_state == "open"
-    assert reopened.intake_generation == 2
-    assert second_close.intake_state == "closed"
-    assert second_close.intake_generation == 2
-    assert state["intake_keys"][0] != state["intake_keys"][2]
-    service.close()
-    store.close()
-
-
 def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_path: Path) -> None:
     store, event_id, batch_id, photo = approved_batch(tmp_path)
     asset_id = store.list_items(batch_id)[0].id
@@ -322,6 +318,8 @@ def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_
     sleeps = []
 
     def storage_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/original":
+            return httpx.Response(200)
         state["storage_attempts"] += 1
         content = request.read()
         assert content == photo.read_bytes()
@@ -350,23 +348,61 @@ def test_direct_upload_retries_then_resumes_at_the_verified_object_boundary(tmp_
     )
     progress = []
 
-    with pytest.raises(DesktopApiError) as failure:
-        service.upload(
-            batch_id,
-            transfer_limit=1,
-            on_progress=lambda done, total: progress.append((done, total)),
-        )
+    service.upload(
+        batch_id,
+        transfer_limit=1,
+        on_progress=lambda done, total: progress.append((done, total)),
+    )
 
     assert events[0].device_label == "Primary workstation"
     assert state["manifest"]["device_label"] == "Primary workstation"
     assert state["storage_attempts"] == 5
     assert sleeps == [1.0, 2.0, 4.0, 8.0]
     assert progress[-1] == (1, 1)
-    assert failure.value.code == "preview_policy_not_confirmed"
+    assert state["clean_preview_confirmations"] == 1
+    assert state["policy"]["enabled"] is False
     assert store.get_batch(batch_id).state is BatchState.COMPLETE
     checkpoint = store.get_upload_checkpoint(asset_id)
     assert checkpoint.state is LocalUploadState.VERIFIED
     assert checkpoint.attempt_count == 5
+    service.close()
+    store.close()
+
+
+def test_sync_marks_a_published_in_flight_batch_not_included(tmp_path: Path) -> None:
+    store, event_id, batch_id, _photo = approved_batch(tmp_path)
+    asset_id = store.list_items(batch_id)[0].id
+    store.mark_batch_reserved(batch_id)
+    state = {
+        "not_included": True,
+        "policy": {
+            "id": str(uuid4()),
+            "enabled": False,
+            "template": "compact-bottom-right",
+            "text": "",
+            "logo_kind": "none",
+            "renderer_id": "watermark-raster-v1",
+            "derivative_profile_id": "gallery-jpeg-v1",
+            "mark_sha256": "",
+        },
+    }
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        face_engine_factory=NoFaceEngine,
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, state))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
+
+    service.upload(batch_id, transfer_limit=1, on_progress=lambda _done, _total: None)
+
+    assert store.get_batch(batch_id).state is BatchState.NOT_INCLUDED
+    assert store.get_upload_checkpoint(asset_id).state is LocalUploadState.EXCLUDED
     service.close()
     store.close()
 
@@ -431,6 +467,7 @@ def test_one_sync_generates_uploads_and_resumes_both_derivatives(tmp_path: Path)
     ]
     assert all(content.startswith(b"\xff\xd8") for _path, content in uploads[1:])
     assert stages[-1] == ("face-index", 1, 1)
+    assert state.get("clean_preview_confirmations") is None
     assert store.derivatives_complete(batch_id)
     assert store.face_analysis_complete(batch_id)
     assert not list(store.derivative_cache_directory(batch_id).iterdir())
@@ -468,6 +505,71 @@ def test_source_change_after_approval_fails_without_uploading(tmp_path: Path) ->
 
     assert storage_calls == []
     assert store.get_upload_checkpoint(asset_id).last_error_code == "source_changed"
+    service.close()
+    store.close()
+
+
+def test_sign_out_revokes_the_server_session_and_forgets_the_refresh_token(
+    tmp_path: Path,
+) -> None:
+    store, event_id, batch_id, _photo = approved_batch(tmp_path)
+    asset_id = store.list_items(batch_id)[0].id
+    state = {}
+    token_store = MemoryTokenStore()
+    service = DesktopNetworkService(
+        store,
+        token_store=token_store,
+        face_engine_factory=NoFaceEngine,
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, state))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
+    assert token_store.tokens
+
+    service.sign_out()
+
+    assert state["revoked_refresh_token"] == "refresh-token"
+    assert token_store.tokens == {}
+    with pytest.raises(DesktopApiError) as failure:
+        service.resume("http://localhost:8000")
+    assert failure.value.code == "session_unavailable"
+    service.close()
+    store.close()
+
+
+def test_saved_session_origin_requires_exactly_one_cached_origin_with_a_token(
+    tmp_path: Path,
+) -> None:
+    store, event_id, batch_id, _photo = approved_batch(tmp_path)
+    asset_id = store.list_items(batch_id)[0].id
+    token_store = MemoryTokenStore()
+    service = DesktopNetworkService(
+        store,
+        token_store=token_store,
+        face_engine_factory=NoFaceEngine,
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, {}))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+    )
+
+    assert service.saved_session_origin() is None
+    token_store.tokens[("http://localhost:8000", store.installation_id)] = "refresh-token"
+    assert service.saved_session_origin() == "http://localhost:8000"
+    store.cache_event(
+        EventCache(
+            id=uuid4(),
+            name="Second server event",
+            storage_limit_bytes=50_000_000_000,
+            processing_profile_id="pilot-profile-v1",
+            server_url="https://other.example",
+        )
+    )
+    assert service.saved_session_origin() is None
     service.close()
     store.close()
 

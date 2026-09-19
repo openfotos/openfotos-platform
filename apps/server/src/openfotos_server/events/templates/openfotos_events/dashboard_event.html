@@ -1,6 +1,7 @@
 {% extends "openfotos_events/base.html" %}
+{% load static %}
 
-{% block title %}{{ event.name }} · Gallery review{% endblock %}
+{% block title %}{{ event.name }} · Photographer dashboard{% endblock %}
 
 {% block content %}
 <p><a href="{% url 'events:dashboard' %}">← All events</a></p>
@@ -8,39 +9,23 @@
   <div>
     <p class="eyebrow">Photographer gallery review</p>
     <h1>{{ event.name }}</h1>
-    <p class="muted">State: {{ event.get_state_display }} · generation {{ event.intake_generation }}</p>
+    <p class="muted">State: {{ event.get_state_display }}</p>
   </div>
-  <div class="status-pill {% if ready %}ready{% endif %}">{% if ready %}READY{% else %}PROCESSING{% endif %}</div>
+  <div class="status-pill {% if ready %}ready{% endif %}">{% if event.state == "published" %}PUBLISHED{% elif ready %}READY{% else %}UPLOADING{% endif %}</div>
 </div>
 
-<div class="settings-grid">
-  <section class="card compact-card">
-    <h2>Preview policy</h2>
-    {% if policy %}
-      <p>{% if policy.enabled %}Watermark enabled · {{ policy.get_template_display }}{% else %}Clean previews confirmed{% endif %}</p>
-      <p class="muted">Configured in the photographer desktop app. This policy is locked.</p>
-    {% else %}
-      <p>Waiting for photographer confirmation in the desktop app.</p>
-    {% endif %}
-  </section>
-  <section class="card compact-card">
-    <h2>Face index</h2>
-    <p>{{ face_indexed_count }} indexed · {{ face_no_usable_count }} no usable face · {{ face_pending_count }} pending · {{ face_failed_count }} blocked</p>
-    <p class="muted">{{ face_total_count }} visible photo{{ face_total_count|pluralize }} use model {{ event.face_model_id }}. Search remains a best-effort filter.</p>
-  </section>
-  <section class="card compact-card">
-    <h2>Create a sub-event</h2>
-    <form method="post" action="{% url 'events:create-sub-event' event_id=event.id %}">
-      {% csrf_token %}
-      {{ sub_event_form.name.label_tag }} {{ sub_event_form.name }}
-      {{ sub_event_form.position.label_tag }} {{ sub_event_form.position }}
-      <button type="submit">Create sub-event</button>
-    </form>
-    <p class="muted">Every desktop contribution must target one active sub-event.</p>
-  </section>
-</div>
+<section class="card compact-card" data-dashboard-section="sub-event-creation">
+  <h2>Sub-event creation</h2>
+  <form method="post" action="{% url 'events:create-sub-event' event_id=event.id %}">
+    {% csrf_token %}
+    {{ sub_event_form.name.label_tag }} {{ sub_event_form.name }}
+    {{ sub_event_form.position.label_tag }} {{ sub_event_form.position }}
+    <button type="submit">Create sub-event</button>
+  </form>
+  <p class="muted">Every desktop contribution belongs to one active sub-event.</p>
+</section>
 
-<section class="card compact-card">
+<section class="card compact-card" data-dashboard-section="sub-events">
   <h2>Sub-events</h2>
   {% for sub_event in sub_events %}
     <div class="failure-row">
@@ -62,38 +47,60 @@
   {% endfor %}
 </section>
 
-{% if batches %}
-<section class="card compact-card">
+<section class="card compact-card" data-dashboard-section="contribution-assignments">
   <h2>Contribution assignments</h2>
   {% for batch in batches %}
     <form class="failure-row" method="post" action="{% url 'events:reassign-batch' event_id=event.id batch_id=batch.id %}">
       {% csrf_token %}
-      <span>{{ batch.label|default:"Contribution" }} · {{ batch.sub_event.name }} · {{ batch.declared_asset_count }} photo{{ batch.declared_asset_count|pluralize }}</span>
+      <span>{{ batch.installation.label }} · {{ batch.label|default:"Contribution" }} · {{ batch.sub_event.name }} · {{ batch.declared_asset_count }} photo{{ batch.declared_asset_count|pluralize }} · {{ batch.get_state_display }}</span>
       <select name="sub_event_id" aria-label="Sub-event for contribution">
         {% for option in active_sub_events %}<option value="{{ option.id }}" {% if option.id == batch.sub_event_id %}selected{% endif %}>{{ option.name }}</option>{% endfor %}
       </select>
-      <button type="submit">Move batch</button>
+      <button type="submit" {% if event.state == "published" %}disabled{% endif %}>Move batch</button>
     </form>
+  {% empty %}
+    <p class="muted">Submitted desktop batches will appear here.</p>
   {% endfor %}
 </section>
-{% endif %}
 
-<section class="card compact-card publication-card">
+<section class="card compact-card publication-card" data-dashboard-section="publication">
   <div>
     <h2>Publication</h2>
     {% if event.state == "published" %}
-      <p>The gallery is available to active owner and guest capabilities.</p>
+      <p>The event link is live and the four-digit PIN unlocks all active sub-events, face search, and original downloads.</p>
+      {% if portal_capability_active %}
+        <p><a href="{% url 'events:portal-gallery' event.slug %}">Open event gallery</a> · expires {{ portal_capability.expires_at }}</p>
+        <form method="post" action="{% url 'events:rotate-portal-pin' event_id=event.id %}">
+          {% csrf_token %}<button type="submit" class="button-secondary">Generate a new event PIN</button>
+        </form>
+      {% endif %}
     {% elif ready %}
-      <p>Derivative, face-analysis, and authorization gates are complete. Publication remains deliberate.</p>
+      <p>{{ publication_status.included_photo_count }} completed photo{{ publication_status.included_photo_count|pluralize }} will be included.</p>
     {% else %}
-      <p class="muted">Publication unlocks after the current manifest, all included derivatives, and face analysis are ready.</p>
-      <p class="muted">Gallery media: {% if gallery_ready %}ready{% else %}processing{% endif %} · Face index: {% if face_ready %}ready{% else %}processing{% endif %}</p>
+      <p class="muted">Complete at least one batch and finish every included thumbnail, preview, and face analysis before publishing.</p>
+      <p class="muted">{{ publication_status.included_photo_count }} complete · {{ publication_status.missing_derivative_count }} derivative task{{ publication_status.missing_derivative_count|pluralize }} remaining · {{ publication_status.missing_face_count }} face task{{ publication_status.missing_face_count|pluralize }} remaining</p>
     {% endif %}
   </div>
   {% if event.state == "published" %}
     <form method="post" action="{% url 'events:unpublish-event' event_id=event.id %}">
-      {% csrf_token %}<button type="submit" class="button-secondary">Return to Review</button>
+      {% csrf_token %}<button type="submit" class="button-secondary">Unpublish and resume uploads</button>
     </form>
+  {% elif publication_status.in_flight %}
+    <button type="button" data-open-publish-dialog {% if not ready %}disabled{% endif %}>Publish gallery</button>
+    <dialog data-publish-dialog aria-labelledby="publish-warning-title">
+      <h3 id="publish-warning-title">Do you really want to publish?</h3>
+      <p>Someone is uploading. Publishing will exclude unfinished photos and discard their partial data.</p>
+      <ul>
+        {% for item in publication_status.in_flight %}
+          <li>{{ item.installation.label }} has {{ item.photo_count }} photo{{ item.photo_count|pluralize }} mid-upload.</li>
+        {% endfor %}
+      </ul>
+      <form method="post" action="{% url 'events:publish-event' event_id=event.id %}">
+        {% csrf_token %}<input type="hidden" name="confirm_in_flight" value="yes">
+        <button type="submit">Publish and exclude unfinished photos</button>
+        <button type="button" class="button-secondary" data-close-publish-dialog>Keep uploading</button>
+      </form>
+    </dialog>
   {% else %}
     <form method="post" action="{% url 'events:publish-event' event_id=event.id %}">
       {% csrf_token %}<button type="submit" {% if not ready %}disabled{% endif %}>Publish gallery</button>
@@ -101,98 +108,52 @@
   {% endif %}
 </section>
 
-<section class="card compact-card">
-  <h2>Portfolio access</h2>
-  {% if portal_capability_active %}
-    <p>This published event is listed on the studio portfolio. Its public gallery PIN cannot be recovered.</p>
-    <p><a href="{% url 'events:portal-gallery' capability_id=portal_capability.id %}">Open portfolio gallery</a> · expires {{ portal_capability.expires_at }}</p>
-    <form method="post" action="{% url 'events:rotate-portal-pin' event_id=event.id %}">
-      {% csrf_token %}<button type="submit" class="button-secondary">Generate a new portfolio PIN</button>
-    </form>
-  {% elif event.state == "published" %}
-    <p class="muted">Portfolio access is unavailable. Return the event to Review and publish it again.</p>
-  {% else %}
-    <p class="muted">Publication lists this event automatically and reveals its generated four-digit portfolio PIN once.</p>
+<section data-dashboard-section="gallery-preview">
+  <h2>Gallery preview</h2>
+  {% if failed_assets %}
+    <div class="card compact-card">
+      <h3>Derivative blockers</h3>
+      {% for asset in failed_assets %}
+        <form class="failure-row" method="post" action="{% url 'events:exclude-gallery-asset' event_id=event.id asset_id=asset.id %}">
+          {% csrf_token %}<span>Asset {{ asset.id }} · {{ asset.derivative_failure_code }}</span>
+          <input name="reason" maxlength="240" required aria-label="Exclusion reason" placeholder="Reason for gallery omission">
+          <button type="submit">Exclude</button>
+        </form>
+      {% endfor %}
+    </div>
   {% endif %}
-</section>
-
-<section class="card compact-card">
-  <h2>Customer access</h2>
-  <p class="muted">Exact-original downloads can retain camera EXIF or GPS metadata. Review source files before sharing access.</p>
-  {% if owner_capability_active %}
-    <p>Owner access is active until {{ owner_capability.expires_at }}. Its link and PIN cannot be recovered.</p>
-    <form method="post" action="{% url 'events:revoke-owner-capability' event_id=event.id %}">
-      {% csrf_token %}<button type="submit" class="button-secondary">Revoke owner and all guests</button>
-    </form>
-    {% if guest_capabilities %}
-      <h3>Guest links</h3>
-      {% for guest in guest_capabilities %}
+  {% if face_failed_assets %}
+    <div class="card compact-card">
+      <h3>Face-analysis blockers</h3>
+      {% for asset in face_failed_assets %}
         <div class="failure-row">
-          <span>{{ guest.label|default:"Guest link" }} · {% if guest.sub_event %}{{ guest.sub_event.name }}{% else %}All Photos{% endif %} · expires {{ guest.expires_at }}{% if guest.revoked_at %} · revoked{% endif %}</span>
-          {% if not guest.revoked_at %}<form method="post" action="{% url 'events:photographer-revoke-guest' event_id=event.id guest_id=guest.id %}">{% csrf_token %}<button type="submit" class="button-secondary">Revoke</button></form>{% endif %}
+          <span>Asset {{ asset.id }} · {{ asset.face_analysis.failure_code }}</span>
+          <form method="post" action="{% url 'events:reset-face-analysis' event_id=event.id asset_id=asset.id %}">
+            {% csrf_token %}<button type="submit" class="button-secondary">Reset face analysis</button>
+          </form>
         </div>
       {% endfor %}
-    {% endif %}
-  {% elif event.state == "published" %}
-    <p class="muted">Issue the one owner link after publication. Credentials are shown only once and expire after at most one year.</p>
-    <form method="post" action="{% url 'events:issue-owner-capability' event_id=event.id %}">
-      {% csrf_token %}<button type="submit">Issue owner access</button>
-    </form>
-  {% else %}
-    <p class="muted">Publish the gallery before issuing owner access.</p>
+    </div>
   {% endif %}
-</section>
-
-{% if failed_assets %}
-<section class="card compact-card">
-  <h2>Derivative failures</h2>
-  <p class="muted">Retry in desktop or record a reason to omit a persistently failing asset.</p>
-  {% for asset in failed_assets %}
-    <form class="failure-row" method="post" action="{% url 'events:exclude-gallery-asset' event_id=event.id asset_id=asset.id %}">
-      {% csrf_token %}
-      <span>Asset {{ asset.id }} · {{ asset.derivative_failure_code }} · {{ asset.derivative_attempt_count }} attempt{{ asset.derivative_attempt_count|pluralize }}</span>
-      <input name="reason" maxlength="240" required aria-label="Exclusion reason" placeholder="Reason for gallery omission">
-      <button type="submit" {% if asset.derivative_attempt_count < 5 %}disabled title="Retry five times before exclusion"{% endif %}>Exclude</button>
-    </form>
-  {% endfor %}
-</section>
-{% endif %}
-
-{% if face_failed_assets %}
-<section class="card compact-card">
-  <h2>Face-analysis blockers</h2>
-  <p class="muted">Retry on the originating workstation. Reset a conflicting or persistently failed result before recomputing it.</p>
-  {% for asset in face_failed_assets %}
-    <div class="failure-row">
-      <span>Asset {{ asset.id }} · {{ asset.face_analysis.failure_code }} · {{ asset.face_analysis.attempt_count }} attempt{{ asset.face_analysis.attempt_count|pluralize }}</span>
-      <form method="post" action="{% url 'events:reset-face-analysis' event_id=event.id asset_id=asset.id %}">
-        {% csrf_token %}<button type="submit" class="button-secondary">Reset face analysis</button>
-      </form>
+  {% if excluded_assets %}
+    <div class="card compact-card">
+      <h3>Excluded photos</h3>
+      {% for asset in excluded_assets %}
+        <div class="failure-row">
+          <span>Asset {{ asset.id }} · {{ asset.gallery_exclusion_reason }}</span>
+          <form method="post" action="{% url 'events:restore-gallery-asset' event_id=event.id asset_id=asset.id %}">
+            {% csrf_token %}<button type="submit" class="button-secondary">Restore</button>
+          </form>
+        </div>
+      {% endfor %}
     </div>
-  {% endfor %}
+  {% endif %}
+  <nav class="sub-event-filters" aria-label="Gallery sub-events">
+    <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:photographer-event' event_id=event.id %}">All</a>
+    {% for sub_event in active_sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
+  </nav>
+  {% include "openfotos_events/gallery_grid.html" with dashboard_mode=True %}
 </section>
-{% endif %}
-
-{% if excluded_assets %}
-<section class="card compact-card">
-  <h2>Excluded from gallery</h2>
-  {% for asset in excluded_assets %}
-    <div class="failure-row">
-      <span>Asset {{ asset.id }} · {{ asset.gallery_exclusion_reason }}</span>
-      <form method="post" action="{% url 'events:restore-gallery-asset' event_id=event.id asset_id=asset.id %}">
-        {% csrf_token %}<button type="submit" class="button-secondary">Restore</button>
-      </form>
-    </div>
-  {% endfor %}
-</section>
-{% endif %}
-
-<h2>Gallery preview</h2>
-<nav class="sub-event-filters" aria-label="Gallery sub-events">
-  <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:photographer-event' event_id=event.id %}">All</a>
-  {% for sub_event in active_sub_events %}
-    <a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>
-  {% endfor %}
-</nav>
-{% include "openfotos_events/gallery_grid.html" with dashboard_mode=True %}
 {% endblock %}
+
+{% block scripts %}<script src="{% static 'openfotos_events/dashboard.js' %}" defer></script>{% endblock %}
