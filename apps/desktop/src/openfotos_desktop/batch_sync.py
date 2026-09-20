@@ -188,7 +188,6 @@ class BatchSyncService:
             )
         self.store.ensure_derivative_checkpoints(batch.id)
         self.store.ensure_face_analysis_checkpoints(batch.id)
-        engines = self._face_engine_pool(len(items))
         cache_directory = self.store.derivative_cache_directory(batch.id)
         try:
             self._run_pipeline(
@@ -196,7 +195,6 @@ class BatchSyncService:
                 batch_id=batch.id,
                 items=items,
                 transfer_limit=transfer_limit,
-                engines=engines,
                 cache_directory=cache_directory,
                 on_progress=on_progress,
                 on_stage=on_stage,
@@ -206,7 +204,12 @@ class BatchSyncService:
             self.store.cleanup_derivative_cache(batch.id)
 
     def _face_engine_pool(self, item_count: int) -> queue.Queue:
-        """Create one single-threaded engine per face worker; engines are not thread-safe."""
+        """Create one single-threaded engine per face worker; engines are not thread-safe.
+
+        Creation stays lazy: the face runner builds the pool only when the first photo
+        is ready for indexing, so a missing model download never masks an earlier
+        originals- or derivatives-stage failure.
+        """
         try:
             engines = [
                 self._face_engine_factory() for _ in range(min(self._face_workers, item_count))
@@ -225,7 +228,6 @@ class BatchSyncService:
         batch_id: UUID,
         items: dict[UUID, object],
         transfer_limit: int,
-        engines: queue.Queue,
         cache_directory: Path,
         on_progress,
         on_stage,
@@ -292,7 +294,6 @@ class BatchSyncService:
                     event=event,
                     batch_id=batch_id,
                     items=items,
-                    engines=engines,
                     cache_directory=cache_directory,
                     upload_done=upload_done,
                     work_available=face_work,
@@ -830,13 +831,13 @@ class BatchSyncService:
         event: EventCache,
         batch_id: UUID,
         items: dict[UUID, object],
-        engines: queue.Queue,
         cache_directory: Path,
         upload_done: threading.Event,
         work_available: threading.Event,
         on_stage,
         is_halted,
     ) -> None:
+        engines: queue.Queue | None = None
         synced = True
         while True:
             if is_halted():
@@ -875,6 +876,8 @@ class BatchSyncService:
                     continue
                 ready.append(item)
             if ready:
+                if engines is None:
+                    engines = self._face_engine_pool(len(items))
                 self._face_wave(
                     event=event,
                     batch_id=batch_id,

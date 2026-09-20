@@ -12,6 +12,7 @@ from PIL import Image
 
 from openfotos_desktop import credentials
 from openfotos_desktop.credentials import RefreshTokenStore
+from openfotos_desktop.face_models import FaceModelSetupError
 from openfotos_desktop.ingestion import (
     BatchState,
     CheckpointStore,
@@ -1007,6 +1008,41 @@ def test_derivatives_start_while_later_originals_still_upload(tmp_path: Path) ->
     assert "a-preview-end" in order
     assert order.index("a-preview-end") < order.index("b-original-end")
     assert store.face_analysis_complete(batch_id)
+    service.close()
+    store.close()
+
+
+def test_missing_face_models_do_not_mask_an_originals_stage_error(
+    tmp_path: Path,
+) -> None:
+    """The engine pool is built lazily: with no downloaded models, an earlier originals
+    failure must still surface instead of a face-model setup error."""
+    store, event_id, batch_id, photo = approved_batch(tmp_path)
+    asset_id = store.list_items(batch_id)[0].id
+
+    def missing_models():
+        raise FaceModelSetupError(
+            "face_model_setup_required",
+            "The accepted face models have not finished downloading. Retry the download.",
+        )
+
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(api_handler(event_id, batch_id, asset_id, {}))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(lambda _: httpx.Response(200))),
+        face_engine_factory=missing_models,
+    )
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
+    photo.write_bytes(photo.read_bytes() + b"changed")
+
+    with pytest.raises(SourceChangedError):
+        service.upload(batch_id, transfer_limit=1, on_progress=lambda *_: None)
+
     service.close()
     store.close()
 
