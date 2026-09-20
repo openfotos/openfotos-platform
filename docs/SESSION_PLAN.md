@@ -445,6 +445,12 @@ adjacent rows; dashboard publication status aggregates in-flight batches without
 and routine dashboard forms progressively replace only affected sections while retaining ordinary
 POST/redirect behavior without JavaScript. The private-media `no-store` policy is unchanged.
 
+Upload-recovery follow-up (2026-09-20): contribution completion is based on terminal originals,
+independently of derivative timing. This preserves the established batch contract when the
+overlapped desktop pipeline finishes previews or thumbnails after the final original. Migration
+`0016` repairs already-terminal batches left reserved by the earlier ordering bug; derivative and
+face readiness remain separate publication gates.
+
 **Next action:** The user destroys the old rehearsal resources and deploys this build per runbook
 Phases 3 and 1, then re-runs the Phase 2 exercises (multi-batch upload, publish with an unfinished
 batch, PIN unlock, hidden-then-opened face search, exact-original download, PIN rotation as the leak

@@ -3,9 +3,11 @@ import hashlib
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from importlib import import_module
 from uuid import uuid4
 
 import pytest
+from django.apps import apps as django_apps
 from django.contrib.auth import get_user_model
 from django.db import OperationalError, close_old_connections, connections
 from django.utils import timezone
@@ -659,6 +661,67 @@ def test_partial_batch_requires_reasoned_exclusion_and_keeps_verified_bytes_char
     )
     assert finalized.asset_count == 1
     assert finalized.excluded_asset_count == 1
+
+
+def test_pending_derivatives_do_not_keep_verified_original_batch_reserved() -> None:
+    contents = [b"first synthetic jpeg", b"second synthetic jpeg"]
+    event, _, installation = setup_event(storage_limit=sum(map(len, contents)))
+    manifest_input = contribution_many(contents)
+    batch = reserve_contribution(
+        session=installation,
+        event_id=event.id,
+        contribution=manifest_input,
+    )
+    storage = MemoryObjectStore()
+    issue_upload_leases(
+        session=installation,
+        event_id=event.id,
+        batch_id=batch.id,
+        object_store=storage,
+    )
+    first_asset, second_asset = manifest_input.assets
+    first_original = AssetObject.objects.get(asset_id=first_asset.id)
+    storage.upload(first_original.object_key, contents[0])
+    verify_uploaded_object(
+        session=installation,
+        event_id=event.id,
+        asset_id=first_asset.id,
+        object_store=storage,
+    )
+    AssetObject.objects.create(
+        asset_id=first_asset.id,
+        variant="previews",
+        object_key=f"events/{event.id}/previews/{first_asset.id}.jpg",
+        expected_bytes=10,
+        sha256="a" * 64,
+        content_md5=base64.b64encode(
+            hashlib.md5(b"pending preview", usedforsecurity=False).digest()
+        ).decode(),
+        width=8,
+        height=6,
+    )
+
+    second_original = AssetObject.objects.get(asset_id=second_asset.id)
+    storage.upload(second_original.object_key, contents[1])
+    verify_uploaded_object(
+        session=installation,
+        event_id=event.id,
+        asset_id=second_asset.id,
+        object_store=storage,
+    )
+
+    batch.refresh_from_db()
+    assert batch.state == "complete"
+    assert AssetObject.objects.get(asset_id=first_asset.id, variant="previews").state == "reserved"
+
+    type(batch).objects.filter(pk=batch.pk).update(state="reserved", completed_at=None)
+    repair = import_module(
+        "openfotos_server.events.migrations.0016_complete_terminal_original_batches"
+    )
+    repair.complete_terminal_original_batches(django_apps, schema_editor=None)
+    batch.refresh_from_db()
+    assert batch.state == "complete"
+    assert batch.completed_at is not None
 
 
 def test_revoked_installation_keeps_reservation_for_photographer_verification() -> None:

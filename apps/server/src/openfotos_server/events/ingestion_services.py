@@ -1207,9 +1207,10 @@ def _object_mismatch(upload: AssetObject, head) -> str:
 
 
 def _complete_batch_if_terminal(batch: ContributionBatch, *, now) -> None:
-    remaining = AssetObject.objects.filter(asset__batch=batch).exclude(
-        state__in=(UploadObjectState.VERIFIED.value, UploadObjectState.EXCLUDED.value)
-    )
+    remaining = AssetObject.objects.filter(
+        asset__batch=batch,
+        variant=AssetVariant.ORIGINAL.value,
+    ).exclude(state__in=(UploadObjectState.VERIFIED.value, UploadObjectState.EXCLUDED.value))
     if not remaining.exists():
         ContributionBatch.objects.filter(
             pk=batch.pk,
