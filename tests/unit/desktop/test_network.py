@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import threading
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -665,4 +666,384 @@ def test_presigned_manifest_headers_match_local_checksums(tmp_path: Path) -> Non
             hashlib.md5(photo.read_bytes(), usedforsecurity=False).digest()
         ).decode()
     )
+    store.close()
+
+
+def approved_multi_batch(tmp_path: Path, names: list[str]):
+    photos = []
+    for index, name in enumerate(names):
+        photo = tmp_path / name
+        Image.new("RGB", (8, 6), color=(40 + index, 80, 120)).save(photo, format="JPEG")
+        photos.append(photo)
+    store = CheckpointStore(tmp_path / "checkpoint.sqlite3")
+    event_id = uuid4()
+    store.cache_event(
+        EventCache(
+            id=event_id,
+            name="Reception",
+            storage_limit_bytes=50_000_000_000,
+            processing_profile_id="pilot-profile-v1",
+            server_url="http://localhost:8000",
+            device_label="Studio workstation",
+            sub_events=(_SUB_EVENT,),
+        )
+    )
+    batch_id = store.create_batch(event_id, _SUB_EVENT.id, label="Edited originals")
+    store.add_files(batch_id, photos)
+    InventoryScanner(store).scan(batch_id)
+    store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
+    return store, event_id, batch_id, photos
+
+
+def multi_asset_state(asset_ids: list[UUID]) -> dict:
+    return {
+        "policy": {
+            "id": str(uuid4()),
+            "enabled": False,
+            "template": "compact-bottom-right",
+            "text": "",
+            "logo_kind": "none",
+            "renderer_id": "watermark-raster-v1",
+            "derivative_profile_id": "gallery-jpeg-v1",
+            "mark_sha256": "",
+        },
+        "assets": {
+            str(asset_id): {
+                "verified": False,
+                "variants": set(),
+                "derivative_manifest": [],
+                "face_state": "pending",
+                "face_attempts": 0,
+            }
+            for asset_id in asset_ids
+        },
+    }
+
+
+def multi_asset_handler(event_id: UUID, batch_id: UUID, state: dict):
+    def event_data():
+        return {
+            "id": str(event_id),
+            "name": "Reception",
+            "state": "uploading",
+            "storage_limit_bytes": 50_000_000_000,
+            "processing_profile_id": "pilot-profile-v1",
+            "face_model_id": "opencv-yunet-2023mar-sface-2021dec",
+            "face_index_ready": False,
+            "sub_events": [
+                {
+                    "id": str(_SUB_EVENT.id),
+                    "name": _SUB_EVENT.name,
+                    "position": _SUB_EVENT.position,
+                }
+            ],
+            "reserved_original_bytes": 0,
+            "verified_original_bytes": 0,
+            "remaining_original_bytes": 50_000_000_000,
+            "intake_state": "open",
+            "intake_generation": 1,
+            "max_contribution_devices": 10,
+            "active_contribution_devices": 1,
+            "device_label": "",
+            "preview_policy": state.get("policy"),
+        }
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/auth/login/":
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "access-token",
+                    "refresh_token": "refresh-token",
+                    "events": [event_data()],
+                },
+            )
+        if path == "/api/v1/events/":
+            return httpx.Response(200, json={"events": [event_data()]})
+        if path == f"/api/v1/events/{event_id}/batches/":
+            state["manifest"] = json.loads(request.content)
+            return httpx.Response(201, json={"id": str(batch_id), "state": "reserved"})
+        if path == f"/api/v1/events/{event_id}/batches/{batch_id}/":
+            assets = []
+            for asset_id, asset in state["assets"].items():
+                assets.append(
+                    {
+                        "asset_id": asset_id,
+                        "variant": "originals",
+                        "state": "verified" if asset["verified"] else "reserved",
+                        "failure_code": "",
+                        "gallery_excluded": False,
+                        "face_analysis": {
+                            "state": asset["face_state"],
+                            "attempt_count": asset["face_attempts"],
+                            "failure_code": "",
+                            "detected_face_count": 0,
+                            "usable_face_count": 0,
+                        },
+                    }
+                )
+                assets.extend(
+                    {
+                        "asset_id": asset_id,
+                        "variant": value["variant"],
+                        "state": (
+                            "verified" if value["variant"] in asset["variants"] else "reserved"
+                        ),
+                        "failure_code": "",
+                        "gallery_excluded": False,
+                    }
+                    for value in asset["derivative_manifest"]
+                )
+            complete = all(asset["verified"] for asset in state["assets"].values())
+            return httpx.Response(
+                200,
+                json={
+                    "id": str(batch_id),
+                    "sub_event_id": str(_SUB_EVENT.id),
+                    "state": "complete" if complete else "reserved",
+                    "assets": assets,
+                },
+            )
+        if path == f"/api/v1/events/{event_id}/batches/{batch_id}/upload-leases/":
+            requested = json.loads(request.content)["asset_ids"]
+            manifest_assets = {value["id"]: value for value in state["manifest"]["assets"]}
+            return httpx.Response(
+                200,
+                json={
+                    "leases": [
+                        {
+                            "asset_id": asset_id,
+                            "url": f"https://storage.invalid/original/{asset_id}",
+                            "headers": {
+                                "Content-Length": str(manifest_assets[asset_id]["size_bytes"]),
+                                "Content-MD5": manifest_assets[asset_id]["content_md5"],
+                                "Content-Type": "image/jpeg",
+                                "If-None-Match": "*",
+                                "x-amz-meta-openfotos-sha256": manifest_assets[asset_id]["sha256"],
+                            },
+                        }
+                        for asset_id in requested
+                    ]
+                },
+            )
+        for asset_id, asset in state["assets"].items():
+            asset_prefix = f"/api/v1/events/{event_id}/assets/{asset_id}"
+            if path == f"{asset_prefix}/complete/":
+                asset["verified"] = True
+                return httpx.Response(200, json={"asset_id": asset_id, "state": "verified"})
+            if path == f"{asset_prefix}/derivatives/":
+                if state.get("derivative_error") is not None:
+                    return state["derivative_error"]
+                body = json.loads(request.content)
+                asset["derivative_manifest"] = body["objects"]
+                return httpx.Response(
+                    201,
+                    json={
+                        "asset_id": asset_id,
+                        "objects": [
+                            {
+                                "variant": value["variant"],
+                                "state": (
+                                    "verified"
+                                    if value["variant"] in asset["variants"]
+                                    else "reserved"
+                                ),
+                                "failure_code": "",
+                            }
+                            for value in body["objects"]
+                        ],
+                    },
+                )
+            if path == f"{asset_prefix}/derivative-leases/":
+                variants = json.loads(request.content)["variants"]
+                objects = {value["variant"]: value for value in asset["derivative_manifest"]}
+                return httpx.Response(
+                    200,
+                    json={
+                        "leases": [
+                            {
+                                "asset_id": asset_id,
+                                "variant": variant,
+                                "url": f"https://storage.invalid/{variant}/{asset_id}",
+                                "headers": {
+                                    "Content-Length": str(objects[variant]["size_bytes"]),
+                                    "Content-MD5": objects[variant]["content_md5"],
+                                    "Content-Type": "image/jpeg",
+                                    "If-None-Match": "*",
+                                    "x-amz-meta-openfotos-sha256": objects[variant]["sha256"],
+                                },
+                            }
+                            for variant in variants
+                        ]
+                    },
+                )
+            derivative_prefix = f"{asset_prefix}/derivatives/"
+            if path.startswith(derivative_prefix) and path.endswith("/complete/"):
+                variant = path.removeprefix(derivative_prefix).removesuffix("/complete/")
+                asset["variants"].add(variant)
+                return httpx.Response(
+                    200,
+                    json={"asset_id": asset_id, "variant": variant, "state": "verified"},
+                )
+            face_path = (
+                f"/api/v1/events/{event_id}/sub-events/{_SUB_EVENT.id}"
+                f"/assets/{asset_id}/face-analysis/"
+            )
+            if path == face_path:
+                asset["face_state"] = "no_usable_face"
+                asset["face_attempts"] += 1
+                return httpx.Response(
+                    200,
+                    json={
+                        "state": "no_usable_face",
+                        "attempt_count": asset["face_attempts"],
+                        "failure_code": "",
+                        "detected_face_count": 0,
+                        "usable_face_count": 0,
+                    },
+                )
+        raise AssertionError(f"Unexpected API request: {request.method} {path}")
+
+    return handle
+
+
+def test_face_pool_embeds_multiple_photos_concurrently(tmp_path: Path) -> None:
+    store, event_id, batch_id, _photos = approved_multi_batch(tmp_path, ["a.jpg", "b.jpg", "c.jpg"])
+    items = store.list_items(batch_id)
+    asset_ids = [item.id for item in items]
+    state = multi_asset_state(asset_ids)
+    for asset in state["assets"].values():
+        asset["verified"] = True
+    # Pre-verify every original so the first face wave spans all three photos.
+    store.mark_batch_reserved(batch_id)
+    for item in items:
+        store.mark_upload_verified(item.id)
+    barrier = threading.Barrier(3, timeout=10)
+    engine_count = 0
+
+    class PooledEngine:
+        model = ACCEPTED_FACE_MODEL_CONTRACT.model
+        runtime_versions = {"synthetic": "1"}
+
+        def detect_and_embed(self, image_bytes: bytes):
+            assert image_bytes
+            barrier.wait()
+            return ()
+
+    def factory() -> PooledEngine:
+        nonlocal engine_count
+        engine_count += 1
+        return PooledEngine()
+
+    uploads = []
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(multi_asset_handler(event_id, batch_id, state))
+        ),
+        storage_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: uploads.append(request.url.path) or httpx.Response(200)
+            )
+        ),
+        face_engine_factory=factory,
+        derivative_workers=3,
+        face_workers=3,
+    )
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
+
+    service.upload(batch_id, transfer_limit=2, on_progress=lambda *_: None)
+
+    # A serial face stage would stall on the barrier; three workers pass it together.
+    assert engine_count == 3
+    assert store.face_analysis_complete(batch_id)
+    assert store.derivatives_complete(batch_id)
+    preview_uploads = [path for path in uploads if path.startswith("/previews/")]
+    assert len(preview_uploads) == 3
+    service.close()
+    store.close()
+
+
+def test_derivatives_start_while_later_originals_still_upload(tmp_path: Path) -> None:
+    store, event_id, batch_id, _photos = approved_multi_batch(tmp_path, ["a.jpg", "b.jpg"])
+    by_name = {item.basename: item.id for item in store.list_items(batch_id)}
+    a_id, b_id = by_name["a.jpg"], by_name["b.jpg"]
+    state = multi_asset_state([a_id, b_id])
+    a_preview_uploaded = threading.Event()
+    order = []
+
+    def storage_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == f"/original/{b_id}":
+            order.append("b-original-start")
+            a_preview_uploaded.wait(timeout=10)
+            order.append("b-original-end")
+            return httpx.Response(200)
+        if path == f"/previews/{a_id}":
+            a_preview_uploaded.set()
+            order.append("a-preview-end")
+            return httpx.Response(200)
+        return httpx.Response(200)
+
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(multi_asset_handler(event_id, batch_id, state))
+        ),
+        storage_client=httpx.Client(transport=httpx.MockTransport(storage_handler)),
+        face_engine_factory=NoFaceEngine,
+    )
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
+
+    service.upload(batch_id, transfer_limit=2, on_progress=lambda *_: None)
+
+    assert "a-preview-end" in order
+    assert order.index("a-preview-end") < order.index("b-original-end")
+    assert store.face_analysis_complete(batch_id)
+    service.close()
+    store.close()
+
+
+def test_fatal_derivative_error_aborts_the_pipeline(tmp_path: Path) -> None:
+    store, event_id, batch_id, _photos = approved_multi_batch(tmp_path, ["a.jpg"])
+    [item] = store.list_items(batch_id)
+    state = multi_asset_state([item.id])
+    state["derivative_error"] = httpx.Response(
+        409,
+        json={
+            "error": {
+                "code": "derivative_profile_mismatch",
+                "message": "The event gallery profile changed.",
+            }
+        },
+    )
+    service = DesktopNetworkService(
+        store,
+        token_store=MemoryTokenStore(),
+        api_client=httpx.Client(
+            transport=httpx.MockTransport(multi_asset_handler(event_id, batch_id, state))
+        ),
+        storage_client=httpx.Client(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200))
+        ),
+        face_engine_factory=NoFaceEngine,
+    )
+    service.sign_in_photographer(
+        "http://localhost:8000", "photographer", "password", "Studio workstation"
+    )
+
+    with pytest.raises(DesktopApiError) as failure:
+        service.upload(batch_id, transfer_limit=1, on_progress=lambda *_: None)
+
+    assert failure.value.code == "derivative_profile_mismatch"
+    checkpoint = store.get_derivative_checkpoint(item.id, "previews")
+    assert checkpoint.last_error_code == "derivative_profile_mismatch"
+    service.close()
     store.close()

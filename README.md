@@ -39,7 +39,10 @@ replaces owner/guest capabilities with one name-based event link and event PIN, 
 snapshot semantics, and event-wide browsing, face search, and exact-original downloads.
 The [pre-Session 9 workflow decision](docs/adr/0013-studio-portfolio-portal-formats-and-retention.md)
 records photographer-created events, portfolio/portal authority, accepted image formats, one-bucket
-storage, and 365+30-day retention.
+storage, and 365+30-day retention. The
+[parallel ingestion decision](docs/adr/0015-parallel-and-overlapped-desktop-ingestion.md)
+records pooled derivative/face workers and overlapped upload, render, and indexing stages on the
+desktop.
 
 ## Repository map
 

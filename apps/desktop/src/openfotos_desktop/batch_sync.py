@@ -1,9 +1,11 @@
-"""Resumable original and gallery-derivative synchronization."""
+"""Resumable original, gallery-derivative, and face-index synchronization."""
 
 import hashlib
 import os
+import queue
 import re
 import tempfile
+import threading
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -37,6 +39,9 @@ from .ingestion.validation import file_checksums
 from .object_transfer import ObjectTransferClient, path_sha256
 
 _MAX_UPLOAD_ATTEMPTS = 5
+# Backstop wait for a stage runner when no verified-original signal arrives. Signals are
+# always preceded by their checkpoint writes, so a missed signal only costs this delay.
+_STAGE_WAIT_SECONDS = 1.0
 _FATAL_DERIVATIVE_CODES = frozenset(
     {
         "asset_not_found",
@@ -77,6 +82,14 @@ _FATAL_FACE_CODES = frozenset(
 )
 
 
+def _worker_count(value: int | None) -> int:
+    if value is None:
+        return max(1, min(4, os.cpu_count() or 2))
+    if value < 1:
+        raise ValueError("Worker counts must be positive.")
+    return value
+
+
 class BatchSyncService:
     def __init__(
         self,
@@ -89,6 +102,8 @@ class BatchSyncService:
         jitter: Callable[[float, float], float],
         face_engine_factory: Callable[[], FaceEngine] = create_accepted_face_engine,
         ensure_preview_policy: Callable[[UUID], EventCache] | None = None,
+        derivative_workers: int | None = None,
+        face_workers: int | None = None,
     ) -> None:
         self.store = store
         self._request = request
@@ -98,6 +113,8 @@ class BatchSyncService:
         self._jitter = jitter
         self._face_engine_factory = face_engine_factory
         self._ensure_preview_policy = ensure_preview_policy
+        self._derivative_workers = _worker_count(derivative_workers)
+        self._face_workers = _worker_count(face_workers)
 
     def upload(
         self,
@@ -152,17 +169,7 @@ class BatchSyncService:
             raise DesktopApiError(
                 "batch_not_approved", "Approve the local contribution before uploading."
             )
-        self._upload_originals(
-            event=event,
-            batch_id=batch.id,
-            items=items,
-            transfer_limit=transfer_limit,
-            on_progress=on_progress,
-            on_stage=on_stage,
-            is_cancelled=is_cancelled,
-        )
-        if is_cancelled and is_cancelled():
-            return
+        # Compatibility gates fail closed before any transfer or processing work.
         event = self.store.get_event(event.id)
         if event.preview_policy is None:
             event = self._refresh_cached_event(event.id)
@@ -173,27 +180,146 @@ class BatchSyncService:
                 "preview_policy_not_confirmed",
                 "Confirm preview settings before gallery processing.",
             )
+        event = self._refresh_cached_event(event.id)
+        if event.face_model_id != ACCEPTED_FACE_MODEL_CONTRACT.model.id:
+            raise DesktopApiError(
+                "face_model_mismatch",
+                "This desktop version cannot process the event's face model.",
+            )
         self.store.ensure_derivative_checkpoints(batch.id)
-        self._sync_batch(event.id, batch.id)
-        self._process_derivatives(
-            event=event,
-            batch_id=batch.id,
-            items=items,
-            on_stage=on_stage,
-            is_cancelled=is_cancelled,
-        )
+        self.store.ensure_face_analysis_checkpoints(batch.id)
+        engines = self._face_engine_pool(len(items))
+        cache_directory = self.store.derivative_cache_directory(batch.id)
+        try:
+            self._run_pipeline(
+                event=event,
+                batch_id=batch.id,
+                items=items,
+                transfer_limit=transfer_limit,
+                engines=engines,
+                cache_directory=cache_directory,
+                on_progress=on_progress,
+                on_stage=on_stage,
+                is_cancelled=is_cancelled,
+            )
+        finally:
+            self.store.cleanup_derivative_cache(batch.id)
+
+    def _face_engine_pool(self, item_count: int) -> queue.Queue:
+        """Create one single-threaded engine per face worker; engines are not thread-safe."""
+        try:
+            engines = [
+                self._face_engine_factory() for _ in range(min(self._face_workers, item_count))
+            ]
+        except FaceModelSetupError as exc:
+            raise DesktopApiError(exc.code, str(exc)) from exc
+        pool: queue.Queue = queue.Queue()
+        for engine in engines:
+            pool.put(engine)
+        return pool
+
+    def _run_pipeline(
+        self,
+        *,
+        event: EventCache,
+        batch_id: UUID,
+        items: dict[UUID, object],
+        transfer_limit: int,
+        engines: queue.Queue,
+        cache_directory: Path,
+        on_progress,
+        on_stage,
+        is_cancelled,
+    ) -> None:
+        """Run originals, derivatives, and face indexing as overlapped stage runners.
+
+        Derivative and face work for one asset starts as soon as its original is verified,
+        while later originals still transfer. A failure in any runner halts the others;
+        the originals stage has deterministic error priority, matching the serial order.
+        """
+        abort = threading.Event()
+        upload_done = threading.Event()
+        derivative_work = threading.Event()
+        face_work = threading.Event()
+        errors: dict[str, BaseException] = {}
+        errors_lock = threading.Lock()
+
+        def halted() -> bool:
+            return abort.is_set() or bool(is_cancelled and is_cancelled())
+
+        def record(stage: str, exc: BaseException) -> None:
+            with errors_lock:
+                errors.setdefault(stage, exc)
+            abort.set()
+
+        def run_originals() -> None:
+            try:
+                self._upload_originals(
+                    event=event,
+                    batch_id=batch_id,
+                    items=items,
+                    transfer_limit=transfer_limit,
+                    on_progress=on_progress,
+                    on_stage=on_stage,
+                    is_cancelled=halted,
+                    work_signals=(derivative_work, face_work),
+                )
+            except Exception as exc:
+                record("originals", exc)
+            finally:
+                upload_done.set()
+                derivative_work.set()
+                face_work.set()
+
+        def run_derivatives() -> None:
+            try:
+                self._process_derivatives(
+                    event=event,
+                    batch_id=batch_id,
+                    items=items,
+                    cache_directory=cache_directory,
+                    upload_done=upload_done,
+                    work_available=derivative_work,
+                    on_stage=on_stage,
+                    is_halted=halted,
+                )
+            except Exception as exc:
+                record("derivatives", exc)
+
+        def run_faces() -> None:
+            try:
+                self._process_face_index(
+                    event=event,
+                    batch_id=batch_id,
+                    items=items,
+                    engines=engines,
+                    cache_directory=cache_directory,
+                    upload_done=upload_done,
+                    work_available=face_work,
+                    on_stage=on_stage,
+                    is_halted=halted,
+                )
+            except Exception as exc:
+                record("faces", exc)
+
+        runners = [
+            threading.Thread(target=run_originals, name="openfotos-originals", daemon=True),
+            threading.Thread(target=run_derivatives, name="openfotos-derivatives", daemon=True),
+            threading.Thread(target=run_faces, name="openfotos-faces", daemon=True),
+        ]
+        for runner in runners:
+            runner.start()
+        for runner in runners:
+            runner.join()
+        for stage in ("originals", "derivatives", "faces"):
+            if stage in errors:
+                raise errors[stage]
         if is_cancelled and is_cancelled():
             return
-        event = self._refresh_cached_event(event.id)
-        self.store.ensure_face_analysis_checkpoints(batch.id)
-        self._sync_batch(event.id, batch.id)
-        self._process_face_index(
-            event=event,
-            batch_id=batch.id,
-            items=items,
-            on_stage=on_stage,
-            is_cancelled=is_cancelled,
-        )
+        # Report terminal stage counts in the historic stage order once every runner
+        # finished, so observers see a deterministic final progress sequence.
+        self._report_derivative_progress(batch_id, on_stage)
+        self._report_face_progress(batch_id, on_stage)
 
     def _upload_originals(
         self,
@@ -205,6 +331,7 @@ class BatchSyncService:
         on_progress,
         on_stage,
         is_cancelled,
+        work_signals: tuple[threading.Event, ...] = (),
     ) -> None:
         while True:
             self._sync_batch(event.id, batch_id)
@@ -256,6 +383,7 @@ class BatchSyncService:
                         event.id,
                         items[UUID(lease["asset_id"])],
                         lease,
+                        work_signals,
                     ): lease
                     for lease in leases
                 }
@@ -268,8 +396,16 @@ class BatchSyncService:
                             terminal_error = exc
                 if terminal_error is not None:
                     raise terminal_error
+            for signal in work_signals:
+                signal.set()
 
-    def _upload_one(self, event_id: UUID, item, lease: dict) -> None:
+    def _upload_one(
+        self,
+        event_id: UUID,
+        item,
+        lease: dict,
+        work_signals: tuple[threading.Event, ...] = (),
+    ) -> None:
         self.store.mark_upload_started(item.id)
         try:
             current = item.source_path.stat()
@@ -317,6 +453,8 @@ class BatchSyncService:
             raise
         else:
             self.store.mark_upload_verified(item.id)
+            for signal in work_signals:
+                signal.set()
 
     def _backoff(self, item_id: UUID) -> None:
         checkpoint = self.store.get_upload_checkpoint(item_id)
@@ -329,8 +467,11 @@ class BatchSyncService:
         event: EventCache,
         batch_id: UUID,
         items: dict[UUID, object],
+        cache_directory: Path,
+        upload_done: threading.Event,
+        work_available: threading.Event,
         on_stage,
-        is_cancelled,
+        is_halted,
     ) -> None:
         policy = event.preview_policy
         if policy is None:  # guarded by upload; retained as a narrow type boundary
@@ -338,89 +479,142 @@ class BatchSyncService:
                 "preview_policy_not_confirmed", "Preview settings are unavailable."
             )
         mark_png = self._policy_mark(event.id, policy)
-        cache_directory = self.store.derivative_cache_directory(batch_id)
         renderer = DerivativeRenderer()
-        try:
+        synced = True
+        while True:
+            if is_halted():
+                return
+            if synced:
+                self._sync_batch(event.id, batch_id)
+            self._report_derivative_progress(batch_id, on_stage)
+            originals = {
+                checkpoint.item_id: checkpoint
+                for checkpoint in self.store.list_upload_checkpoints(batch_id)
+            }
+            derivatives: dict[UUID, list] = {}
+            for checkpoint in self.store.list_derivative_checkpoints(batch_id):
+                derivatives.setdefault(checkpoint.item_id, []).append(checkpoint)
+            ready = []
+            exhausted = False
             for item in sorted(items.values(), key=lambda value: str(value.id)):
-                if is_cancelled and is_cancelled():
-                    return
-                checkpoints = self._item_derivative_checkpoints(item.id)
-                if all(
-                    checkpoint.state in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
-                    for checkpoint in checkpoints.values()
-                ):
-                    self._report_derivative_progress(batch_id, on_stage)
+                pending = [
+                    checkpoint
+                    for checkpoint in derivatives.get(item.id, [])
+                    if checkpoint.state
+                    not in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
+                ]
+                if not pending:
                     continue
-                while True:
-                    pending = [
-                        checkpoint
-                        for checkpoint in checkpoints.values()
-                        if checkpoint.state
-                        not in {LocalUploadState.VERIFIED, LocalUploadState.EXCLUDED}
-                    ]
-                    attempts = max(checkpoint.attempt_count for checkpoint in pending)
-                    if attempts >= _MAX_UPLOAD_ATTEMPTS:
-                        raise DesktopApiError(
-                            "derivative_attempts_exhausted",
-                            "A gallery derivative failed five times and needs photographer review.",
-                        )
-                    try:
-                        self._process_asset_derivatives(
-                            event=event,
-                            item=item,
-                            policy=policy,
-                            mark_png=mark_png,
-                            renderer=renderer,
-                            cache_directory=cache_directory,
-                            pending=pending,
-                        )
-                    except (DerivativeError, DesktopApiError) as exc:
-                        code = exc.code
-                        current = self._item_derivative_checkpoints(item.id)
-                        for checkpoint in current.values():
-                            if checkpoint.state not in {
-                                LocalUploadState.VERIFIED,
-                                LocalUploadState.EXCLUDED,
-                            }:
-                                self.store.mark_derivative_failed(item.id, checkpoint.variant, code)
-                        if isinstance(exc, DesktopApiError) and exc.code in _FATAL_DERIVATIVE_CODES:
-                            raise
-                        self._report_derivative_failure(
-                            event.id,
-                            item.id,
-                            code,
-                            attempt=max(value.attempt_count for value in current.values()),
-                        )
-                        checkpoints = self._item_derivative_checkpoints(item.id)
-                        if max(value.attempt_count for value in checkpoints.values()) >= 5:
-                            raise DesktopApiError(
-                                "derivative_attempts_exhausted",
-                                "A gallery derivative failed five times and needs "
-                                "photographer review.",
-                            ) from exc
-                        if isinstance(exc, DesktopApiError) and exc.retryable:
-                            self._derivative_backoff(checkpoints)
-                        continue
-                    self._sync_batch(event.id, batch_id)
-                    checkpoints = self._item_derivative_checkpoints(item.id)
-                    self._report_derivative_progress(batch_id, on_stage)
-                    if all(
-                        checkpoint.state
-                        in {
-                            LocalUploadState.VERIFIED,
-                            LocalUploadState.EXCLUDED,
-                        }
-                        for checkpoint in checkpoints.values()
-                    ):
-                        break
-            if not self.store.derivatives_complete(batch_id):
+                original = originals.get(item.id)
+                if original is None or original.state is not LocalUploadState.VERIFIED:
+                    continue
+                if max(checkpoint.attempt_count for checkpoint in pending) >= (
+                    _MAX_UPLOAD_ATTEMPTS
+                ):
+                    exhausted = True
+                    continue
+                ready.append((item, pending))
+            if ready:
+                self._derivative_wave(
+                    event=event,
+                    ready=ready,
+                    policy=policy,
+                    mark_png=mark_png,
+                    renderer=renderer,
+                    cache_directory=cache_directory,
+                )
+                synced = True
+                continue
+            if self.store.derivatives_complete(batch_id):
+                return
+            if upload_done.is_set():
+                if exhausted:
+                    raise DesktopApiError(
+                        "derivative_attempts_exhausted",
+                        "A gallery derivative failed five times and needs photographer review.",
+                    )
                 raise DesktopApiError(
                     "derivative_state_unavailable",
                     "Gallery processing stopped before every derivative was verified.",
                     retryable=True,
                 )
-        finally:
-            self.store.cleanup_derivative_cache(batch_id)
+            synced = work_available.wait(timeout=_STAGE_WAIT_SECONDS)
+            work_available.clear()
+
+    def _derivative_wave(
+        self,
+        *,
+        event: EventCache,
+        ready: list,
+        policy: PreviewPolicyCache,
+        mark_png: bytes,
+        renderer: DerivativeRenderer,
+        cache_directory: Path,
+    ) -> None:
+        fatal = None
+        with ThreadPoolExecutor(max_workers=min(self._derivative_workers, len(ready))) as executor:
+            futures = [
+                executor.submit(
+                    self._derivative_attempt,
+                    event=event,
+                    item=item,
+                    pending=pending,
+                    policy=policy,
+                    mark_png=mark_png,
+                    renderer=renderer,
+                    cache_directory=cache_directory,
+                )
+                for item, pending in ready
+            ]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except DesktopApiError as exc:
+                    if exc.code in _FATAL_DERIVATIVE_CODES and fatal is None:
+                        fatal = exc
+        if fatal is not None:
+            raise fatal
+
+    def _derivative_attempt(
+        self,
+        *,
+        event: EventCache,
+        item,
+        pending: list,
+        policy: PreviewPolicyCache,
+        mark_png: bytes,
+        renderer: DerivativeRenderer,
+        cache_directory: Path,
+    ) -> None:
+        try:
+            self._process_asset_derivatives(
+                event=event,
+                item=item,
+                policy=policy,
+                mark_png=mark_png,
+                renderer=renderer,
+                cache_directory=cache_directory,
+                pending=pending,
+            )
+        except (DerivativeError, DesktopApiError) as exc:
+            code = exc.code
+            current = self._item_derivative_checkpoints(item.id)
+            for checkpoint in current.values():
+                if checkpoint.state not in {
+                    LocalUploadState.VERIFIED,
+                    LocalUploadState.EXCLUDED,
+                }:
+                    self.store.mark_derivative_failed(item.id, checkpoint.variant, code)
+            if isinstance(exc, DesktopApiError) and exc.code in _FATAL_DERIVATIVE_CODES:
+                raise
+            self._report_derivative_failure(
+                event.id,
+                item.id,
+                code,
+                attempt=max(value.attempt_count for value in current.values()),
+            )
+            if isinstance(exc, DesktopApiError) and exc.retryable:
+                self._derivative_backoff(current)
 
     def _process_asset_derivatives(
         self,
@@ -636,97 +830,152 @@ class BatchSyncService:
         event: EventCache,
         batch_id: UUID,
         items: dict[UUID, object],
+        engines: queue.Queue,
+        cache_directory: Path,
+        upload_done: threading.Event,
+        work_available: threading.Event,
         on_stage,
-        is_cancelled,
+        is_halted,
     ) -> None:
-        if event.face_model_id != ACCEPTED_FACE_MODEL_CONTRACT.model.id:
-            raise DesktopApiError(
-                "face_model_mismatch",
-                "This desktop version cannot process the event's face model.",
-            )
-        try:
-            engine = self._face_engine_factory()
-        except FaceModelSetupError as exc:
-            raise DesktopApiError(exc.code, str(exc)) from exc
-        cache_directory = self.store.derivative_cache_directory(batch_id)
-        try:
+        synced = True
+        while True:
+            if is_halted():
+                return
+            if synced:
+                self._sync_batch(event.id, batch_id)
+            self._report_face_progress(batch_id, on_stage)
+            originals = {
+                checkpoint.item_id: checkpoint
+                for checkpoint in self.store.list_upload_checkpoints(batch_id)
+            }
+            analyses = {
+                checkpoint.item_id: checkpoint
+                for checkpoint in self.store.list_face_analysis_checkpoints(batch_id)
+            }
+            ready = []
+            exhausted = False
             for item in sorted(items.values(), key=lambda value: str(value.id)):
-                if is_cancelled and is_cancelled():
-                    return
-                while True:
-                    checkpoint = self.store.get_face_analysis_checkpoint(item.id)
-                    if checkpoint.state in {
-                        LocalFaceState.INDEXED,
-                        LocalFaceState.NO_USABLE_FACE,
-                        LocalFaceState.EXCLUDED,
-                    }:
-                        self._report_face_progress(batch_id, on_stage)
-                        break
-                    if checkpoint.state is LocalFaceState.CONFLICT:
-                        raise DesktopApiError(
-                            "face_analysis_conflict",
-                            "A photo needs an explicit face-analysis reset in the dashboard.",
-                        )
-                    if checkpoint.attempt_count >= _MAX_UPLOAD_ATTEMPTS:
-                        raise DesktopApiError(
-                            "face_analysis_attempts_exhausted",
-                            "A photo failed face analysis five times and needs review.",
-                        )
-                    try:
-                        self._process_asset_faces(
-                            event=event,
-                            batch_id=batch_id,
-                            item=item,
-                            engine=engine,
-                            cache_directory=cache_directory,
-                        )
-                    except (
-                        FaceAnalysisDocumentError,
-                        FaceEngineError,
-                        DesktopApiError,
-                        OSError,
-                    ) as exc:
-                        code = getattr(exc, "code", "face_engine_failed")
-                        conflict = code == "face_analysis_conflict"
-                        self.store.mark_face_analysis_failed(
-                            item.id,
-                            code,
-                            conflict=conflict,
-                        )
-                        if isinstance(exc, DesktopApiError) and code in _FATAL_FACE_CODES:
-                            raise
-                        self._report_face_failure(
-                            event.id,
-                            self.store.get_batch(batch_id).sub_event_id,
-                            item.id,
-                            code,
-                            attempt=self.store.get_face_analysis_checkpoint(item.id).attempt_count,
-                        )
-                        checkpoint = self.store.get_face_analysis_checkpoint(item.id)
-                        if checkpoint.attempt_count >= _MAX_UPLOAD_ATTEMPTS:
-                            raise DesktopApiError(
-                                "face_analysis_attempts_exhausted",
-                                "A photo failed face analysis five times and needs review.",
-                            ) from exc
-                        if isinstance(exc, DesktopApiError) and exc.retryable:
-                            self._face_backoff(checkpoint.attempt_count)
-                        continue
-                    self._sync_batch(event.id, batch_id)
-                    self._report_face_progress(batch_id, on_stage)
-                    checkpoint = self.store.get_face_analysis_checkpoint(item.id)
-                    if checkpoint.state in {
-                        LocalFaceState.INDEXED,
-                        LocalFaceState.NO_USABLE_FACE,
-                    }:
-                        break
-            if not self.store.face_analysis_complete(batch_id):
+                checkpoint = analyses.get(item.id)
+                if checkpoint is None or checkpoint.state in {
+                    LocalFaceState.INDEXED,
+                    LocalFaceState.NO_USABLE_FACE,
+                    LocalFaceState.EXCLUDED,
+                }:
+                    continue
+                if checkpoint.state is LocalFaceState.CONFLICT:
+                    raise DesktopApiError(
+                        "face_analysis_conflict",
+                        "A photo needs an explicit face-analysis reset in the dashboard.",
+                    )
+                original = originals.get(item.id)
+                if original is None or original.state is not LocalUploadState.VERIFIED:
+                    continue
+                if checkpoint.attempt_count >= _MAX_UPLOAD_ATTEMPTS:
+                    exhausted = True
+                    continue
+                ready.append(item)
+            if ready:
+                self._face_wave(
+                    event=event,
+                    batch_id=batch_id,
+                    items=ready,
+                    engines=engines,
+                    cache_directory=cache_directory,
+                )
+                synced = True
+                continue
+            if self.store.face_analysis_complete(batch_id):
+                return
+            if upload_done.is_set():
+                if exhausted:
+                    raise DesktopApiError(
+                        "face_analysis_attempts_exhausted",
+                        "A photo failed face analysis five times and needs review.",
+                    )
                 raise DesktopApiError(
                     "face_analysis_state_unavailable",
                     "Face indexing stopped before every photo reached a terminal state.",
                     retryable=True,
                 )
+            synced = work_available.wait(timeout=_STAGE_WAIT_SECONDS)
+            work_available.clear()
+
+    def _face_wave(
+        self,
+        *,
+        event: EventCache,
+        batch_id: UUID,
+        items: list,
+        engines: queue.Queue,
+        cache_directory: Path,
+    ) -> None:
+        fatal = None
+        with ThreadPoolExecutor(max_workers=min(self._face_workers, len(items))) as executor:
+            futures = [
+                executor.submit(
+                    self._face_attempt,
+                    event=event,
+                    batch_id=batch_id,
+                    item=item,
+                    engines=engines,
+                    cache_directory=cache_directory,
+                )
+                for item in items
+            ]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except DesktopApiError as exc:
+                    if exc.code in _FATAL_FACE_CODES and fatal is None:
+                        fatal = exc
+        if fatal is not None:
+            raise fatal
+
+    def _face_attempt(
+        self,
+        *,
+        event: EventCache,
+        batch_id: UUID,
+        item,
+        engines: queue.Queue,
+        cache_directory: Path,
+    ) -> None:
+        engine = engines.get()
+        try:
+            self._process_asset_faces(
+                event=event,
+                batch_id=batch_id,
+                item=item,
+                engine=engine,
+                cache_directory=cache_directory,
+            )
+        except (
+            FaceAnalysisDocumentError,
+            FaceEngineError,
+            DesktopApiError,
+            OSError,
+        ) as exc:
+            code = getattr(exc, "code", "face_engine_failed")
+            conflict = code == "face_analysis_conflict"
+            self.store.mark_face_analysis_failed(
+                item.id,
+                code,
+                conflict=conflict,
+            )
+            if isinstance(exc, DesktopApiError) and code in _FATAL_FACE_CODES:
+                raise
+            checkpoint = self.store.get_face_analysis_checkpoint(item.id)
+            self._report_face_failure(
+                event.id,
+                self.store.get_batch(batch_id).sub_event_id,
+                item.id,
+                code,
+                attempt=checkpoint.attempt_count,
+            )
+            if isinstance(exc, DesktopApiError) and exc.retryable:
+                self._face_backoff(checkpoint.attempt_count)
         finally:
-            self.store.cleanup_derivative_cache(batch_id)
+            engines.put(engine)
 
     def _process_asset_faces(
         self,

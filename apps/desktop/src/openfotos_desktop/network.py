@@ -42,6 +42,8 @@ class DesktopNetworkService:
         jitter=random.uniform,
         face_engine_factory: Callable[[], FaceEngine] | None = None,
         face_model_store: FaceModelStore | None = None,
+        derivative_workers: int | None = None,
+        face_workers: int | None = None,
     ) -> None:
         self.store = store
         self._api = AuthenticatedApiClient(
@@ -63,6 +65,8 @@ class DesktopNetworkService:
             sleeper=sleeper,
             jitter=jitter,
             ensure_preview_policy=self._ensure_clean_preview_policy,
+            derivative_workers=derivative_workers,
+            face_workers=face_workers,
             **(
                 {"face_engine_factory": face_engine_factory}
                 if face_engine_factory is not None

@@ -1,6 +1,6 @@
 # ADR 0011: Direct per-photo face index
 
-- **Status:** Accepted
+- **Status:** Accepted; serial-processing constraint amended by ADR 0015
 - **Date:** 2026-09-17
 - **Depends on:** ADR 0010
 
@@ -25,9 +25,10 @@ the event's later retention policy.
   optional sub-event predicates in SQL, excludes archived sub-events and gallery-excluded assets,
   collapses multiple faces to each asset's best cosine distance, and uses the fixed ADR 0010
   threshold. Session 7 exposes this service boundary but no public search UI.
-- Run detection and embedding generation only on the active workstation that originated the batch,
-  one photo at a time with one OpenCV thread. The server never downloads originals to run the face
-  model.
+- Run detection and embedding generation only on the active workstation that originated the batch.
+  The server never downloads originals to run the face model. ADR 0015 replaces the original
+  one-photo-at-a-time constraint with a small pool of single-threaded engines on that same
+  workstation.
 - Acquire YuNet and SFace from their upstream OpenCV Zoo locations into the private desktop data
   directory, or import existing local files. Verify the two accepted SHA-256 hashes before use;
   never track weights in Git.
