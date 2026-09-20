@@ -315,6 +315,9 @@ def test_dashboard_is_tenant_scoped_and_sub_event_filter_cannot_widen(monkeypatc
 
 def test_failed_asset_exclusion_requires_five_attempts_and_is_reversible() -> None:
     _, user, event, batch = _tenant()
+    event.state = EventState.UPLOADING.value
+    event.intake_state = "open"
+    event.save(update_fields=("state", "intake_state"))
     asset = _gallery_asset(event, batch)
     asset.derivative_failure_code = "invalid_color_profile"
     asset.derivative_attempt_count = 4

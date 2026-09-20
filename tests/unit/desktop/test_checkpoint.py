@@ -224,6 +224,46 @@ def test_preview_policy_and_derivative_boundaries_survive_restart(tmp_path: Path
     assert "embedding" not in face_columns
 
 
+def test_server_derivative_state_recovers_a_lost_failure_response(tmp_path: Path) -> None:
+    photo = tmp_path / "photo.jpg"
+    Image.new("RGB", (4, 4), color="blue").save(photo, format="JPEG")
+
+    with CheckpointStore(tmp_path / "checkpoint.sqlite3") as store:
+        event_id = uuid4()
+        store.cache_event(
+            EventCache(
+                id=event_id,
+                name="Reception",
+                storage_limit_bytes=50_000_000_000,
+                processing_profile_id="pilot-profile-v1",
+                sub_events=(_SUB_EVENT,),
+            )
+        )
+        batch_id = store.create_batch(event_id, _SUB_EVENT.id)
+        store.add_files(batch_id, [photo])
+        InventoryScanner(store).scan(batch_id)
+        store.approve_batch(batch_id, supported_profile_id="pilot-profile-v1")
+        store.mark_batch_reserved(batch_id)
+        item_id = store.list_items(batch_id)[0].id
+        for _ in range(5):
+            store.mark_derivative_started(item_id, AssetVariant.THUMBNAIL)
+            store.mark_derivative_failed(item_id, AssetVariant.THUMBNAIL, "server_unavailable")
+        assert store.get_derivative_checkpoint(item_id, AssetVariant.THUMBNAIL).attempt_count == 5
+
+        store.sync_derivative(
+            item_id,
+            AssetVariant.THUMBNAIL,
+            state=LocalUploadState.PENDING,
+            attempt_count=4,
+            error_code="",
+        )
+
+        recovered = store.get_derivative_checkpoint(item_id, AssetVariant.THUMBNAIL)
+        assert recovered.state is LocalUploadState.PENDING
+        assert recovered.attempt_count == 4
+        assert recovered.last_error_code is None
+
+
 def test_photographer_exclusion_is_a_terminal_local_upload_state(tmp_path: Path) -> None:
     photo = tmp_path / "photo.jpg"
     Image.new("RGB", (4, 4), color="blue").save(photo, format="JPEG")

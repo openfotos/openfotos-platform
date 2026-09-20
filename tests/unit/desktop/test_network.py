@@ -202,6 +202,7 @@ def api_handler(event_id: UUID, batch_id: UUID, asset_id: UUID, state: dict):
                     ),
                     "failure_code": "",
                     "gallery_excluded": False,
+                    "attempt_count": state.get("derivative_attempts", 0),
                 }
                 for value in state.get("derivative_manifest", [])
             )
@@ -793,6 +794,7 @@ def multi_asset_handler(event_id: UUID, batch_id: UUID, state: dict):
                         ),
                         "failure_code": "",
                         "gallery_excluded": False,
+                        "attempt_count": asset.get("derivative_attempts", 0),
                     }
                     for value in asset["derivative_manifest"]
                 )

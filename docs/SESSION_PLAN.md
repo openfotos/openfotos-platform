@@ -451,6 +451,13 @@ overlapped desktop pipeline finishes previews or thumbnails after the final orig
 `0016` repairs already-terminal batches left reserved by the earlier ordering bug; derivative and
 face readiness remain separate publication gates.
 
+Interrupted-processing follow-up (2026-09-20): a stopped desktop worker now restores its retry
+controls even when all originals are complete. Server-reported derivative attempts reconcile local
+checkpoints after a lost failure response, and connectivity failures stop the processing wave
+instead of consuming every retry. The dashboard offers gallery exclusion only after five failed
+attempts and permits that recovery while the revised upload-until-publish lifecycle keeps the event
+in Uploading.
+
 **Next action:** The user destroys the old rehearsal resources and deploys this build per runbook
 Phases 3 and 1, then re-runs the Phase 2 exercises (multi-batch upload, publish with an unfinished
 batch, PIN unlock, hidden-then-opened face search, exact-original download, PIN rotation as the leak

@@ -219,9 +219,14 @@ def exclude_from_gallery(
         raise IngestionError("invalid_exclusion_reason", "An exclusion reason is required.")
     with transaction.atomic():
         locked_event = Event.objects.select_for_update().get(pk=event.pk)
-        if locked_event.state not in {EventState.PROCESSING.value, EventState.REVIEW.value}:
+        if locked_event.state not in {
+            EventState.UPLOADING.value,
+            EventState.PROCESSING.value,
+            EventState.REVIEW.value,
+        }:
             raise IngestionError(
-                "event_not_reviewable", "Gallery exclusions require Processing or Review state."
+                "event_not_reviewable",
+                "Gallery exclusions require an unpublished active event.",
             )
         try:
             asset = (
@@ -303,9 +308,14 @@ def exclude_from_gallery(
 def restore_to_gallery(*, event: Event, asset_id: UUID, actor, request=None) -> Asset:
     with transaction.atomic():
         locked_event = Event.objects.select_for_update().get(pk=event.pk)
-        if locked_event.state not in {EventState.PROCESSING.value, EventState.REVIEW.value}:
+        if locked_event.state not in {
+            EventState.UPLOADING.value,
+            EventState.PROCESSING.value,
+            EventState.REVIEW.value,
+        }:
             raise IngestionError(
-                "event_not_reviewable", "Gallery restoration requires Processing or Review state."
+                "event_not_reviewable",
+                "Gallery restoration requires an unpublished active event.",
             )
         try:
             asset = Asset.objects.select_for_update().get(

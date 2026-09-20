@@ -57,6 +57,7 @@ _FATAL_DERIVATIVE_CODES = frozenset(
         "preview_policy_mismatch",
         "preview_policy_not_confirmed",
         "session_unavailable",
+        "server_unavailable",
         "source_checksum_mismatch",
         "watermark_checksum_mismatch",
     }
@@ -76,6 +77,7 @@ _FATAL_FACE_CODES = frozenset(
         "model_contract_mismatch",
         "original_not_verified",
         "session_unavailable",
+        "server_unavailable",
         "source_checksum_mismatch",
         "sub_event_archived",
     }
@@ -1158,6 +1160,26 @@ class BatchSyncService:
                 if item.get("gallery_excluded"):
                     self.store.mark_derivatives_excluded(item_id)
                     self.store.mark_face_analysis_excluded(item_id)
+                elif "attempt_count" in item:
+                    try:
+                        server_state = {
+                            "reserved": LocalUploadState.PENDING,
+                            "verified": LocalUploadState.VERIFIED,
+                            "failed": LocalUploadState.FAILED,
+                            "excluded": LocalUploadState.EXCLUDED,
+                        }[item["state"]]
+                    except KeyError as exc:
+                        raise DesktopApiError(
+                            "invalid_server_response",
+                            "The server returned an invalid derivative state.",
+                        ) from exc
+                    self.store.sync_derivative(
+                        item_id,
+                        derivative_variant,
+                        state=server_state,
+                        attempt_count=int(item["attempt_count"]),
+                        error_code=str(item["failure_code"]),
+                    )
                 elif item["state"] == "verified":
                     self.store.mark_derivative_verified(item_id, derivative_variant)
                 elif item["state"] == "failed":

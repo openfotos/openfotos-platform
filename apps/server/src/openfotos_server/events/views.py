@@ -469,6 +469,7 @@ def _gallery_status_context(event: Event) -> dict:
         "failed_assets": Asset.objects.filter(
             batch__installation__event=event,
             derivative_failure_code__gt="",
+            derivative_attempt_count__gte=5,
             gallery_excluded_at__isnull=True,
         ).order_by("original_filename", "id"),
         "face_failed_assets": visible_face_assets.filter(

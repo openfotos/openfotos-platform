@@ -1198,6 +1198,44 @@ class CheckpointStore(AbstractContextManager["CheckpointStore"]):
             state=LocalUploadState.VERIFIED,
         )
 
+    def sync_derivative(
+        self,
+        item_id: UUID,
+        variant: AssetVariant | str,
+        *,
+        state: LocalUploadState,
+        attempt_count: int,
+        error_code: str,
+    ) -> None:
+        parsed_variant = _derivative_variant(variant)
+        if attempt_count < 0:
+            raise ValueError("Derivative attempt count cannot be negative.")
+        timestamp = _now()
+        with self._lock, self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE derivative_checkpoints
+                SET state = ?, attempt_count = ?, last_error_code = ?,
+                    completed_at = CASE WHEN ? IN (?, ?) THEN ? ELSE NULL END,
+                    updated_at = ?
+                WHERE item_id = ? AND variant = ?
+                """,
+                (
+                    state.value,
+                    attempt_count,
+                    error_code or None,
+                    state.value,
+                    LocalUploadState.VERIFIED.value,
+                    LocalUploadState.EXCLUDED.value,
+                    timestamp,
+                    timestamp,
+                    str(item_id),
+                    parsed_variant.value,
+                ),
+            )
+        if cursor.rowcount == 0:
+            raise KeyError(f"Unknown derivative checkpoint {item_id}/{parsed_variant.value}.")
+
     def mark_derivatives_excluded(self, item_id: UUID) -> None:
         for variant in DERIVATIVE_VARIANTS:
             self._update_derivative(item_id, variant, state=LocalUploadState.EXCLUDED)

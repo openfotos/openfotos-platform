@@ -1283,7 +1283,7 @@ class UploadPage(QWidget):
             self.pause.hide()
             return
         self._render_stage(stage)
-        if batch.state in {BatchState.RESERVED, BatchState.UPLOADING}:
+        if batch.state in {BatchState.RESERVED, BatchState.UPLOADING, BatchState.COMPLETE}:
             self.pause.setVisible(True)
             self.pause.setText("Resume")
             self.pause.setIcon(_asset_icon("refresh.svg"))
@@ -1370,6 +1370,12 @@ class UploadPage(QWidget):
             self.pause.hide()
         if self._event is not None:
             self._uploadable = self._event.intake_state == "open"
+        if self._store is not None and self._batch_id is not None:
+            batch = self._store.get_batch(self._batch_id)
+            self._refresh_sources(self._store, batch)
+            self._refresh_status(batch)
+            self.refresh_verification(self._store)
+            self.refresh_progress(self._store, batch)
 
 
 class MainWindow(QMainWindow):
@@ -1943,6 +1949,7 @@ class MainWindow(QMainWindow):
             BatchState.APPROVED,
             BatchState.RESERVED,
             BatchState.UPLOADING,
+            BatchState.COMPLETE,
         }:
             self._start_upload(DEFAULT_TRANSFER_LIMIT)
 

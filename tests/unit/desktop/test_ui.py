@@ -275,6 +275,26 @@ def test_resumable_upload_resumes_before_newer_empty_draft(tmp_path: Path) -> No
     window.close()
 
 
+def test_failed_upload_reenables_complete_batch_resume(tmp_path: Path) -> None:
+    application()
+    store = CheckpointStore(tmp_path / "failed-upload-resume.sqlite3")
+    store.cache_event(DEMO_EVENT)
+    batch_id = _approved_batch(store, DEMO_EVENT, tmp_path)
+    store.mark_batch_reserved(batch_id)
+    store.mark_upload_verified(store.list_items(batch_id)[0].id)
+    page = UploadPage()
+    page.show_batch(DEMO_EVENT, batch_id, store)
+    page.submit_started()
+
+    page.upload_stopped()
+
+    assert page.submit.text() == "Resume upload"
+    assert page.submit.isEnabled()
+    assert page.pause.text() == "Resume"
+    assert not page.pause.isHidden()
+    store.close()
+
+
 def test_upload_page_renders_one_progress_bar_with_smooth_stage_text(tmp_path: Path) -> None:
     application()
     store = CheckpointStore(tmp_path / "progress.sqlite3")

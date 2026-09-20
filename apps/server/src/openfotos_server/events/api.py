@@ -1037,14 +1037,18 @@ def _batch_data(batch: ContributionBatch, *, session) -> dict:
             "state",
             "failure_code",
             "asset__gallery_excluded_at",
+            "asset__derivative_attempt_count",
         )
     )
     for item in data["assets"]:
         asset_id = item["asset_id"]
         item["asset_id"] = str(asset_id)
         item["gallery_excluded"] = item.pop("asset__gallery_excluded_at") is not None
+        derivative_attempt_count = item.pop("asset__derivative_attempt_count")
         if item["variant"] == AssetVariant.ORIGINAL.value:
             item["face_analysis"] = _face_analysis_data(analyses.get(asset_id))
+        else:
+            item["attempt_count"] = derivative_attempt_count
     return data
 
 

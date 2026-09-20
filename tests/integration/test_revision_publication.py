@@ -378,6 +378,30 @@ def test_not_included_batch_detail_matches_desktop_sync_contract() -> None:
     assert {item["state"] for item in body["assets"]} == {UploadObjectState.EXCLUDED.value}
 
 
+def test_batch_detail_reports_authoritative_derivative_attempt_count() -> None:
+    context = _publication_context()
+    context.included_asset.derivative_attempt_count = 4
+    context.included_asset.save(update_fields=("derivative_attempt_count",))
+    access_token = "desktop-access-token-for-derivative-recovery"
+    context.session.access_token_hash = token_digest(access_token)
+    context.session.save(update_fields=("access_token_hash", "updated_at"))
+
+    response = Client().get(
+        f"/api/v1/events/{context.event.id}/batches/{context.complete_batch.id}/",
+        headers={
+            "host": "alpha.localhost",
+            "authorization": f"Bearer {access_token}",
+        },
+    )
+
+    assert response.status_code == 200
+    derivatives = [
+        item for item in response.json()["assets"] if item["variant"] != AssetVariant.ORIGINAL.value
+    ]
+    assert len(derivatives) == 2
+    assert {item["attempt_count"] for item in derivatives} == {4}
+
+
 def test_failed_publish_does_not_exclude_in_flight_work() -> None:
     context = _publication_context(face_ready=False)
     store = MemoryObjectStore()
@@ -452,12 +476,21 @@ def test_dashboard_explains_processing_blockers(monkeypatch) -> None:
     context = _publication_context()
     monkeypatch.setattr(views, "configured_object_store", lambda: MemoryObjectStore())
     context.included_asset.derivative_failure_code = "invalid_color_profile"
-    context.included_asset.derivative_attempt_count = 5
+    context.included_asset.derivative_attempt_count = 4
     context.included_asset.save(
         update_fields=("derivative_failure_code", "derivative_attempt_count")
     )
     client = Client()
     client.force_login(context.user)
+
+    retrying = client.get(
+        reverse("events:photographer-event", args=(context.event.id,)),
+        headers={"host": "alpha.localhost"},
+    )
+    assert "Preview and thumbnail blockers" not in retrying.content.decode()
+
+    context.included_asset.derivative_attempt_count = 5
+    context.included_asset.save(update_fields=("derivative_attempt_count",))
 
     response = client.get(
         reverse("events:photographer-event", args=(context.event.id,)),
