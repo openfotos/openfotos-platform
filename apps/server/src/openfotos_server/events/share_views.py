@@ -11,6 +11,7 @@ from django.utils import timezone
 from django.views.decorators.debug import sensitive_post_parameters
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from openfotos_contracts import AssetVariant
 from openfotos_storage.backend import ObjectStoreError
 from openfotos_vision import FaceEngineError
 
@@ -22,7 +23,7 @@ from .forms import FaceSearchForm, SharePinForm
 from .gallery_services import (
     GALLERY_PAGE_SIZE,
     available_gallery_assets,
-    gallery_page,
+    gallery_images,
     gallery_photo,
     original_download,
     search_gallery_page,
@@ -94,15 +95,17 @@ def _route_context(capability: PortalCapability) -> dict[str, str]:
 
 def _gallery_listing(event, request, *, sub_event=None):
     query = available_gallery_assets(event, sub_event=sub_event)
-    if not query.exists():
-        return Paginator(query, GALLERY_PAGE_SIZE).get_page(request.GET.get("page")), []
+    page = Paginator(query, GALLERY_PAGE_SIZE).get_page(request.GET.get("page"))
+    assets = list(page.object_list)
+    if not assets:
+        return page, []
     try:
-        return gallery_page(
-            event=event,
-            page_number=request.GET.get("page"),
+        images = gallery_images(
+            assets=assets,
+            variant=AssetVariant.THUMBNAIL,
             object_store=configured_object_store(),
-            sub_event=sub_event,
         )
+        return page, images
     except (ImproperlyConfigured, IngestionError):
         messages.error(request, "Gallery media is temporarily unavailable. Please try again.")
         return Paginator(query.none(), GALLERY_PAGE_SIZE).get_page(1), []

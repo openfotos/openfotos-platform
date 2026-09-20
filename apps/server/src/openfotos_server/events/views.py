@@ -27,7 +27,7 @@ from .gallery_services import (
     GALLERY_PAGE_SIZE,
     available_gallery_assets,
     exclude_from_gallery,
-    gallery_page,
+    gallery_images,
     gallery_photo,
     original_download,
     restore_to_gallery,
@@ -65,6 +65,19 @@ from .sub_event_services import (
 
 GENERIC_LOGIN_ERROR = "We could not sign you in with those details."
 GENERIC_RATE_LIMIT_ERROR = "Too many attempts. Please wait before trying again."
+_DASHBOARD_FRAGMENTS = frozenset(
+    {
+        "messages",
+        "event-heading",
+        "sub-event-creation",
+        "sub-events",
+        "contribution-assignments",
+        "publication",
+        "gallery-status",
+        "gallery-filters",
+        "gallery-grid",
+    }
+)
 
 
 def _private_response(response: HttpResponse) -> HttpResponse:
@@ -347,15 +360,17 @@ def _gallery_listing(
     event: Event, request: HttpRequest, *, sub_event: SubEvent | None = None
 ) -> tuple[object, list]:
     query = available_gallery_assets(event, sub_event=sub_event)
-    if not query.exists():
-        return Paginator(query, GALLERY_PAGE_SIZE).get_page(request.GET.get("page")), []
+    page = Paginator(query, GALLERY_PAGE_SIZE).get_page(request.GET.get("page"))
+    assets = list(page.object_list)
+    if not assets:
+        return page, []
     try:
-        return gallery_page(
-            event=event,
-            page_number=request.GET.get("page"),
+        images = gallery_images(
+            assets=assets,
+            variant=AssetVariant.THUMBNAIL,
             object_store=configured_object_store(),
-            sub_event=sub_event,
         )
+        return page, images
     except (ImproperlyConfigured, IngestionError):
         messages.error(request, "Gallery media is temporarily unavailable. Please try again.")
         return Paginator(query.none(), GALLERY_PAGE_SIZE).get_page(1), []
@@ -365,16 +380,80 @@ def _gallery_listing(
 def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> HttpResponse:
     event = _photographer_event(request, event_id)
     selected_sub_event = _sub_event(event, sub_event_id)
-    page, images = _gallery_listing(event, request, sub_event=selected_sub_event)
-    excluded_assets = Asset.objects.filter(
-        batch__installation__event=event,
-        gallery_excluded_at__isnull=False,
-    ).order_by("original_filename", "id")
-    failed_assets = Asset.objects.filter(
-        batch__installation__event=event,
-        derivative_failure_code__gt="",
-        gallery_excluded_at__isnull=True,
-    ).order_by("original_filename", "id")
+    fragments = _requested_dashboard_fragments(request)
+    context = _dashboard_context(
+        event=event,
+        request=request,
+        selected_sub_event=selected_sub_event,
+        fragments=fragments,
+    )
+    response = _private_render(
+        request,
+        "openfotos_events/dashboard_event.html",
+        context,
+    )
+    if fragments is not None:
+        response.headers["X-OpenFotos-Fragments"] = ",".join(sorted(fragments))
+    return response
+
+
+def _requested_dashboard_fragments(request: HttpRequest) -> frozenset[str] | None:
+    raw = request.headers.get("X-OpenFotos-Fragments", "")
+    if not raw:
+        return None
+    requested = frozenset(item.strip() for item in raw.split(",") if item.strip())
+    if not requested or not requested.issubset(_DASHBOARD_FRAGMENTS):
+        return None
+    return requested
+
+
+def _dashboard_context(
+    *,
+    event: Event,
+    request: HttpRequest,
+    selected_sub_event: SubEvent | None,
+    fragments: frozenset[str] | None,
+) -> dict:
+    def requested(fragment: str) -> bool:
+        return fragments is None or fragment in fragments
+
+    context = {
+        "event": event,
+        "selected_sub_event": selected_sub_event,
+    }
+    if requested("sub-event-creation"):
+        context["sub_event_form"] = SubEventForm(initial={"position": event.sub_events.count() + 1})
+    if requested("sub-events"):
+        context["sub_events"] = event.sub_events.all()
+    if requested("contribution-assignments"):
+        context["active_sub_events"] = event.sub_events.filter(is_archived=False)
+        context["batches"] = ContributionBatch.objects.filter(
+            installation__event=event
+        ).select_related("sub_event", "installation")
+    if requested("publication"):
+        publish_status = publication_status(event)
+        portal_capability = PortalCapability.objects.filter(event=event).first()
+        context.update(
+            {
+                "publication_status": publish_status,
+                "ready": publish_status["ready"],
+                "portal_capability": portal_capability,
+                "portal_capability_active": (
+                    portal_is_available(portal_capability) if portal_capability else False
+                ),
+            }
+        )
+    if requested("gallery-status"):
+        context.update(_gallery_status_context(event))
+    if requested("gallery-filters"):
+        context["active_sub_events"] = event.sub_events.filter(is_archived=False)
+    if requested("gallery-grid"):
+        page, images = _gallery_listing(event, request, sub_event=selected_sub_event)
+        context.update({"page": page, "images": images})
+    return context
+
+
+def _gallery_status_context(event: Event) -> dict:
     visible_face_assets = Asset.objects.filter(
         batch__installation__event=event,
         batch__sub_event__is_archived=False,
@@ -382,40 +461,22 @@ def photographer_event(request: HttpRequest, event_id, sub_event_id=None) -> Htt
         variant_objects__state=UploadObjectState.VERIFIED.value,
         gallery_excluded_at__isnull=True,
     ).distinct()
-    face_failed_assets = (
-        visible_face_assets.filter(
+    return {
+        "excluded_assets": Asset.objects.filter(
+            batch__installation__event=event,
+            gallery_excluded_at__isnull=False,
+        ).order_by("original_filename", "id"),
+        "failed_assets": Asset.objects.filter(
+            batch__installation__event=event,
+            derivative_failure_code__gt="",
+            gallery_excluded_at__isnull=True,
+        ).order_by("original_filename", "id"),
+        "face_failed_assets": visible_face_assets.filter(
             face_analysis__state__in=(FaceAnalysisState.FAILED, FaceAnalysisState.CONFLICT)
         )
         .select_related("face_analysis")
-        .order_by("id")
-    )
-    publish_status = publication_status(event)
-    portal_capability = PortalCapability.objects.filter(event=event).first()
-    return _private_render(
-        request,
-        "openfotos_events/dashboard_event.html",
-        {
-            "event": event,
-            "page": page,
-            "images": images,
-            "excluded_assets": excluded_assets,
-            "failed_assets": failed_assets,
-            "face_failed_assets": face_failed_assets,
-            "sub_events": event.sub_events.all(),
-            "active_sub_events": event.sub_events.filter(is_archived=False),
-            "selected_sub_event": selected_sub_event,
-            "sub_event_form": SubEventForm(initial={"position": event.sub_events.count() + 1}),
-            "batches": ContributionBatch.objects.filter(installation__event=event).select_related(
-                "sub_event", "installation"
-            ),
-            "publication_status": publish_status,
-            "ready": publish_status["ready"],
-            "portal_capability": portal_capability,
-            "portal_capability_active": (
-                portal_is_available(portal_capability) if portal_capability else False
-            ),
-        },
-    )
+        .order_by("id"),
+    }
 
 
 @require_POST

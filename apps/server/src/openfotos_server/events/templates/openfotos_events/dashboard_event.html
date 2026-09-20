@@ -5,7 +5,7 @@
 
 {% block content %}
 <p><a href="{% url 'events:dashboard' %}">← All events</a></p>
-<div class="gallery-heading">
+<div class="gallery-heading" data-dashboard-fragment="event-heading">
   <div>
     <p class="eyebrow">Photographer gallery review</p>
     <h1>{{ event.name }}</h1>
@@ -14,9 +14,9 @@
   <div class="status-pill {% if ready %}ready{% endif %}">{% if event.state == "published" %}PUBLISHED{% elif ready %}READY{% else %}UPLOADING{% endif %}</div>
 </div>
 
-<section class="card compact-card" data-dashboard-section="sub-event-creation">
+<section class="card compact-card" data-dashboard-section="sub-event-creation" data-dashboard-fragment="sub-event-creation">
   <h2>Sub-event creation</h2>
-  <form method="post" action="{% url 'events:create-sub-event' event_id=event.id %}">
+  <form method="post" action="{% url 'events:create-sub-event' event_id=event.id %}" data-dashboard-fragments="messages,sub-event-creation,sub-events,publication,gallery-filters">
     {% csrf_token %}
     {{ sub_event_form.name.label_tag }} {{ sub_event_form.name }}
     {{ sub_event_form.position.label_tag }} {{ sub_event_form.position }}
@@ -25,17 +25,17 @@
   <p class="muted">Every desktop contribution belongs to one active sub-event.</p>
 </section>
 
-<section class="card compact-card" data-dashboard-section="sub-events">
+<section class="card compact-card" data-dashboard-section="sub-events" data-dashboard-fragment="sub-events">
   <h2>Sub-events</h2>
   {% for sub_event in sub_events %}
     <div class="failure-row">
-      <form method="post" action="{% url 'events:update-sub-event' event_id=event.id sub_event_id=sub_event.id %}">
+      <form method="post" action="{% url 'events:update-sub-event' event_id=event.id sub_event_id=sub_event.id %}" data-dashboard-fragments="messages,sub-events,contribution-assignments,gallery-filters">
         {% csrf_token %}
         <input name="name" value="{{ sub_event.name }}" maxlength="120" required aria-label="Sub-event name">
         <input name="position" type="number" min="1" max="32767" value="{{ sub_event.position }}" required aria-label="Display position">
         <button type="submit">Save</button>
       </form>
-      <form method="post" action="{% url 'events:archive-sub-event' event_id=event.id sub_event_id=sub_event.id %}">
+      <form method="post" action="{% url 'events:archive-sub-event' event_id=event.id sub_event_id=sub_event.id %}" data-dashboard-fragments="messages,event-heading,sub-events,contribution-assignments,publication,gallery-status,gallery-filters,gallery-grid">
         {% csrf_token %}
         <input type="hidden" name="action" value="{% if sub_event.is_archived %}restore{% else %}archive{% endif %}">
         <button type="submit" class="button-secondary">{% if sub_event.is_archived %}Restore{% else %}Archive{% endif %}</button>
@@ -47,10 +47,10 @@
   {% endfor %}
 </section>
 
-<section class="card compact-card" data-dashboard-section="contribution-assignments">
+<section class="card compact-card" data-dashboard-section="contribution-assignments" data-dashboard-fragment="contribution-assignments">
   <h2>Contribution assignments</h2>
   {% for batch in batches %}
-    <form class="failure-row" method="post" action="{% url 'events:reassign-batch' event_id=event.id batch_id=batch.id %}">
+    <form class="failure-row" method="post" action="{% url 'events:reassign-batch' event_id=event.id batch_id=batch.id %}" data-dashboard-fragments="messages,contribution-assignments,publication,gallery-grid">
       {% csrf_token %}
       <span>{{ batch.installation.label }} · {{ batch.label|default:"Contribution" }} · {{ batch.sub_event.name }} · {{ batch.declared_asset_count }} photo{{ batch.declared_asset_count|pluralize }} · {{ batch.get_state_display }}</span>
       <select name="sub_event_id" aria-label="Sub-event for contribution">
@@ -63,7 +63,7 @@
   {% endfor %}
 </section>
 
-<section class="card compact-card publication-card" data-dashboard-section="publication">
+<section class="card compact-card publication-card" data-dashboard-section="publication" data-dashboard-fragment="publication">
   <div>
     <h2>Publication</h2>
     {% if event.state == "published" %}
@@ -110,12 +110,13 @@
 
 <section data-dashboard-section="gallery-preview">
   <h2>Gallery preview</h2>
+  <div data-dashboard-fragment="gallery-status">
   {% if failed_assets %}
     <div class="card compact-card">
       <h3>Preview and thumbnail blockers</h3>
       <p class="muted">Preview or thumbnail processing failed after repeated attempts. These photos block publication until you exclude them from the gallery; the private original stays in storage either way.</p>
       {% for asset in failed_assets %}
-        <form class="failure-row" method="post" action="{% url 'events:exclude-gallery-asset' event_id=event.id asset_id=asset.id %}">
+        <form class="failure-row" method="post" action="{% url 'events:exclude-gallery-asset' event_id=event.id asset_id=asset.id %}" data-dashboard-fragments="messages,event-heading,publication,gallery-status,gallery-grid">
           {% csrf_token %}<span>Asset {{ asset.id }} · {{ asset.derivative_failure_code }}</span>
           <input name="reason" maxlength="240" required aria-label="Exclusion reason" placeholder="Reason for gallery omission">
           <button type="submit">Exclude</button>
@@ -130,7 +131,7 @@
       {% for asset in face_failed_assets %}
         <div class="failure-row">
           <span>Asset {{ asset.id }} · {{ asset.face_analysis.failure_code }}</span>
-          <form method="post" action="{% url 'events:reset-face-analysis' event_id=event.id asset_id=asset.id %}">
+          <form method="post" action="{% url 'events:reset-face-analysis' event_id=event.id asset_id=asset.id %}" data-dashboard-fragments="messages,event-heading,publication,gallery-status">
             {% csrf_token %}<button type="submit" class="button-secondary">Reset face analysis</button>
           </form>
         </div>
@@ -143,18 +144,21 @@
       {% for asset in excluded_assets %}
         <div class="failure-row">
           <span>Asset {{ asset.id }} · {{ asset.gallery_exclusion_reason }}</span>
-          <form method="post" action="{% url 'events:restore-gallery-asset' event_id=event.id asset_id=asset.id %}">
+          <form method="post" action="{% url 'events:restore-gallery-asset' event_id=event.id asset_id=asset.id %}" data-dashboard-fragments="messages,event-heading,publication,gallery-status">
             {% csrf_token %}<button type="submit" class="button-secondary">Restore</button>
           </form>
         </div>
       {% endfor %}
     </div>
   {% endif %}
-  <nav class="sub-event-filters dashboard-gallery-filters" aria-label="Gallery sub-events">
+  </div>
+  <nav class="sub-event-filters dashboard-gallery-filters" data-dashboard-fragment="gallery-filters" aria-label="Gallery sub-events">
     <a {% if not selected_sub_event %}aria-current="page"{% endif %} href="{% url 'events:photographer-event' event_id=event.id %}">All</a>
     {% for sub_event in active_sub_events %}<a {% if selected_sub_event.id == sub_event.id %}aria-current="page"{% endif %} href="{% url 'events:photographer-sub-event' event_id=event.id sub_event_id=sub_event.id %}">{{ sub_event.name }}</a>{% endfor %}
   </nav>
-  {% include "openfotos_events/gallery_grid.html" with dashboard_mode=True %}
+  <div data-dashboard-fragment="gallery-grid">
+    {% include "openfotos_events/gallery_grid.html" with dashboard_mode=True %}
+  </div>
 </section>
 {% endblock %}
 

@@ -257,6 +257,10 @@ button:disabled {
   margin-bottom: 1rem;
 }
 
+.messages:empty {
+  display: none;
+}
+
 .message {
   padding: 0.8rem 1rem;
   border: 1px solid var(--line);

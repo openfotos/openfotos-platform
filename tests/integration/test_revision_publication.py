@@ -24,6 +24,7 @@ from openfotos_server.events.desktop_auth import token_digest
 from openfotos_server.events.ingestion_services import (
     IngestionError,
     issue_upload_leases,
+    publication_status,
 )
 from openfotos_server.events.models import (
     Asset,
@@ -294,6 +295,42 @@ def test_publish_snapshots_only_completed_batches_and_unpublish_reopens_uploads(
     assert reopened.current_ingestion_manifest is None
 
 
+def test_publication_status_query_count_does_not_grow_with_in_flight_batches(
+    django_assert_num_queries,
+) -> None:
+    context = _publication_context(in_flight_count=3)
+    for batch_index in range(5):
+        batch = ContributionBatch.objects.create(
+            id=uuid4(),
+            installation=context.in_flight_batch.installation,
+            sub_event=context.in_flight_batch.sub_event,
+            intake_generation=context.event.intake_generation,
+            state=ContributionState.RESERVED.value,
+            label=f"Uploading batch {batch_index + 2}",
+            processing_profile_id=context.event.processing_profile_id,
+            declared_asset_count=3,
+            declared_original_bytes=30,
+            manifest_sha256=f"{batch_index + 1:064x}",
+        )
+        for asset_index in range(3):
+            asset = Asset.objects.create(
+                id=uuid4(),
+                batch=batch,
+                original_filename=f"unfinished-{batch_index}-{asset_index}.jpg",
+                width=100,
+                height=80,
+                sha256=f"{batch_index * 3 + asset_index + 10:064x}",
+            )
+            _object(asset, "originals", state=UploadObjectState.RESERVED.value)
+
+    with django_assert_num_queries(6):
+        status = publication_status(context.event)
+
+    assert status["included_photo_count"] == 1
+    assert len(status["in_flight"]) == 1
+    assert status["in_flight"][0]["photo_count"] == 18
+
+
 def test_derivative_leases_are_blocked_after_publication() -> None:
     context = _publication_context()
     store = MemoryObjectStore()
@@ -432,6 +469,46 @@ def test_dashboard_explains_processing_blockers(monkeypatch) -> None:
     assert "Preview and thumbnail blockers" in content
     assert "block publication until you exclude them" in content
     assert "Derivative blockers" not in content
+
+
+def test_dashboard_fragment_request_skips_unrequested_gallery_work(monkeypatch) -> None:
+    context = _publication_context()
+
+    def unexpected_gallery_listing(*args, **kwargs):
+        raise AssertionError("publication refresh must not render the gallery")
+
+    monkeypatch.setattr(views, "_gallery_listing", unexpected_gallery_listing)
+    client = Client()
+    client.force_login(context.user)
+
+    response = client.get(
+        reverse("events:photographer-event", args=(context.event.id,)),
+        headers={
+            "host": "alpha.localhost",
+            "x-openfotos-fragments": "messages,event-heading,publication",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-OpenFotos-Fragments"] == ("event-heading,messages,publication")
+    assert b'data-dashboard-fragment="publication"' in response.content
+    assert b"thumbnails" not in response.content
+
+
+def test_dashboard_forms_opt_into_progressive_fragment_updates(monkeypatch) -> None:
+    context = _publication_context()
+    monkeypatch.setattr(views, "configured_object_store", lambda: MemoryObjectStore())
+    client = Client()
+    client.force_login(context.user)
+
+    response = client.get(
+        reverse("events:photographer-event", args=(context.event.id,)),
+        headers={"host": "alpha.localhost"},
+    )
+
+    assert response.status_code == 200
+    assert b'data-dashboard-fragments="messages,sub-event-creation' in response.content
+    assert b'data-dashboard-fragment="gallery-grid"' in response.content
 
 
 def test_republish_after_unpublish_revalidates_every_included_photo() -> None:

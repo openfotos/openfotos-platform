@@ -6,7 +6,7 @@ from uuid import UUID
 from django.conf import settings
 from django.core.paginator import Page, Paginator
 from django.db import transaction
-from django.db.models import Exists, OuterRef, QuerySet
+from django.db.models import Exists, F, OuterRef, Q, QuerySet
 from django.utils import timezone
 
 from openfotos_contracts import (
@@ -78,7 +78,7 @@ def available_gallery_assets(event: Event, *, sub_event: SubEvent | None = None)
             has_thumbnail=Exists(thumbnail),
         )
         .filter(has_original=True, has_preview=True, has_thumbnail=True)
-        .order_by("gallery_position", "id")
+        .order_by(F("gallery_position").asc(nulls_last=True), "id")
     )
     if sub_event is not None:
         return query.filter(batch__sub_event=sub_event)
@@ -95,11 +95,44 @@ def gallery_page(
     page = Paginator(
         available_gallery_assets(event, sub_event=sub_event), GALLERY_PAGE_SIZE
     ).get_page(page_number)
-    images = [
-        _signed_image(asset=asset, variant=AssetVariant.THUMBNAIL, object_store=object_store)
-        for asset in page.object_list
-    ]
+    images = gallery_images(
+        assets=page.object_list,
+        variant=AssetVariant.THUMBNAIL,
+        object_store=object_store,
+    )
     return page, images
+
+
+def gallery_images(
+    *,
+    assets,
+    variant: AssetVariant,
+    object_store: S3ObjectStore,
+) -> list[GalleryImage]:
+    asset_list = list(assets)
+    if not asset_list:
+        return []
+    objects_by_asset_id = {
+        object_record.asset_id: object_record
+        for object_record in AssetObject.objects.filter(
+            asset_id__in=(asset.id for asset in asset_list),
+            variant=variant.value,
+            state=UploadObjectState.VERIFIED.value,
+        )
+    }
+    if len(objects_by_asset_id) != len(asset_list):
+        raise IngestionError(
+            "asset_not_found",
+            "The gallery photo is unavailable.",
+        )
+    return [
+        _signed_image_from_record(
+            asset=asset,
+            object_record=objects_by_asset_id[asset.id],
+            object_store=object_store,
+        )
+        for asset in asset_list
+    ]
 
 
 def gallery_photo(
@@ -114,12 +147,8 @@ def gallery_photo(
         asset = assets.get(pk=asset_id)
     except Asset.DoesNotExist as exc:
         raise IngestionError("asset_not_found", "The gallery photo is unavailable.") from exc
-    ordered_assets = list(assets)
-    position = next(
-        index for index, candidate in enumerate(ordered_assets) if candidate.id == asset.id
-    )
-    previous_asset = ordered_assets[position - 1] if position else None
-    next_asset = ordered_assets[position + 1] if position + 1 < len(ordered_assets) else None
+    previous_asset = _previous_asset(assets, asset)
+    next_asset = _next_asset(assets, asset)
     return (
         _signed_image(asset=asset, variant=AssetVariant.PREVIEW, object_store=object_store),
         previous_asset,
@@ -140,10 +169,11 @@ def search_gallery_page(
     by_id = {str(asset.id): asset for asset in available}
     ordered = [by_id[asset_id] for asset_id in result_set.ordered_asset_ids if asset_id in by_id]
     page = Paginator(ordered, GALLERY_PAGE_SIZE).get_page(page_number)
-    images = [
-        _signed_image(asset=asset, variant=AssetVariant.THUMBNAIL, object_store=object_store)
-        for asset in page.object_list
-    ]
+    images = gallery_images(
+        assets=page.object_list,
+        variant=AssetVariant.THUMBNAIL,
+        object_store=object_store,
+    )
     return page, images
 
 
@@ -333,6 +363,16 @@ def _signed_image(
         variant=variant.value,
         state=UploadObjectState.VERIFIED.value,
     )
+    return _signed_image_from_record(
+        asset=asset,
+        object_record=object_record,
+        object_store=object_store,
+    )
+
+
+def _signed_image_from_record(
+    *, asset: Asset, object_record: AssetObject, object_store: S3ObjectStore
+) -> GalleryImage:
     try:
         signed = object_store.presign_get(
             key=object_record.object_key,
@@ -348,3 +388,42 @@ def _signed_image(
         width=object_record.width,
         height=object_record.height,
     )
+
+
+def _previous_asset(assets: QuerySet[Asset], asset: Asset) -> Asset | None:
+    if asset.gallery_position is None:
+        previous_without_position = (
+            assets.filter(gallery_position__isnull=True, id__lt=asset.id).order_by("-id").first()
+        )
+        if previous_without_position is not None:
+            return previous_without_position
+        return (
+            assets.filter(gallery_position__isnull=False)
+            .order_by("-gallery_position", "-id")
+            .first()
+        )
+    return (
+        assets.filter(
+            Q(gallery_position__lt=asset.gallery_position)
+            | Q(gallery_position=asset.gallery_position, id__lt=asset.id)
+        )
+        .order_by("-gallery_position", "-id")
+        .first()
+    )
+
+
+def _next_asset(assets: QuerySet[Asset], asset: Asset) -> Asset | None:
+    if asset.gallery_position is None:
+        return assets.filter(gallery_position__isnull=True, id__gt=asset.id).order_by("id").first()
+    next_with_position = (
+        assets.filter(
+            Q(gallery_position__gt=asset.gallery_position)
+            | Q(gallery_position=asset.gallery_position, id__gt=asset.id)
+        )
+        .filter(gallery_position__isnull=False)
+        .order_by("gallery_position", "id")
+        .first()
+    )
+    if next_with_position is not None:
+        return next_with_position
+    return assets.filter(gallery_position__isnull=True).order_by("id").first()

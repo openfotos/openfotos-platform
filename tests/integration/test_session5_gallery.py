@@ -15,6 +15,7 @@ from openfotos_server.events.cookies import access_cookie_name
 from openfotos_server.events.gallery_services import (
     exclude_from_gallery,
     gallery_page,
+    gallery_photo,
     restore_to_gallery,
 )
 from openfotos_server.events.ingestion_services import IngestionError
@@ -371,3 +372,39 @@ def test_gallery_pages_are_capped_at_48_thumbnails() -> None:
     assert len(first_images) == 48
     assert len(second_images) == 1
     assert first_images[0].asset.original_filename == "private-1.jpg"
+
+
+@pytest.mark.parametrize("asset_count", (1, 48))
+def test_gallery_page_query_count_is_constant(asset_count, django_assert_num_queries) -> None:
+    _, _, event, batch = _tenant()
+    for position in range(1, asset_count + 1):
+        _gallery_asset(event, batch, position=position, filename=f"private-{position}.jpg")
+
+    with django_assert_num_queries(3):
+        page, images = gallery_page(
+            event=event,
+            page_number=1,
+            object_store=SigningStore(),
+        )
+
+    assert page.paginator.count == asset_count
+    assert len(images) == asset_count
+
+
+def test_photo_navigation_does_not_load_the_whole_gallery(django_assert_num_queries) -> None:
+    _, _, event, batch = _tenant()
+    assets = [
+        _gallery_asset(event, batch, position=position, filename=f"private-{position}.jpg")
+        for position in range(1, 49)
+    ]
+
+    with django_assert_num_queries(4):
+        image, previous_asset, next_asset = gallery_photo(
+            event=event,
+            asset_id=assets[24].id,
+            object_store=SigningStore(),
+        )
+
+    assert image.asset == assets[24]
+    assert previous_asset == assets[23]
+    assert next_asset == assets[25]

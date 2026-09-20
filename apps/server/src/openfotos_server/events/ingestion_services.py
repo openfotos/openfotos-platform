@@ -456,22 +456,17 @@ def verify_uploaded_object(
 
 
 def publication_status(event: Event) -> dict:
-    completed_batch_ids = list(
-        ContributionBatch.objects.filter(
-            installation__event=event,
-            state=ContributionState.COMPLETE.value,
-            sub_event__is_archived=False,
-        ).values_list("id", flat=True)
+    included_assets = Asset.objects.filter(
+        batch__installation__event=event,
+        batch__state=ContributionState.COMPLETE.value,
+        batch__sub_event__is_archived=False,
+        gallery_excluded_at__isnull=True,
+        variant_objects__variant=AssetVariant.ORIGINAL.value,
+        variant_objects__state=UploadObjectState.VERIFIED.value,
     )
-    included_asset_ids = list(
-        AssetObject.objects.filter(
-            asset__batch_id__in=completed_batch_ids,
-            asset__gallery_excluded_at__isnull=True,
-            variant=AssetVariant.ORIGINAL.value,
-            state=UploadObjectState.VERIFIED.value,
-        ).values_list("asset_id", flat=True)
-    )
-    expected_derivatives = len(included_asset_ids) * len(DERIVATIVE_VARIANTS)
+    included_asset_count = included_assets.count()
+    included_asset_ids = included_assets.values("id")
+    expected_derivatives = included_asset_count * len(DERIVATIVE_VARIANTS)
     verified_derivatives = AssetObject.objects.filter(
         asset_id__in=included_asset_ids,
         variant__in=tuple(variant.value for variant in DERIVATIVE_VARIANTS),
@@ -488,36 +483,37 @@ def publication_status(event: Event) -> dict:
         installation__event=event,
         state=ContributionState.RESERVED.value,
     ).select_related("installation")
-    for batch in in_flight_batches:
-        remaining = (
-            AssetObject.objects.filter(
-                asset__batch=batch,
-                variant=AssetVariant.ORIGINAL.value,
-            )
-            .exclude(
-                state__in=(
-                    UploadObjectState.VERIFIED.value,
-                    UploadObjectState.EXCLUDED.value,
+    in_flight_batches = in_flight_batches.annotate(
+        remaining_photo_count=Count(
+            "assets__variant_objects",
+            filter=(
+                Q(assets__variant_objects__variant=AssetVariant.ORIGINAL.value)
+                & ~Q(
+                    assets__variant_objects__state__in=(
+                        UploadObjectState.VERIFIED.value,
+                        UploadObjectState.EXCLUDED.value,
+                    )
                 )
-            )
-            .count()
+            ),
         )
+    )
+    for batch in in_flight_batches:
         entry = in_flight_by_installation.setdefault(
             batch.installation_id,
             {"installation": batch.installation, "photo_count": 0},
         )
-        entry["photo_count"] += max(remaining, 1)
+        entry["photo_count"] += max(batch.remaining_photo_count, 1)
     has_policy = PreviewPolicy.objects.filter(event=event).exists()
     has_active_sub_event = event.sub_events.filter(is_archived=False).exists()
     return {
-        "included_photo_count": len(included_asset_ids),
+        "included_photo_count": included_asset_count,
         "missing_derivative_count": expected_derivatives - verified_derivatives,
-        "missing_face_count": len(included_asset_ids) - terminal_faces,
+        "missing_face_count": included_asset_count - terminal_faces,
         "in_flight": tuple(in_flight_by_installation.values()),
         "ready": (
-            bool(included_asset_ids)
+            bool(included_asset_count)
             and expected_derivatives == verified_derivatives
-            and len(included_asset_ids) == terminal_faces
+            and included_asset_count == terminal_faces
             and has_policy
             and has_active_sub_event
         ),

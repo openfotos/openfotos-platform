@@ -16,11 +16,9 @@
   {% endblock %}
   {% block hero %}{% endblock %}
   <main class="page-shell">
-    {% if messages %}
-      <div class="messages" aria-live="polite">
-        {% for message in messages %}<p class="message {{ message.tags }}">{{ message }}</p>{% endfor %}
-      </div>
-    {% endif %}
+    <div class="messages" data-dashboard-fragment="messages" aria-live="polite">
+      {% for message in messages %}<p class="message {{ message.tags }}">{{ message }}</p>{% endfor %}
+    </div>
     {% block content %}{% endblock %}
   </main>
   {% block footer %}

@@ -439,6 +439,12 @@ search control uses a face/selfie icon; the photographer dashboard separates its
 from the grid and explains its processing blockers; and the public footer no longer links the
 source repository (the Terms page retains the AGPL source offer).
 
+Web performance follow-up (2026-09-20): gallery pages bulk-load thumbnail object records, keeping
+database query count constant from one through 48 photos; single-photo navigation queries only its
+adjacent rows; dashboard publication status aggregates in-flight batches without per-batch queries;
+and routine dashboard forms progressively replace only affected sections while retaining ordinary
+POST/redirect behavior without JavaScript. The private-media `no-store` policy is unchanged.
+
 **Next action:** The user destroys the old rehearsal resources and deploys this build per runbook
 Phases 3 and 1, then re-runs the Phase 2 exercises (multi-batch upload, publish with an unfinished
 batch, PIN unlock, hidden-then-opened face search, exact-original download, PIN rotation as the leak
