@@ -44,6 +44,7 @@ from openfotos_server.events.models import (
 from openfotos_server.events.portfolio_services import (
     CONSENT_NOTICE_VERSION,
     publish_event_with_portal,
+    set_portal_pin,
     unpublish_event_for_upload,
 )
 from openfotos_storage import PresignedGet
@@ -449,7 +450,7 @@ def test_event_dashboard_has_five_sections_and_requires_in_flight_confirmation(
     ]
     assert "Studio workstation 2 has 3 photos mid-upload" in content
     assert "Do you really want to publish?" in content
-    assert "Generate a new event PIN" not in content
+    assert "Generate a new PIN" not in content
     assert 'class="sub-event-filters dashboard-gallery-filters"' in content
 
     publish_url = reverse("events:publish-event", args=(context.event.id,))
@@ -463,13 +464,16 @@ def test_event_dashboard_has_five_sections_and_requires_in_flight_confirmation(
         {"confirm_in_flight": "yes"},
         headers={"host": "alpha.localhost"},
     )
-    assert confirmed.status_code == 200
-    assert b"Portfolio gallery" in confirmed.content
+    assert confirmed.status_code == 302
     context.event.refresh_from_db()
     assert context.event.state == EventState.PUBLISHED.value
 
     published_dashboard = client.get(dashboard_url, headers={"host": "alpha.localhost"})
-    assert b"Generate a new event PIN" in published_dashboard.content
+    content = published_dashboard.content.decode()
+    # Publishing leaves PIN protection off; the PIN is generated only when switched on.
+    assert "Turn on PIN" in content
+    assert "Turn off PIN" not in content
+    assert "data-portal-pin" not in content
 
 
 def test_dashboard_explains_processing_blockers(monkeypatch) -> None:
@@ -548,6 +552,7 @@ def test_republish_after_unpublish_revalidates_every_included_photo() -> None:
     context = _publication_context()
     store = MemoryObjectStore()
     publish_event_with_portal(event=context.event, actor=context.user, object_store=store)
+    issued_pin = set_portal_pin(event=context.event, enabled=True, actor=context.user).pin_value
 
     reopened = unpublish_event_for_upload(event=context.event, actor=context.user)
     AssetObject.objects.filter(
@@ -581,5 +586,9 @@ def test_republish_after_unpublish_revalidates_every_included_photo() -> None:
     assert republished.event.state == EventState.PUBLISHED.value
     assert republished.event.intake_state == IntakeState.CLOSED.value
     assert republished.event.current_ingestion_manifest.generation == 2
-    # The event PIN survives an unpublish/re-publish cycle; only leaked sessions are invalidated.
+    # Re-publishing never issues a PIN; the event's single PIN survives the cycle.
     assert republished.pin is None
+    republished.capability.refresh_from_db()
+    assert republished.capability.pin_enabled is True
+    assert republished.capability.pin_value == issued_pin
+    assert republished.capability.check_pin(issued_pin)

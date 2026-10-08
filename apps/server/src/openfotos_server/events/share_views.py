@@ -191,7 +191,7 @@ def _render_cover(
 @require_GET
 def portal_gallery(request: HttpRequest, event_slug, sub_event_id=None) -> HttpResponse:
     capability = _portal(request, event_slug)
-    if has_valid_access_cookie(request, capability):
+    if not capability.pin_enabled or has_valid_access_cookie(request, capability):
         return _render_gallery(
             request,
             capability,
@@ -206,6 +206,8 @@ def portal_gallery(request: HttpRequest, event_slug, sub_event_id=None) -> HttpR
 @require_http_methods(["GET", "POST"])
 def portal_unlock(request: HttpRequest, event_slug) -> HttpResponse:
     capability = _portal(request, event_slug)
+    if not capability.pin_enabled:
+        return _private_response(redirect("events:portal-gallery", event_slug))
     if request.method == "GET":
         if has_valid_access_cookie(request, capability):
             return _private_response(redirect("events:portal-gallery", event_slug))
@@ -290,7 +292,7 @@ def _pin_response(request, capability, form, retry_after_seconds):
 @require_GET
 def portal_photo(request: HttpRequest, event_slug, asset_id, sub_event_id=None) -> HttpResponse:
     capability = _portal(request, event_slug)
-    if not has_valid_access_cookie(request, capability):
+    if capability.pin_enabled and not has_valid_access_cookie(request, capability):
         raise Http404
     selected_sub_event = _scope(capability, sub_event_id)
     try:
@@ -329,7 +331,7 @@ def portal_photo(request: HttpRequest, event_slug, asset_id, sub_event_id=None) 
 @require_GET
 def portal_download(request: HttpRequest, event_slug, asset_id, sub_event_id=None) -> HttpResponse:
     capability = _portal(request, event_slug)
-    if not has_valid_access_cookie(request, capability):
+    if capability.pin_enabled and not has_valid_access_cookie(request, capability):
         raise Http404
     try:
         download = original_download(
@@ -367,7 +369,7 @@ def portal_download(request: HttpRequest, event_slug, asset_id, sub_event_id=Non
 @require_POST
 def portal_search(request: HttpRequest, event_slug, sub_event_id=None) -> HttpResponse:
     capability = _portal(request, event_slug)
-    if not has_valid_access_cookie(request, capability):
+    if capability.pin_enabled and not has_valid_access_cookie(request, capability):
         raise Http404
     selected_sub_event = _scope(capability, sub_event_id)
     form = FaceSearchForm(request.POST, request.FILES)
@@ -455,7 +457,7 @@ def portal_search(request: HttpRequest, event_slug, sub_event_id=None) -> HttpRe
 @require_GET
 def portal_search_results(request: HttpRequest, event_slug, result_id) -> HttpResponse:
     capability = _portal(request, event_slug)
-    if not has_valid_access_cookie(request, capability):
+    if capability.pin_enabled and not has_valid_access_cookie(request, capability):
         raise Http404
     result_set = (
         FaceSearchResultSet.objects.select_related("event", "sub_event")
@@ -502,7 +504,7 @@ def portal_search_results(request: HttpRequest, event_slug, result_id) -> HttpRe
 @require_POST
 def portal_clear_search(request: HttpRequest, event_slug, result_id) -> HttpResponse:
     capability = _portal(request, event_slug)
-    if not has_valid_access_cookie(request, capability):
+    if capability.pin_enabled and not has_valid_access_cookie(request, capability):
         raise Http404
     delete_face_search(result_id=result_id, capability=capability)
     return _root_redirect(capability)

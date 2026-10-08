@@ -67,12 +67,31 @@
   <div>
     <h2>Publication</h2>
     {% if event.state == "published" %}
-      <p>The event link is live and the four-digit PIN unlocks all active sub-events, face search, and original downloads.</p>
+      <p>The event link is live. PIN protection is optional; when it is on, the PIN unlocks all active sub-events, face search, and original downloads.</p>
       {% if portal_capability_active %}
         <p><a href="{% url 'events:portal-gallery' event.slug %}">Open event gallery</a> · expires {{ portal_capability.expires_at }}</p>
-        <form method="post" action="{% url 'events:rotate-portal-pin' event_id=event.id %}">
-          {% csrf_token %}<button type="submit" class="button-secondary">Generate a new event PIN</button>
-        </form>
+        {% if portal_capability.pin_enabled %}
+          <div class="pin-box" data-portal-pin-box>
+            <span class="pin-box-label">Event PIN</span>
+            <strong class="pin-box-value" data-portal-pin>{{ portal_capability.pin_value }}</strong>
+          </div>
+          <p class="muted">Share this PIN with guests; they enter it once to open the gallery.</p>
+          <div class="button-row">
+            <form method="post" action="{% url 'events:set-portal-pin' event_id=event.id %}">
+              {% csrf_token %}<input type="hidden" name="enabled" value="no">
+              <button type="submit" class="button-secondary">Turn off PIN</button>
+            </form>
+            <form method="post" action="{% url 'events:rotate-portal-pin' event_id=event.id %}">
+              {% csrf_token %}<button type="submit" class="button-secondary">Generate a new PIN</button>
+            </form>
+          </div>
+        {% else %}
+          <p class="muted">PIN protection is off. Anyone with the event link can open the gallery.</p>
+          <form method="post" action="{% url 'events:set-portal-pin' event_id=event.id %}">
+            {% csrf_token %}<input type="hidden" name="enabled" value="yes">
+            <button type="submit">Turn on PIN</button>
+          </form>
+        {% endif %}
       {% endif %}
     {% elif ready %}
       <p>{{ publication_status.included_photo_count }} completed photo{{ publication_status.included_photo_count|pluralize }} will be included.</p>
@@ -86,8 +105,8 @@
       {% csrf_token %}<button type="submit" class="button-secondary">Unpublish and resume uploads</button>
     </form>
   {% elif publication_status.in_flight %}
-    <button type="button" data-open-publish-dialog {% if not ready %}disabled{% endif %}>Publish gallery</button>
-    <dialog data-publish-dialog aria-labelledby="publish-warning-title">
+    <button type="button" data-open-dialog="publish" {% if not ready %}disabled{% endif %}>Publish gallery</button>
+    <dialog class="dashboard-dialog" data-dialog="publish" aria-labelledby="publish-warning-title">
       <h3 id="publish-warning-title">Do you really want to publish?</h3>
       <p>Someone is uploading. Publishing will exclude unfinished photos and discard their partial data.</p>
       <ul>
@@ -98,7 +117,7 @@
       <form method="post" action="{% url 'events:publish-event' event_id=event.id %}">
         {% csrf_token %}<input type="hidden" name="confirm_in_flight" value="yes">
         <button type="submit">Publish and exclude unfinished photos</button>
-        <button type="button" class="button-secondary" data-close-publish-dialog>Keep uploading</button>
+        <button type="button" class="button-secondary" data-close-dialog>Keep uploading</button>
       </form>
     </dialog>
   {% else %}

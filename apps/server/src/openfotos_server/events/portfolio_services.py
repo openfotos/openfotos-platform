@@ -333,25 +333,50 @@ def publish_event_with_portal(
             request=request,
         )
     capability = PortalCapability.objects.select_for_update().filter(event=published).first()
-    pin = None
     if capability is None or capability.revoked_at is not None:
-        pin = generate_share_pin()
         capability = capability or PortalCapability(event=published)
         capability.expires_at = published.expires_at
         capability.revoked_at = None
         capability.access_version = uuid4()
-        capability.set_pin(pin)
         capability.save()
-        record_audit(
-            photographer=published.photographer,
-            event=published,
-            actor=actor,
-            action=AuditAction.PORTAL_PIN_ISSUED,
-            result=AuditResult.SUCCEEDED,
-            request=request,
-            metadata={"portal_capability_id": str(capability.id)},
+    return PublishedPortal(event=published, capability=capability, pin=None)
+
+
+@transaction.atomic
+def set_portal_pin(*, event: Event, enabled: bool, actor, request=None) -> PortalCapability:
+    """Turn event PIN protection on or off, reusing the event's one existing PIN."""
+    try:
+        capability = (
+            PortalCapability.objects.select_for_update()
+            .select_related("event__photographer")
+            .get(event=event)
         )
-    return PublishedPortal(event=published, capability=capability, pin=pin)
+    except PortalCapability.DoesNotExist as exc:
+        raise PortfolioError(
+            "portal_not_found", "Publish the event before changing its PIN."
+        ) from exc
+    if capability.revoked_at is not None or not capability.event.is_publicly_available():
+        raise PortfolioError("portal_unavailable", "The public event portal is unavailable.")
+    if not enabled:
+        capability.pin_enabled = False
+        action = AuditAction.PORTAL_PIN_DISABLED
+    elif capability.pin_value:
+        capability.pin_enabled = True
+        action = AuditAction.PORTAL_PIN_ENABLED
+    else:
+        capability.set_pin(generate_share_pin())
+        action = AuditAction.PORTAL_PIN_ISSUED
+    capability.save(update_fields=("pin_value", "pin_hash", "pin_enabled", "updated_at"))
+    record_audit(
+        photographer=capability.event.photographer,
+        event=capability.event,
+        actor=actor,
+        action=action,
+        result=AuditResult.SUCCEEDED,
+        request=request,
+        metadata={"portal_capability_id": str(capability.id)},
+    )
+    return capability
 
 
 @transaction.atomic
@@ -415,7 +440,16 @@ def rotate_portal_pin(*, event: Event, actor, request=None) -> PublishedPortal:
     capability.set_pin(pin)
     capability.access_version = uuid4()
     capability.revoked_at = None
-    capability.save(update_fields=("pin_hash", "access_version", "revoked_at", "updated_at"))
+    capability.save(
+        update_fields=(
+            "pin_value",
+            "pin_hash",
+            "pin_enabled",
+            "access_version",
+            "revoked_at",
+            "updated_at",
+        )
+    )
     FaceSearchResultSet.objects.filter(portal_capability=capability).delete()
     record_audit(
         photographer=capability.event.photographer,

@@ -53,10 +53,14 @@ document.addEventListener("submit", (event) => {
 });
 
 document.addEventListener("click", (event) => {
-  if (event.target.closest("[data-open-publish-dialog]")) {
-    document.querySelector("[data-publish-dialog]")?.showModal();
+  const opener = event.target.closest("[data-open-dialog]");
+  if (opener) {
+    const dialog = Array.from(document.querySelectorAll("dialog[data-dialog]")).find(
+      (candidate) => candidate.dataset.dialog === opener.dataset.openDialog
+    );
+    dialog?.showModal();
+    return;
   }
-  if (event.target.closest("[data-close-publish-dialog]")) {
-    document.querySelector("[data-publish-dialog]")?.close();
-  }
+  const closer = event.target.closest("[data-close-dialog]");
+  if (closer) closer.closest("dialog")?.close();
 });

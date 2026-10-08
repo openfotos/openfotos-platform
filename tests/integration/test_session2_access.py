@@ -93,6 +93,28 @@ def test_photographer_login_and_dashboard_are_tenant_scoped(tenants) -> None:
     )
 
 
+def test_dashboard_top_actions_open_the_create_and_profile_dialogs(tenants) -> None:
+    alpha, _beta = tenants
+    user = get_user_model().objects.create_user(username="owner", password="correct-password")
+    PhotographerMembership.objects.create(photographer=alpha, user=user)
+    client = Client()
+    client.force_login(user)
+
+    response = client.get(reverse("events:dashboard"), headers={"host": "alpha.localhost"})
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert 'data-open-dialog="create-event"' in content
+    assert 'data-open-dialog="portfolio-profile"' in content
+    assert 'data-dialog="create-event"' in content
+    assert 'data-dialog="portfolio-profile"' in content
+    assert content.count("data-close-dialog") == 2
+    assert f'action="{reverse("events:create-event")}"' in content
+    assert f'action="{reverse("events:update-portfolio")}"' in content
+    assert 'class="settings-grid"' not in content
+    assert "openfotos_events/dashboard.js" in content
+
+
 def test_valid_credentials_do_not_authorize_the_wrong_tenant(tenants) -> None:
     alpha, beta = tenants
     user = get_user_model().objects.create_user(username="owner", password="correct-password")

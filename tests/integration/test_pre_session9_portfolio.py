@@ -32,6 +32,7 @@ from openfotos_server.events.models import (
 from openfotos_server.events.portfolio_services import (
     CONSENT_NOTICE_VERSION,
     publish_event_with_portal,
+    set_portal_pin,
 )
 from openfotos_server.events.retention_services import (
     RetentionError,
@@ -212,6 +213,54 @@ def test_portfolio_lists_only_published_events_and_portal_pin_unlocks_without_ow
     assert b"Search with your face" in gallery.content
 
 
+def test_pin_toggle_shows_the_pin_and_controls_whether_the_gallery_unlocks(
+    tenant, monkeypatch
+) -> None:
+    photographer, user = tenant
+    event = Event.objects.create(
+        photographer=photographer,
+        name="Toggle Wedding",
+        slug="toggle-wedding",
+        state=EventState.PUBLISHED.value,
+        expires_at=timezone.now() + timedelta(days=5),
+    )
+    PortalCapability.objects.create(event=event, expires_at=event.expires_at)
+    monkeypatch.setattr(
+        "openfotos_server.events.views.configured_object_store", lambda: MemoryObjectStore()
+    )
+    monkeypatch.setattr(
+        "openfotos_server.events.share_views.configured_object_store", lambda: MemoryObjectStore()
+    )
+    member = Client()
+    member.force_login(user)
+    visitor = Client()
+    headers = {"host": "alpha.localhost"}
+    dashboard_url = reverse("events:photographer-event", args=(event.id,))
+    gallery_url = reverse("events:portal-gallery", args=(event.slug,))
+    toggle_url = reverse("events:set-portal-pin", args=(event.id,))
+
+    # PIN protection starts off, so the gallery opens without an unlock step.
+    dashboard = member.get(dashboard_url, headers=headers).content.decode()
+    assert "Turn on PIN" in dashboard
+    assert b"Search with your face" in visitor.get(gallery_url, headers=headers).content
+
+    turned_on = member.post(toggle_url, {"enabled": "yes"}, headers=headers)
+    assert turned_on.status_code == 302
+    portal = PortalCapability.objects.get(event=event)
+    assert portal.pin_enabled is True
+    dashboard = member.get(dashboard_url, headers=headers).content.decode()
+    assert "Turn off PIN" in dashboard
+    assert f"data-portal-pin>{portal.pin_value}<" in dashboard
+    assert b"Search with your face" not in visitor.get(gallery_url, headers=headers).content
+
+    turned_off = member.post(toggle_url, {"enabled": "no"}, headers=headers)
+    assert turned_off.status_code == 302
+    portal.refresh_from_db()
+    assert portal.pin_enabled is False
+    assert portal.pin_value  # the event's single PIN is retained for later reuse
+    assert b"Search with your face" in visitor.get(gallery_url, headers=headers).content
+
+
 def test_first_publication_assigns_frozen_collision_safe_event_slug(tenant) -> None:
     photographer, user = tenant
     expires_at = timezone.now() + timedelta(days=1)
@@ -276,7 +325,7 @@ def test_slug_portal_lookup_keeps_the_photographer_tenant_boundary(tenant) -> No
     assert response.status_code == 404
 
 
-def test_first_publication_creates_one_time_four_digit_portal_pin(tenant) -> None:
+def test_pin_is_optional_and_stays_the_same_when_reenabled(tenant) -> None:
     photographer, user = tenant
     event = Event.objects.create(
         photographer=photographer,
@@ -294,13 +343,32 @@ def test_first_publication_creates_one_time_four_digit_portal_pin(tenant) -> Non
         notice_version=CONSENT_NOTICE_VERSION,
     )
 
-    issued = publish_event_with_portal(event=event, actor=user)
+    published = publish_event_with_portal(event=event, actor=user)
 
-    assert issued.pin is not None and len(issued.pin) == 4 and issued.pin.isascii()
-    assert issued.capability.check_pin(issued.pin)
-    assert issued.event.first_published_at is not None
-    assert issued.event.expires_at - issued.event.first_published_at == timedelta(days=365)
-    assert issued.event.purge_after - issued.event.expires_at == timedelta(days=30)
+    # Publishing creates the internal portal record but leaves PIN protection off by default.
+    assert published.pin is None
+    assert published.capability.pin_enabled is False
+    assert published.capability.pin_value == ""
+    assert published.event.first_published_at is not None
+    assert published.event.expires_at - published.event.first_published_at == timedelta(days=365)
+    assert published.event.purge_after - published.event.expires_at == timedelta(days=30)
+
+    capability = set_portal_pin(event=published.event, enabled=True, actor=user)
+    first_pin = capability.pin_value
+    assert capability.pin_enabled is True
+    assert len(first_pin) == 4 and first_pin.isascii() and first_pin.isdigit()
+    assert capability.check_pin(first_pin)
+
+    # Turning protection off keeps the event's one PIN so it can be shown and reused later.
+    set_portal_pin(event=published.event, enabled=False, actor=user)
+    capability.refresh_from_db()
+    assert capability.pin_enabled is False
+    assert capability.pin_value == first_pin
+
+    reenabled = set_portal_pin(event=published.event, enabled=True, actor=user)
+    assert reenabled.pin_enabled is True
+    assert reenabled.pin_value == first_pin
+    assert reenabled.check_pin(first_pin)
 
 
 def test_due_retention_purge_removes_private_media_and_keeps_cover_card(tenant) -> None:

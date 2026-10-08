@@ -219,15 +219,14 @@ def test_dashboard_publishes_and_visitor_gets_only_authorized_signed_variants(mo
         reverse("events:publish-event", args=(event.id,)),
         headers={"host": "alpha.localhost"},
     )
-    assert published.status_code == 200
-    assert b"Portfolio gallery" in published.content
-    assert b"Four-digit" in published.content
+    assert published.status_code == 302
     event.refresh_from_db()
     assert event.state == EventState.PUBLISHED.value
 
     portal = PortalCapability.objects.get(event=event)
+    assert portal.pin_enabled is False
     portal.set_pin("0427")
-    portal.save(update_fields=("pin_hash", "updated_at"))
+    portal.save(update_fields=("pin_value", "pin_hash", "pin_enabled", "updated_at"))
     visitor = Client()
     photo_url = reverse("events:portal-photo", args=(event.slug, asset.id))
     assert visitor.get(photo_url, headers={"host": "alpha.localhost"}).status_code == 404

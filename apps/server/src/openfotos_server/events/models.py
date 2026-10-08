@@ -76,6 +76,8 @@ class AuditAction(models.TextChoices):
     PORTFOLIO_PROFILE_CHANGED = "portfolio.profile_changed", "Portfolio profile changed"
     PORTAL_PIN_ISSUED = "portal_capability.issued", "Portfolio PIN issued"
     PORTAL_PIN_ROTATED = "portal_capability.rotated", "Portfolio PIN rotated"
+    PORTAL_PIN_ENABLED = "portal_capability.enabled", "Portfolio PIN enabled"
+    PORTAL_PIN_DISABLED = "portal_capability.disabled", "Portfolio PIN disabled"
     PORTAL_PIN_UNLOCK = "portal_capability.pin_unlock", "Portfolio PIN unlock"
     EVENT_MEDIA_PURGED = "event.media_purged", "Event media purged"
     PHOTOGRAPHER_LOGIN = "photographer.login", "Photographer login"
@@ -384,6 +386,8 @@ class PinCapability(models.Model):
 
     id = models.UUIDField(primary_key=True, default=uuid4, editable=False)
     pin_hash = models.CharField(max_length=256, editable=False)
+    pin_value = models.CharField(max_length=4, blank=True, default="", editable=False)
+    pin_enabled = models.BooleanField(default=False)
     access_version = models.UUIDField(default=uuid4, editable=False)
     expires_at = models.DateTimeField()
     revoked_at = models.DateTimeField(blank=True, null=True, editable=False)
@@ -394,9 +398,12 @@ class PinCapability(models.Model):
         abstract = True
 
     def set_pin(self, raw_pin: str) -> None:
+        """Issue a PIN; receiving a PIN also turns event PIN protection on."""
         if not PIN_PATTERN.fullmatch(raw_pin):
             raise ValidationError({"pin": "Enter exactly four ASCII digits."})
+        self.pin_value = raw_pin
         self.pin_hash = make_password(self._peppered_pin(raw_pin), hasher="argon2")
+        self.pin_enabled = True
 
     def check_pin(self, raw_pin: str) -> bool:
         return bool(self.pin_hash) and check_password(self._peppered_pin(raw_pin), self.pin_hash)

@@ -253,12 +253,14 @@ class ConsentAttestationAdmin(admin.ModelAdmin):
 
 @admin.register(PortalCapability)
 class PortalCapabilityAdmin(admin.ModelAdmin):
-    list_display = ("event", "expires_at", "revoked_at", "created_at")
+    list_display = ("event", "pin_enabled", "expires_at", "revoked_at", "created_at")
     search_fields = ("event__name", "event__photographer__display_name")
     readonly_fields = (
         "id",
         "event",
+        "pin_value",
         "pin_hash",
+        "pin_enabled",
         "access_version",
         "expires_at",
         "revoked_at",

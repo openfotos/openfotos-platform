@@ -71,6 +71,8 @@ def test_portal_pin_is_four_ascii_digits_peppered_and_uses_argon2() -> None:
     assert portal.pin_hash != "0427"
     assert "0427" not in portal.pin_hash
     assert identify_hasher(portal.pin_hash).algorithm == "argon2"
+    assert portal.pin_value == "0427"
+    assert portal.pin_enabled is True
     assert portal.check_pin("0427")
 
     with override_settings(SHARE_PIN_PEPPER="another-independent-pepper-value-1234"):

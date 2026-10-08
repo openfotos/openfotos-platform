@@ -42,7 +42,8 @@ records photographer-created events, portfolio/portal authority, accepted image 
 storage, and 365+30-day retention. The
 [parallel ingestion decision](docs/adr/0015-parallel-and-overlapped-desktop-ingestion.md)
 records pooled derivative/face workers and overlapped upload, render, and indexing stages on the
-desktop.
+desktop. The [optional event PIN decision](docs/adr/0016-optional-event-pin.md) turns the four-digit
+PIN into a dashboard switch with one stable, dashboard-visible PIN per event.
 
 ## Repository map
 
@@ -112,11 +113,13 @@ Django user, Photographer tenant with permanent DNS slug, then an active Photogr
 joining them. A photographer with slug `demo` signs in at `http://demo.localhost:8000/login/` and
 creates the main event—with mandatory name, cover, and consent attestation—from the dashboard.
 Create at least one sub-event before upload/publication. The portfolio is the tenant root at
-`http://demo.localhost:8000/`. First publication assigns the frozen event slug, lists the event
-card, and reveals the dedicated event PIN once. The public gallery lives at
-`/portfolio/events/<event-slug>/`: the cover page is public, and the single four-digit PIN unlocks
+`http://demo.localhost:8000/`. First publication assigns the frozen event slug and lists the event
+card; PIN protection starts off, so the gallery opens directly at `/portfolio/events/<event-slug>/`.
+The Publication section of the event dashboard owns a PIN switch: turning protection on generates
+the event's single four-digit PIN and shows it in a plain box to every dashboard member, turning it
+off opens the gallery again, and **Generate a new PIN** resets a leaked PIN. An enabled PIN unlocks
 all active sub-events, face search, and exact-original downloads. A suspected leak is handled by
-rotating the event PIN or unpublishing the event.
+resetting the event PIN or unpublishing the event.
 
 For development checks:
 

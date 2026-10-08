@@ -135,8 +135,9 @@ access.
 4. Upload only the consented rehearsal set. The three reference files in
    `private_benchmark_media/myphotos` remain local and ignored by Git.
 5. Exercise: event create, multi-batch upload, pause/resume, retry, publish with an unfinished batch,
-   PIN unlock, whole-event gallery, reference search, exact-original download, PIN rotation,
-   unpublish/re-publish, password reset, and workstation revocation. Confirm public gallery URLs use
+   PIN protection toggle (on, shown in the dashboard Publication box, off), PIN unlock, whole-event
+   gallery, reference search, exact-original download, PIN rotation, unpublish/re-publish, password
+   reset, and workstation revocation. Confirm public gallery URLs use
    `/portfolio/events/<event-slug>/` and contain no capability UUID.
 6. Run gallery and unlock load checks from a trusted machine:
 
@@ -200,7 +201,8 @@ production superuser, photographer account, tenant, and membership.
 
 ## Incident response
 
-Contain first: unpublish an affected event and rotate its event PIN; revoke account or provider
+Contain first: unpublish an affected event and rotate its event PIN (the current PIN is shown in the
+dashboard Publication box); revoke account or provider
 credentials when those credentials are implicated, and block traffic if necessary. There are no
 separate share links to revoke. Do not wait for root-cause certainty. Notify Ballads of Love
 within four hours of a suspected privacy or access incident, using a private channel. Include what is

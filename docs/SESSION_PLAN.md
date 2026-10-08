@@ -458,6 +458,17 @@ instead of consuming every retry. The dashboard offers gallery exclusion only af
 attempts and permits that recovery while the revised upload-until-publish lifecycle keeps the event
 in Uploading.
 
+Optional event PIN follow-up (2026-10-07): the four-digit PIN is now optional and per-event.
+Publication no longer issues or reveals a PIN; it creates the internal portal record with PIN
+protection off, so a new event appears without a PIN until the photographer turns protection on. The
+Publication section has a turn-on/turn-off switch, and when protection is on the PIN is shown as a
+plain box to every dashboard member so it can be shared at any time. One event keeps exactly one PIN
+across off/on toggles and unpublish/re-publish; `Generate a new PIN` remains the leak-response reset
+and is the only path that changes it. Migration `0017` adds `pin_enabled` and a recoverable
+`pin_value` (kept alongside the peppered Argon2 `pin_hash`) and leaves already-issued PINs enforced
+for existing data. Accepted tradeoff: a recoverable four-digit value now exists in the database so
+the dashboard can display it; it remains a UX control, not a strong secret.
+
 **Next action:** The user destroys the old rehearsal resources and deploys this build per runbook
 Phases 3 and 1, then re-runs the Phase 2 exercises (multi-batch upload, publish with an unfinished
 batch, PIN unlock, hidden-then-opened face search, exact-original download, PIN rotation as the leak

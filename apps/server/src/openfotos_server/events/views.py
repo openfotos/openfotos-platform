@@ -51,6 +51,7 @@ from .portfolio_services import (
     create_event_with_cover,
     publish_event_with_portal,
     rotate_portal_pin,
+    set_portal_pin,
     unpublish_event_for_upload,
     update_portfolio_profile,
 )
@@ -583,7 +584,7 @@ def publish_event(request: HttpRequest, event_id) -> HttpResponse:
         )
         return redirect("events:photographer-event", event_id=event.id)
     try:
-        published = publish_event_with_portal(
+        publish_event_with_portal(
             event=event,
             actor=request.user,
             object_store=configured_object_store(),
@@ -594,22 +595,32 @@ def publish_event(request: HttpRequest, event_id) -> HttpResponse:
     except (ValidationError, IngestionError) as exc:
         messages.error(request, "; ".join(exc.messages) if hasattr(exc, "messages") else str(exc))
     else:
-        if published.pin is not None:
-            path = reverse("events:portal-gallery", args=(published.event.slug,))
-            return _private_render(
-                request,
-                "openfotos_events/credential_reveal.html",
-                {
-                    "event": published.event,
-                    "share_url": request.build_absolute_uri(path),
-                    "pin": published.pin,
-                    "capability_label": "Portfolio gallery",
-                    "link_label": "Portfolio link",
-                    "expires_at": published.capability.expires_at,
-                    "return_url": reverse("events:photographer-event", args=(event.id,)),
-                },
-            )
         messages.success(request, "The event gallery is published.")
+    return redirect("events:photographer-event", event_id=event.id)
+
+
+@require_POST
+def set_event_portal_pin(request: HttpRequest, event_id) -> HttpResponse:
+    event = _photographer_event(request, event_id)
+    enabled = request.POST.get("enabled") == "yes"
+    try:
+        set_portal_pin(
+            event=event,
+            enabled=enabled,
+            actor=request.user,
+            request=request,
+        )
+    except PortfolioError as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(
+            request,
+            (
+                "PIN protection is on. The PIN is shown in the Publication section."
+                if enabled
+                else "PIN protection is off. Anyone with the event link can view the gallery."
+            ),
+        )
     return redirect("events:photographer-event", event_id=event.id)
 
 
@@ -617,24 +628,15 @@ def publish_event(request: HttpRequest, event_id) -> HttpResponse:
 def rotate_event_portal_pin(request: HttpRequest, event_id) -> HttpResponse:
     event = _photographer_event(request, event_id)
     try:
-        published = rotate_portal_pin(event=event, actor=request.user, request=request)
+        rotate_portal_pin(event=event, actor=request.user, request=request)
     except PortfolioError as exc:
         messages.error(request, str(exc))
-        return redirect("events:photographer-event", event_id=event.id)
-    path = reverse("events:portal-gallery", args=(published.event.slug,))
-    return _private_render(
-        request,
-        "openfotos_events/credential_reveal.html",
-        {
-            "event": published.event,
-            "share_url": request.build_absolute_uri(path),
-            "pin": published.pin,
-            "capability_label": "Portfolio gallery",
-            "link_label": "Portfolio link",
-            "expires_at": published.capability.expires_at,
-            "return_url": reverse("events:photographer-event", args=(event.id,)),
-        },
-    )
+    else:
+        messages.success(
+            request,
+            "A new event PIN has been generated. It is shown in the Publication section.",
+        )
+    return redirect("events:photographer-event", event_id=event.id)
 
 
 @require_POST

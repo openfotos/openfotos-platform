@@ -49,6 +49,11 @@ urlpatterns = [
         name="unpublish-event",
     ),
     path(
+        "dashboard/events/<uuid:event_id>/portal-pin/",
+        views.set_event_portal_pin,
+        name="set-portal-pin",
+    ),
+    path(
         "dashboard/events/<uuid:event_id>/portal-pin/rotate/",
         views.rotate_event_portal_pin,
         name="rotate-portal-pin",
